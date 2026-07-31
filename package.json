@@ -4,7 +4,16 @@
   "type": "module",
   "version": "0.1.0",
   "description": "Homebridge plugin for UniFi Protect using the official Integration API. API key only — no username or password.",
+  "author": "Ruaan Deysel",
   "license": "Apache-2.0",
+  "homepage": "https://github.com/ruaan-deysel/homebridge-unifi-protect-api#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ruaan-deysel/homebridge-unifi-protect-api.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ruaan-deysel/homebridge-unifi-protect-api/issues"
+  },
   "keywords": ["homebridge-plugin", "unifi", "unifi-protect", "protect", "camera"],
   "main": "dist/index.js",
   "files": ["config.schema.json", "dist", "homebridge-ui"],
@@ -12,7 +21,7 @@
   "scripts": {
     "build": "rimraf ./dist && tsc",
     "gen:zod": "node scripts/gen-zod.mjs",
-    "lint": "eslint .",
+    "lint": "eslint . && tsc -p tsconfig.test.json",
     "lint:fix": "eslint . --fix",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -23,11 +32,13 @@
   },
   "dependencies": {
     "@homebridge/plugin-ui-utils": "^2.0.0",
+    "ws": "^8.21.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@antfu/eslint-config": "^3.12.0",
     "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.13",
     "@vitest/coverage-v8": "^2.1.8",
     "eslint": "^9.17.0",
     "homebridge": "^2.0.0",
