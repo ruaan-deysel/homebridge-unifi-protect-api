@@ -256,11 +256,16 @@ describe('protectClient validation degrades instead of throwing', () => {
     expect(log.warn).toHaveBeenCalledTimes(1)
   })
 
-  it('returns an empty list and warns when a list endpoint returns a non-list', async () => {
-    const { client, log } = harness(async () => jsonResponse({ error: 'nope' }))
+  it('treats a non-list from a list endpoint as the console being unavailable', async () => {
+    const { client } = harness(async () => jsonResponse({ error: 'nope' }))
 
-    await expect(client.getCameras()).resolves.toEqual([])
-    expect(log.warn).toHaveBeenCalledTimes(1)
+    await expect(client.getCameras()).rejects.toBeInstanceOf(ProtectUnavailableError)
+  })
+
+  it('treats an empty body from a list endpoint as the console being unavailable', async () => {
+    const { client } = harness(async () => ({ status: 200, headers: {}, body: Buffer.alloc(0) }))
+
+    await expect(client.getCameras()).rejects.toBeInstanceOf(ProtectUnavailableError)
   })
 })
 

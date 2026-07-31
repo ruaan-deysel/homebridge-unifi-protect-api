@@ -73,13 +73,44 @@ describe('uniFiProtectPlatform', () => {
   })
 
   it('unregisters a device that vanished from a successful discovery', async () => {
+    const survivor = { id: 'cam2', name: 'Garage', modelKey: 'camera' }
+    const { api, platform } = makePlatform(validConfig, [{ id: 'cam1', name: 'Doorbell', modelKey: 'camera' }, survivor])
+    await platform.discover()
+
+    platform.client = makeClient([survivor]) as never
+    await platform.discover()
+
+    expect(api.unregisterPlatformAccessories).toHaveBeenCalledTimes(1)
+    expect(platform.accessories.has('uuid-cam1')).toBe(false)
+  })
+
+  it('unregisters a device the user has since excluded', async () => {
+    const device = { id: 'cam1', name: 'Doorbell', modelKey: 'camera' }
+    const { api, platform } = makePlatform(validConfig, [device])
+    await platform.discover()
+    expect(api.registerPlatformAccessories).toHaveBeenCalledTimes(1)
+
+    const excluded = makePlatform({ ...validConfig, devices: { cam1: { expose: false } } }, [device])
+    for (const [uuid, accessory] of platform.accessories)
+      excluded.platform.configureAccessory({ UUID: uuid, displayName: accessory.displayName, context: {} } as never)
+    await excluded.platform.discover()
+
+    expect(excluded.api.unregisterPlatformAccessories).toHaveBeenCalledTimes(1)
+    expect(excluded.platform.accessories.size).toBe(0)
+  })
+
+  // C1: a discovery that "succeeds" with an empty inventory must never be
+  // treated as authoritative — that path deleted every accessory irreversibly.
+  it('keeps accessories when a successful discovery returns nothing at all', async () => {
     const { api, platform } = makePlatform(validConfig, [{ id: 'cam1', name: 'Doorbell', modelKey: 'camera' }])
     await platform.discover()
+    expect(platform.accessories.size).toBe(1)
 
     platform.client = makeClient([]) as never
     await platform.discover()
 
-    expect(api.unregisterPlatformAccessories).toHaveBeenCalledTimes(1)
+    expect(api.unregisterPlatformAccessories).not.toHaveBeenCalled()
+    expect(platform.accessories.size).toBe(1)
   })
 
   it('keeps accessories when the console is unreachable', async () => {
@@ -106,6 +137,18 @@ describe('uniFiProtectPlatform', () => {
     expect(api.registerPlatformAccessories).toHaveBeenCalledTimes(1)
     expect(api.updatePlatformAccessories).toHaveBeenCalled()
     expect(platform.accessories.get('uuid-cam1')?.displayName).toBe('Front Door')
+  })
+
+  it('skips a device the console returned without an id', async () => {
+    const { api, platform } = makePlatform(validConfig, [
+      { name: 'Nameless', modelKey: 'camera' },
+      { id: 'cam1', name: 'Doorbell', modelKey: 'camera' },
+    ])
+
+    await expect(platform.discover()).resolves.toBeUndefined()
+
+    expect(api.registerPlatformAccessories).toHaveBeenCalledTimes(1)
+    expect(platform.accessories.size).toBe(1)
   })
 
   it('names a device with no name after its id', async () => {
@@ -143,20 +186,58 @@ describe('uniFiProtectPlatform', () => {
 
     const second = makeClient([{ id: 'cam1', name: 'Doorbell', modelKey: 'camera' }])
     platform.client = second as never
-    bus.emit('resyncRequired', 'devices')
-    await platform.discover()
 
-    expect(second.getCameras).toHaveBeenCalled()
+    // The emit alone must drive it — no manual discover() call here, or the
+    // test would pass with the handler deleted.
+    bus.emit('resyncRequired', 'devices')
+
+    await vi.waitFor(() => expect(second.getCameras).toHaveBeenCalled())
   })
 
-  it('coalesces overlapping discovery runs', async () => {
+  it('queues exactly one trailing pass for calls arriving mid-run', async () => {
     const { platform } = makePlatform()
     const client = makeClient([])
     platform.client = client as never
 
-    await Promise.all([platform.discover(), platform.discover()])
+    await Promise.all([platform.discover(), platform.discover(), platform.discover()])
 
-    expect(client.getMetaInfo).toHaveBeenCalledTimes(1)
+    // One run for the first caller, one trailing pass covering the other two.
+    expect(client.getMetaInfo).toHaveBeenCalledTimes(2)
+  })
+
+  it('retries discovery after the console was unreachable', async () => {
+    vi.useFakeTimers()
+    try {
+      const { platform } = makePlatform()
+      const down = makeClient([])
+      down.getMetaInfo = vi.fn(async () => {
+        throw new ProtectUnavailableError('down')
+      })
+      platform.client = down as never
+      await platform.discover()
+
+      const up = makeClient([])
+      platform.client = up as never
+      await vi.advanceTimersByTimeAsync(20_000)
+
+      expect(up.getMetaInfo).toHaveBeenCalled()
+    }
+    finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('lets a later discovery restart a bus that latched on an auth failure', async () => {
+    const { platform, bus } = makePlatform()
+    await platform.discover()
+    expect(bus.start).toHaveBeenCalledTimes(1)
+
+    bus.emit('authFailed', new ProtectAuthError('ws 401'))
+    await platform.discover()
+
+    expect(bus.start).toHaveBeenCalledTimes(2)
+    // Wired once, however many times the bus is restarted.
+    expect(bus.listenerCount('deviceUpdate')).toBe(1)
   })
 
   it('survives a malformed device update frame', async () => {
@@ -166,6 +247,9 @@ describe('uniFiProtectPlatform', () => {
     expect(() => bus.emit('deviceUpdate', { type: 'update', item: { id: 'cam1', modelKey: 'camera' } })).not.toThrow()
     expect(() => bus.emit('deviceUpdate', null)).not.toThrow()
     expect(() => bus.emit('deviceUpdate', { item: { modelKey: 'unicorn' } })).not.toThrow()
+    // Inherited Object.prototype keys must not resolve to a "schema".
+    for (const key of ['constructor', 'toString', 'valueOf', 'hasOwnProperty', '__proto__'])
+      expect(() => bus.emit('deviceUpdate', { item: { id: 'cam1', modelKey: key } })).not.toThrow()
     expect(platform.accessories.get('uuid-cam1')?.displayName).toBe('Doorbell')
   })
 

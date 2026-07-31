@@ -146,9 +146,15 @@ export class ProtectClient {
 
   private async getValidatedList<S extends z.ZodType>(schema: S, path: string): Promise<z.infer<S>[]> {
     const payload = await this.getJson(path)
+    // A non-array is a broken response, NEVER "no devices". Degrading to []
+    // here would let a rebooting console's empty body or HTML error page look
+    // like a successful discovery of zero devices, and callers that reconcile
+    // against that would delete the user's accessories irreversibly.
     if (!Array.isArray(payload)) {
-      this.warnOnce(`${path}: expected a list but the console returned ${typeof payload}. Ignoring.`)
-      return []
+      throw new ProtectUnavailableError(
+        `GET ${path} returned ${typeof payload}, not a list`,
+        'The console is probably still starting up.',
+      )
     }
     // Validated per item so one malformed device does not discard the rest.
     return payload.map(item => this.validate(schema, item, path))

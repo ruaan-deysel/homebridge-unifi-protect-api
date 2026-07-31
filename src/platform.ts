@@ -20,13 +20,17 @@ export interface DiscoveredDevice {
  * because an update frame carries only the fields that changed — the full
  * device schema would reject every real frame.
  */
-const deviceSchemas: Record<string, z.ZodType> = {
-  camera: cameraSchema.partial(),
-  light: lightSchema.partial(),
-  sensor: sensorSchema.partial(),
-  chime: chimeSchema.partial(),
-  viewer: viewerSchema.partial(),
-}
+const deviceSchemas = new Map<string, z.ZodType>([
+  ['camera', cameraSchema.partial()],
+  ['light', lightSchema.partial()],
+  ['sensor', sensorSchema.partial()],
+  ['chime', chimeSchema.partial()],
+  ['viewer', viewerSchema.partial()],
+])
+
+/** Floor and ceiling for the discovery retry backoff. */
+const RETRY_MIN_MS = 15_000
+const RETRY_MAX_MS = 300_000
 
 function labelFor(device: DiscoveredDevice): string {
   return device.name?.trim() || `Protect ${device.modelKey} ${device.id}`
@@ -39,7 +43,11 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
   private config?: ProtectPluginConfig
   private authFailed = false
   private eventsStarted = false
+  private busWired = false
   private inFlight?: Promise<void>
+  private pending = false
+  private retryTimer?: ReturnType<typeof setTimeout>
+  private retryDelayMs = RETRY_MIN_MS
 
   constructor(
     private readonly log: Logging,
@@ -57,8 +65,21 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
     this.client = new ProtectClient({ host: this.config.host, apiKey: this.config.apiKey, log: this.log })
     this.events = new ProtectEvents({ host: this.config.host, apiKey: this.config.apiKey, log: this.log })
 
-    this.api.on('didFinishLaunching', () => void this.discover())
-    this.api.on('shutdown', () => this.events?.stop())
+    this.api.on('didFinishLaunching', () => this.discoverSafely())
+    this.api.on('shutdown', () => {
+      clearTimeout(this.retryTimer)
+      this.events?.stop()
+    })
+  }
+
+  /**
+   * Every fire-and-forget entry point goes through here. An unhandled rejection
+   * is a process exit on Node >= 15, which would take all of Homebridge down.
+   */
+  private discoverSafely(): void {
+    this.discover().catch((error: unknown) => {
+      this.log.error(`Discovery failed unexpectedly: ${error instanceof Error ? error.message : String(error)}`)
+    })
   }
 
   /** Homebridge replays cached accessories here on startup, before discovery. */
@@ -68,15 +89,25 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
 
   /**
    * Concurrent callers (both subscriptions reconnecting at once) join the run
-   * already in flight rather than racing two reconciliations over one cache.
-   * ponytail: coalescing, not queueing — a resync arriving mid-run reuses that
-   * run's inventory. Queue a trailing pass if that staleness ever bites.
+   * already in flight rather than racing two reconciliations over one cache,
+   * and queue exactly one trailing pass — a resync that arrives mid-run would
+   * otherwise be answered with REST reads that pre-date the change it exists to
+   * recover, and there is no polling anywhere to catch up later.
    */
   discover(): Promise<void> {
-    this.inFlight ??= this.runDiscovery().finally(() => {
+    if (this.inFlight) {
+      this.pending = true
+      return this.inFlight
+    }
+    this.inFlight = this.runDiscovery().finally(() => {
       this.inFlight = undefined
     })
-    return this.inFlight
+    return this.inFlight.then(() => {
+      if (!this.pending)
+        return
+      this.pending = false
+      return this.discover()
+    })
   }
 
   private async runDiscovery(): Promise<void> {
@@ -98,11 +129,30 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
       // Console unreachable. Keep every cached accessory — a rebooting console
       // must not wipe HomeKit rooms, scenes and automations.
       this.log.warn(`Could not reach the Protect console, keeping existing accessories. ${(error as Error).message}`)
+      // Without this the plugin is dead until Homebridge restarts: no bus means
+      // no resyncRequired, and nothing else ever retries. A power cut boots the
+      // Pi well before the console.
+      this.scheduleRetry()
       return
     }
 
+    this.retryDelayMs = RETRY_MIN_MS
     this.reconcile(devices)
     this.startEvents()
+  }
+
+  private scheduleRetry(): void {
+    if (this.retryTimer)
+      return
+    const delay = this.retryDelayMs
+    this.retryDelayMs = Math.min(delay * 2, RETRY_MAX_MS)
+    this.log.info(`Retrying discovery in ${Math.round(delay / 1000)}s.`)
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = undefined
+      this.discoverSafely()
+    }, delay)
+    // A pending retry must never hold the process open.
+    this.retryTimer.unref?.()
   }
 
   private async fetchInventory(): Promise<DiscoveredDevice[]> {
@@ -113,7 +163,9 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
       this.client.getChimes(),
       this.client.getViewers(),
     ])
-    this.log.info(`Discovered ${cameras.length} camera(s), ${lights.length} light(s), ${sensors.length} sensor(s), ${chimes.length} chime(s), ${viewers.length} viewer(s).`)
+    // Console inventory, before the expose filter — "Added" lines below report
+    // what actually reached HomeKit.
+    this.log.info(`The console reports ${cameras.length} camera(s), ${lights.length} light(s), ${sensors.length} sensor(s), ${chimes.length} chime(s), ${viewers.length} viewer(s).`)
     return [...cameras, ...lights, ...sensors, ...chimes, ...viewers] as DiscoveredDevice[]
   }
 
@@ -122,6 +174,13 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
     const wanted = new Map<string, DiscoveredDevice>()
 
     for (const device of devices) {
+      // `validate` degrades to the raw payload on a schema mismatch, so `id` is
+      // only probably a string. `hap.uuid.generate(undefined)` throws inside
+      // crypto, and this runs off a fire-and-forget promise.
+      if (typeof device.id !== 'string' || device.id === '') {
+        this.log.warn('Skipping a device the console returned without an id.')
+        continue
+      }
       if (!settingsFor(config, device.id).expose)
         continue
       wanted.set(this.api.hap.uuid.generate(device.id), device)
@@ -134,6 +193,8 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
         // Config is keyed by device id, so a rename only touches the label.
         existing.context.device = device
         if (existing.displayName !== label) {
+          // Only persists to the accessory cache — it does NOT rename anything
+          // in HomeKit. Sub-project 2 must drive Name/ConfiguredName for that.
           existing.displayName = label
           this.api.updatePlatformAccessories([existing])
           this.log.info(`Renamed ${device.id} to "${label}".`)
@@ -144,11 +205,22 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
       const accessory = new this.api.platformAccessory(label, uuid)
       // Sub-project 2 diffs capability flags off this; services live there, not here.
       accessory.context.device = device
-      // Bridged, always. Never publishExternalAccessories — a child bridge must
-      // hold every camera under one pairing.
+      // Bridged, always — never published as an external accessory. A child
+      // bridge must hold every camera under one pairing.
       this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory])
       this.accessories.set(uuid, accessory)
       this.log.info(`Added ${device.modelKey} "${label}".`)
+    }
+
+    // Belt to the client's braces. An inventory that is empty while the cache is
+    // not is far more likely a console answering during a reboot than a user who
+    // deleted every device at once — and unregistering is irreversible: HomeKit
+    // rooms, scenes and automations do not come back.
+    // ponytail: a user who genuinely removes their last Protect device must
+    // delete that one accessory by hand. A vastly better failure than the other.
+    if (devices.length === 0 && this.accessories.size > 0) {
+      this.log.warn(`The console reported no devices at all while ${this.accessories.size} accessory/ies are cached. Keeping them — remove any genuinely stale accessory by hand.`)
+      return
     }
 
     for (const [uuid, accessory] of this.accessories) {
@@ -164,10 +236,25 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
     if (this.eventsStarted)
       return
     this.eventsStarted = true
-    // Frames missed while a socket was down are never replayed, so a reconnect
-    // must be followed by a full REST discovery pass.
-    this.events.on('resyncRequired', () => void this.discover())
-    this.events.on('deviceUpdate', (frame: unknown) => this.applyDeviceUpdate(frame))
+
+    // Wiring is separate from starting: `start()` clears the bus's own latched
+    // auth failure, so it can legitimately be called more than once, but the
+    // listeners must be attached exactly once.
+    if (!this.busWired) {
+      this.busWired = true
+      // Frames missed while a socket was down are never replayed, so a reconnect
+      // must be followed by a full REST discovery pass.
+      this.events.on('resyncRequired', () => this.discoverSafely())
+      this.events.on('deviceUpdate', (frame: unknown) => this.applyDeviceUpdate(frame))
+      // The bus latches internally on a 401 and stops retrying. Without this the
+      // subscriptions die while REST still works, and HomeKit goes stale
+      // forever — there is no polling fallback anywhere in this plugin.
+      this.events.on('authFailed', () => {
+        this.log.error('The Protect console rejected the API key on the event subscriptions. HomeKit will not see live changes until they reconnect.')
+        this.eventsStarted = false
+        this.scheduleRetry()
+      })
+    }
     this.events.start()
   }
 
@@ -178,7 +265,10 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
     if (typeof modelKey !== 'string')
       return
 
-    const schema = deviceSchemas[modelKey]
+    // A Map, not an object: `modelKey: "constructor"` would find an inherited
+    // function on a plain object's prototype, pass the falsy check, and throw
+    // out of a handler that must never throw.
+    const schema = deviceSchemas.get(modelKey)
     if (!schema)
       return
 
