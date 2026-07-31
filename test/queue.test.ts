@@ -27,13 +27,20 @@ describe('requestQueue', () => {
     expect(peak).toBe(2)
   })
 
-  it('never exceeds concurrency when completions trigger new submissions', async () => {
-    // Regression test for a semaphore race: release() must hand a freed slot
-    // directly to the next waiter instead of decrementing-then-waking, or a
-    // brand-new acquire() call arriving in that gap can steal it. The prior
-    // test alone can't catch this because all its tasks are submitted
-    // upfront; this one resubmits from inside a completion handler (no
-    // intervening await), the exact interleaving that exposes the gap.
+  it('never exceeds concurrency under continuous resubmission (sanity check)', async () => {
+    // NOT a regression guard for the acquire()/release() handoff race that
+    // motivated rewriting those two methods (see queue.ts comments). That
+    // race requires a fresh acquire() to run its fast-path check strictly
+    // between release()'s decrement and the woken waiter's own increment —
+    // and under Node's single microtask queue plus vitest's fake timers
+    // (which fully drain microtasks between macrotask/timer callbacks),
+    // nothing can land in that gap: chained resubmission via `.then()` is
+    // always sequenced after the very wake-up it would need to race, and an
+    // independently-scheduled timer firing on the same tick was tried
+    // empirically and also could not land in the window. This test is kept
+    // only as a broader concurrency sanity check under a more adversarial
+    // submission pattern than the test above (which submits everything
+    // upfront); it would pass identically against the pre-fix code.
     const queue = new RequestQueue({ concurrency: 2 })
     let active = 0
     let peak = 0
@@ -126,5 +133,48 @@ describe('requestQueue', () => {
     await vi.runAllTimersAsync()
 
     await assertion
+  })
+
+  it('maxRetries: 0 means exactly one attempt, no retries', async () => {
+    const queue = new RequestQueue({ concurrency: 1, maxRetries: 0, baseDelayMs: 10 })
+    let attempts = 0
+    const task = async () => {
+      attempts++
+      throw new ProtectUnavailableError('down')
+    }
+
+    const promise = queue.run(task)
+    const assertion = expect(promise).rejects.toBeInstanceOf(ProtectUnavailableError)
+    await vi.runAllTimersAsync()
+
+    await assertion
+    expect(attempts).toBe(1)
+  })
+
+  it('runs tasks in submission order under contention', async () => {
+    // concurrency: 1 makes this unambiguous — only one task can be active at
+    // a time, so completion order can only match the FIFO `waiting` queue's
+    // admission order, never scheduling/timer tie-breaks.
+    const queue = new RequestQueue({ concurrency: 1 })
+    const order: number[] = []
+    const mkTask = (id: number, delayMs: number) => async () => {
+      await new Promise<void>(resolve => setTimeout(resolve, delayMs))
+      order.push(id)
+    }
+
+    // Delays deliberately out of step with submission order — if the queue
+    // ever let a later, faster task cut ahead of an earlier, slower one that
+    // is still waiting, this would catch it.
+    const all = Promise.all([
+      queue.run(mkTask(1, 15)),
+      queue.run(mkTask(2, 5)),
+      queue.run(mkTask(3, 10)),
+      queue.run(mkTask(4, 1)),
+      queue.run(mkTask(5, 1)),
+    ])
+    await vi.runAllTimersAsync()
+    await all
+
+    expect(order).toEqual([1, 2, 3, 4, 5])
   })
 })

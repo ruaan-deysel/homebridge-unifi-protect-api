@@ -37,6 +37,15 @@ export class RequestQueue {
   }
 
   private async attempt<T>(task: () => Promise<T>): Promise<T> {
+    // Retries run here, inside the concurrency slot acquired by run(), not by
+    // re-queuing the task. This deliberately holds the slot for the whole
+    // backoff chain: with concurrency: 1 and a long run of real Retry-After
+    // delays, every other queued request waits out the full chain too. That
+    // is the intended tradeoff, not an oversight — a 429/503 means the
+    // console is telling us to back off, so releasing the slot and letting a
+    // fresh request in would likely just draw a second throttle response.
+    // Retrying in place also preserves submission order: a retrying request
+    // keeps its spot instead of letting newer requests cut in front of it.
     let lastError: unknown
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
       try {
@@ -50,6 +59,10 @@ export class RequestQueue {
         await sleep(serverDelay ?? this.baseDelayMs * 2 ** attempt)
       }
     }
+    // Unreachable: the loop above always returns or throws on its final
+    // iteration (attempt === this.maxRetries forces the `throw error`
+    // branch). This just satisfies TypeScript's control-flow analysis for
+    // the return type — it is not live give-up logic.
     throw lastError
   }
 
