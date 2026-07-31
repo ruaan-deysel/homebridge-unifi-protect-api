@@ -1,0 +1,93 @@
+<style>
+  .up-row { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; margin-bottom: .5rem; }
+  .up-card { border: 1px solid rgba(128,128,128,.3); border-radius: 6px; padding: .75rem; margin-bottom: .5rem; }
+  .up-muted { opacity: .7; font-size: .85rem; }
+  .up-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: .25rem .75rem; }
+</style>
+
+<div class="up-row">
+  <label for="host">Console</label>
+  <input class="form-control" id="host" placeholder="192.168.1.1" style="max-width: 14rem">
+  <label for="apiKey">API Key</label>
+  <input class="form-control" id="apiKey" type="password" style="max-width: 20rem">
+  <button class="btn btn-primary" id="test" type="button">Test Connection</button>
+</div>
+
+<div class="up-row up-muted" id="status" aria-live="polite"></div>
+<div id="devices"></div>
+
+<script type="module">
+  import { ensureConfig, setDeviceSetting } from './config-ops.js'
+
+  const statusEl = document.getElementById('status')
+  const devicesEl = document.getElementById('devices')
+  const hostEl = document.getElementById('host')
+  const keyEl = document.getElementById('apiKey')
+
+  let config = ensureConfig((await homebridge.getPluginConfig())[0])
+  hostEl.value = config.host
+  keyEl.value = config.apiKey
+
+  const save = async () => {
+    await homebridge.updatePluginConfig([config])
+    await homebridge.savePluginConfig()
+  }
+
+  const settingOf = (id, key, fallback) => config.devices[id]?.[key] ?? fallback
+
+  function render(devices) {
+    devicesEl.replaceChildren()
+    for (const device of devices) {
+      const card = document.createElement('div')
+      card.className = 'up-card'
+      card.innerHTML = `<strong>${device.name}</strong> <span class="up-muted">${device.type}</span>`
+
+      const grid = document.createElement('div')
+      grid.className = 'up-grid'
+
+      const toggle = (key, label, fallback) => {
+        const id = `${device.id}-${key}`
+        const wrap = document.createElement('label')
+        wrap.setAttribute('for', id)
+        wrap.innerHTML = `<input type="checkbox" id="${id}"> ${label}`
+        const input = wrap.querySelector('input')
+        input.checked = Boolean(settingOf(device.id, key, fallback))
+        input.addEventListener('change', async () => {
+          config = setDeviceSetting(config, device.id, key, input.checked)
+          await save()
+        })
+        grid.append(wrap)
+      }
+
+      toggle('expose', 'Expose in HomeKit', config.defaults.exposeNewDevices)
+      // Capability-driven: a control is only offered when the hardware can
+      // honour it, so the UI never lets someone flip a setting that will
+      // silently do nothing.
+      if (device.type === 'camera') {
+        toggle('hksv', 'HomeKit Secure Video', config.defaults.hksv)
+        if (device.hasSpeaker)
+          toggle('talkback', 'Two-way audio', false)
+      }
+
+      card.append(grid)
+      devicesEl.append(card)
+    }
+  }
+
+  document.getElementById('test').addEventListener('click', async () => {
+    statusEl.textContent = 'Connecting…'
+    // The key is only ever sent to the local server-side handler over the
+    // homebridge IPC channel — never logged, never echoed back into the DOM.
+    config = { ...config, host: hostEl.value.trim(), apiKey: keyEl.value.trim() }
+    try {
+      const info = await homebridge.request('/test-connection', { host: config.host, apiKey: config.apiKey })
+      statusEl.textContent = `Connected — ${info.nvrName}, Protect ${info.version}`
+      await save()
+      const { devices } = await homebridge.request('/discover', { host: config.host, apiKey: config.apiKey })
+      render(devices)
+    }
+    catch (error) {
+      statusEl.textContent = error.message
+    }
+  })
+</script>

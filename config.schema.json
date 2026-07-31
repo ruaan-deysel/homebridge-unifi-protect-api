@@ -1,0 +1,16 @@
+{
+  "pluginAlias": "UniFiProtect",
+  "pluginType": "platform",
+  "singular": true,
+  "customUi": true,
+  "customUiPath": "./homebridge-ui",
+  "headerDisplay": "UniFi Protect over the official Integration API. Uses an API key — never your UniFi username or password. Configure everything below; no JSON editing required.",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "name": { "title": "Platform Name", "type": "string", "default": "UniFi Protect", "required": true },
+      "host": { "title": "Console IP or hostname", "type": "string", "required": true },
+      "apiKey": { "title": "API Key", "type": "string", "required": true }
+    }
+  }
+}
