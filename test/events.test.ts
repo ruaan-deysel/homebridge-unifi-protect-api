@@ -92,6 +92,9 @@ describe('protectEvents', () => {
     expect(FakeSocket.instances[0]!.options).toEqual({
       headers: { 'X-API-KEY': 'SECRET-KEY' },
       rejectUnauthorized: false,
+      // Without this `ws` waits forever on a console that accepts the TCP
+      // connection but never answers the upgrade.
+      handshakeTimeout: 15_000,
     })
     events.stop()
   })
@@ -425,9 +428,25 @@ describe('protectEvents', () => {
     eventStream.fail() // this one is down, with a reconnect pending
 
     events.start()
+    // The redial must cancel the pending reconnect timer, not race it.
+    await vi.advanceTimersByTimeAsync(120_000)
 
     expect(FakeSocket.instances).toHaveLength(3) // devices untouched, events redialled
     expect(devices.readyState).toBe(1)
+    events.stop()
+  })
+
+  it('redials a channel whose socket is closing', () => {
+    const events = makeEvents()
+    events.start()
+    const devices = FakeSocket.instances[0]!
+    devices.open()
+    devices.readyState = 2 // CLOSING — going away, so it must not be left alone
+
+    events.start()
+
+    expect(FakeSocket.instances).toHaveLength(3)
+    expect(FakeSocket.instances.at(-1)!.url).toContain('/subscribe/devices')
     events.stop()
   })
 

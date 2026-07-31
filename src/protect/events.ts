@@ -47,6 +47,17 @@ const PING_INTERVAL_MS = 30_000
 const STABLE_AFTER_MS = 30_000
 
 /**
+ * Bounds the upgrade — `ws` waits forever by default; see the note in `connect`.
+ *
+ * Measured, not assumed: over `wss://` the effective wait is **double** this,
+ * because the timeout is armed once for the TCP connect and again once the
+ * TLSSocket is wrapped (`ws` 5s → errored at 10.0s, 15s → 30.0s; plain `ws://`
+ * 5s → 5.0s). So this is a ~30s real bound, which is the right order for a
+ * console that is rebooting rather than dead.
+ */
+const HANDSHAKE_TIMEOUT_MS = 15_000
+
+/**
  * Keeps both Protect subscriptions alive. There is no polling anywhere in this
  * plugin — every state change arrives here.
  */
@@ -149,6 +160,14 @@ export class ProtectEvents extends EventEmitter<ProtectEventsMap> {
     const socket = this.makeSocket(url, {
       headers: { 'X-API-KEY': this.apiKey },
       rejectUnauthorized: false,
+      // `ws` has no default handshake timeout. A console that accepts the TCP
+      // connection and then never answers the upgrade — a half-dead UDM, or a
+      // stalled reverse proxy — leaves the socket CONNECTING forever: the
+      // watchdog is only armed in `onopen`, `scheduleReconnect` only fires from
+      // `onclose`, and `start()` skips a CONNECTING channel. Nothing else
+      // recovers it. Bounding the wait turns the wedge into a normal
+      // error -> close -> backoff cycle.
+      handshakeTimeout: HANDSHAKE_TIMEOUT_MS,
     })
     state.socket = socket
 
