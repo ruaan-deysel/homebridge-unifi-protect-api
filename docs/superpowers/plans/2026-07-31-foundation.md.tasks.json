@@ -1,0 +1,88 @@
+{
+  "planPath": "docs/superpowers/plans/2026-07-31-foundation.md",
+  "tasks": [
+    {
+      "id": 0,
+      "subject": "Task 0: Project scaffold",
+      "status": "completed",
+      "description": "**Goal:** A buildable, lintable, testable empty plugin that Homebridge can load.\n\n**Files:**\n- Create: `package.json`, `tsconfig.json`, `eslint.config.js`, `vitest.config.ts`, `nodemon.json`, `.npmignore`, `.github/workflows/build.yml`, `src/settings.ts`, `src/index.ts`\n- Leave alone: `.gitignore`\n- Test: `test/settings.test.ts`\n\n**Acceptance Criteria:**\n- [ ] npm run build emits dist/index.js with no TypeScript errors\n- [ ] npm run lint exits 0\n- [ ] npm test exits 0 with at least one passing test\n- [ ] package.json runtime dependencies contains exactly zod and @homebridge/plugin-ui-utils\n- [ ] CI runs lint, test and build on node 22 and 24\n\n**Verify:** `npm run lint && npm test && npm run build` -> all exit 0, `dist/index.js` exists\n\nFull step-by-step code is in `docs/superpowers/plans/2026-07-31-foundation.md`.\n\n```json:metadata\n{\"files\":[\"package.json\",\"tsconfig.json\",\"eslint.config.js\",\"vitest.config.ts\",\"nodemon.json\",\".npmignore\",\".github/workflows/build.yml\",\"src/settings.ts\",\"src/index.ts\",\"test/settings.test.ts\"],\"verifyCommand\":\"npm run lint && npm test && npm run build\",\"modelTier\":\"mechanical\",\"acceptanceCriteria\":[\"npm run build emits dist/index.js with no TypeScript errors\",\"npm run lint exits 0\",\"npm test exits 0 with at least one passing test\",\"package.json runtime dependencies contains exactly zod and @homebridge/plugin-ui-utils\",\"CI runs lint, test and build on node 22 and 24\"]}\n```"
+    },
+    {
+      "id": 1,
+      "subject": "Task 1: Vendor spec, fixtures, generate Zod",
+      "status": "completed",
+      "description": "**Goal:** `src/protect/schemas.ts` generated from the vendored OpenAPI document, proven correct by parsing real payloads captured from live hardware.\n\n**Files:**\n- Create: `spec/protect-7.1.87.openapi.json`, `scripts/gen-zod.mjs`, `src/protect/schemas.ts` (generated, committed)\n- Create: `test/fixtures/{cameras,chimes,liveviews,nvrs,meta-info,rtsps-stream}.json`\n- Create: `test/schemas.test.ts`\n\n**Acceptance Criteria:**\n- [ ] gen:zod is deterministic - running twice produces no diff\n- [ ] generated file compiles under tsc strict\n- [ ] every captured fixture parses against its generated schema\n- [ ] object schemas use z.looseObject so unknown firmware fields survive\n- [ ] fixtures contain no real MACs, device ids or stream tokens\n\n**Verify:** `npm run gen:zod && git diff --exit-code src/protect/schemas.ts && npx tsc --noEmit && npx vitest run test/schemas.test.ts` -> exit 0\n\nFull step-by-step code is in `docs/superpowers/plans/2026-07-31-foundation.md`.\n\n```json:metadata\n{\"files\":[\"spec/protect-7.1.87.openapi.json\",\"scripts/gen-zod.mjs\",\"src/protect/schemas.ts\",\"test/fixtures/cameras.json\",\"test/schemas.test.ts\"],\"verifyCommand\":\"npm run gen:zod && git diff --exit-code src/protect/schemas.ts && npx tsc --noEmit && npx vitest run test/schemas.test.ts\",\"modelTier\":\"frontier\",\"acceptanceCriteria\":[\"gen:zod is deterministic - running twice produces no diff\",\"generated file compiles under tsc strict\",\"every captured fixture parses against its generated schema\",\"object schemas use z.looseObject so unknown firmware fields survive\",\"fixtures contain no real MACs, device ids or stream tokens\"]}\n```",
+      "blockedBy": [
+        0
+      ]
+    },
+    {
+      "id": 2,
+      "subject": "Task 2: Errors and throttling request queue",
+      "status": "completed",
+      "description": "**Goal:** Typed errors and a concurrency-limited queue with backoff, both independently testable.\n\n**Files:**\n- Create: `src/protect/errors.ts`, `src/protect/queue.ts`\n- Test: `test/queue.test.ts`\n\n**Acceptance Criteria:**\n- [ ] queue never exceeds configured concurrency\n- [ ] tasks execute in submission order\n- [ ] retryable failures retry with exponential backoff up to maxRetries\n- [ ] ProtectAuthError is never retried\n- [ ] Retry-After delay is honoured\n\n**Verify:** `npx vitest run test/queue.test.ts` -> all passing\n\nFull step-by-step code is in `docs/superpowers/plans/2026-07-31-foundation.md`.\n\n```json:metadata\n{\"files\":[\"src/protect/errors.ts\",\"src/protect/queue.ts\",\"test/queue.test.ts\"],\"verifyCommand\":\"npx vitest run test/queue.test.ts\",\"modelTier\":\"standard\",\"acceptanceCriteria\":[\"queue never exceeds configured concurrency\",\"tasks execute in submission order\",\"retryable failures retry with exponential backoff up to maxRetries\",\"ProtectAuthError is never retried\",\"Retry-After delay is honoured\"]}\n```",
+      "blockedBy": [
+        0
+      ]
+    },
+    {
+      "id": 3,
+      "subject": "Task 3: REST client",
+      "status": "completed",
+      "description": "**Goal:** A typed, validating client for every Protect endpoint the plugin consumes.\n\n**Files:**\n- Create: `src/protect/client.ts`\n- Test: `test/client.test.ts`\n\n**Acceptance Criteria:**\n- [ ] requests target the integration API base path with X-API-KEY header\n- [ ] status codes map to correct typed errors including Retry-After parsing\n- [ ] validation failure logs a warning and returns raw payload without throwing\n- [ ] the same warning is emitted at most once per session\n- [ ] the API key never appears in any log line or error message\n- [ ] getSnapshot returns a Buffer without JSON parsing\n\n**Verify:** `npx vitest run test/client.test.ts` -> all passing\n\nFull step-by-step code is in `docs/superpowers/plans/2026-07-31-foundation.md`.\n\n```json:metadata\n{\"files\":[\"src/protect/client.ts\",\"test/client.test.ts\"],\"verifyCommand\":\"npx vitest run test/client.test.ts\",\"modelTier\":\"frontier\",\"acceptanceCriteria\":[\"requests target the integration API base path with X-API-KEY header\",\"status codes map to correct typed errors including Retry-After parsing\",\"validation failure logs a warning and returns raw payload without throwing\",\"the same warning is emitted at most once per session\",\"the API key never appears in any log line or error message\",\"getSnapshot returns a Buffer without JSON parsing\"]}\n```",
+      "blockedBy": [
+        1,
+        2
+      ]
+    },
+    {
+      "id": 4,
+      "subject": "Task 4: WebSocket event bus",
+      "status": "completed",
+      "description": "**Goal:** Both Protect subscriptions kept alive, delivering typed events, with reconnect-and-resync.\n\n**Files:**\n- Create: `src/protect/events.ts`\n- Test: `test/events.test.ts`\n\n**Acceptance Criteria:**\n- [ ] opens both subscribe endpoints with the X-API-KEY header\n- [ ] emits deviceUpdate and protectEvent with parsed payloads\n- [ ] a malformed frame is skipped without tearing down the socket\n- [ ] reconnects with exponential backoff after unexpected close\n- [ ] emits resyncRequired after reconnect but never after first connect\n- [ ] stop() closes both sockets and cancels pending timers\n\n**Verify:** `npx vitest run test/events.test.ts` -> all passing\n\nFull step-by-step code is in `docs/superpowers/plans/2026-07-31-foundation.md`.\n\n```json:metadata\n{\"files\":[\"src/protect/events.ts\",\"test/events.test.ts\"],\"verifyCommand\":\"npx vitest run test/events.test.ts\",\"modelTier\":\"frontier\",\"acceptanceCriteria\":[\"opens both subscribe endpoints with the X-API-KEY header\",\"emits deviceUpdate and protectEvent with parsed payloads\",\"a malformed frame is skipped without tearing down the socket\",\"reconnects with exponential backoff after unexpected close\",\"emits resyncRequired after reconnect but never after first connect\",\"stop() closes both sockets and cancels pending timers\"]}\n```",
+      "blockedBy": [
+        2
+      ]
+    },
+    {
+      "id": 5,
+      "subject": "Task 5: Configuration model",
+      "status": "completed",
+      "description": "**Goal:** Zod-validated plugin config with defaults merging keyed by device id.\n\n**Files:**\n- Create: `src/config.ts`\n- Test: `test/config.test.ts`\n\n**Acceptance Criteria:**\n- [ ] missing host or apiKey is rejected with a message naming the field\n- [ ] omitted defaults produce exposeNewDevices true, quality high, hksv false\n- [ ] settingsFor merges device overrides over defaults\n- [ ] unknown device id follows exposeNewDevices\n- [ ] hksv defaults to false\n\n**Verify:** `npx vitest run test/config.test.ts` -> all passing\n\nFull step-by-step code is in `docs/superpowers/plans/2026-07-31-foundation.md`.\n\n```json:metadata\n{\"files\":[\"src/config.ts\",\"test/config.test.ts\"],\"verifyCommand\":\"npx vitest run test/config.test.ts\",\"modelTier\":\"standard\",\"acceptanceCriteria\":[\"missing host or apiKey is rejected with a message naming the field\",\"omitted defaults produce exposeNewDevices true, quality high, hksv false\",\"settingsFor merges device overrides over defaults\",\"unknown device id follows exposeNewDevices\",\"hksv defaults to false\"]}\n```",
+      "blockedBy": [
+        0
+      ]
+    },
+    {
+      "id": 6,
+      "subject": "Task 6: Platform discovery and reconciliation",
+      "status": "completed",
+      "description": "**Goal:** A Homebridge dynamic platform that authenticates, discovers the device inventory, reconciles the accessory cache, and wires the event bus. No accessory services yet.\n\n**Files:**\n- Create: `src/platform.ts`\n- Modify: `src/index.ts`\n- Test: `test/platform.test.ts`\n\n**Acceptance Criteria:**\n- [ ] invalid config logs an error naming the problem and does not start\n- [ ] ProtectAuthError logs the remedy and does not start the event bus\n- [ ] each exposed device produces exactly one accessory via registerPlatformAccessories\n- [ ] publishExternalAccessories is never called\n- [ ] vanished devices unregister only when discovery succeeded\n- [ ] accessories are retained when the console is unreachable\n- [ ] rename updates displayName without re-registering\n- [ ] resyncRequired triggers a fresh discovery pass\n\n**Verify:** `npx vitest run test/platform.test.ts && npm run build` -> all passing, build exits 0\n\nFull step-by-step code is in `docs/superpowers/plans/2026-07-31-foundation.md`.\n\n```json:metadata\n{\"files\":[\"src/platform.ts\",\"src/index.ts\",\"test/platform.test.ts\"],\"verifyCommand\":\"npx vitest run test/platform.test.ts && npm run build\",\"modelTier\":\"frontier\",\"acceptanceCriteria\":[\"invalid config logs an error naming the problem and does not start\",\"ProtectAuthError logs the remedy and does not start the event bus\",\"each exposed device produces exactly one accessory via registerPlatformAccessories\",\"publishExternalAccessories is never called\",\"vanished devices unregister only when discovery succeeded\",\"accessories are retained when the console is unreachable\",\"rename updates displayName without re-registering\",\"resyncRequired triggers a fresh discovery pass\"]}\n```",
+      "blockedBy": [
+        3,
+        4,
+        5
+      ]
+    },
+    {
+      "id": 7,
+      "subject": "Task 7: Custom configuration UI",
+      "status": "completed",
+      "description": "**Goal:** A Homebridge UI that tests the connection, discovers real devices, and persists per-device settings without any JSON editing.\n\n**Files:**\n- Create: `config.schema.json`, `homebridge-ui/server.js`, `homebridge-ui/public/config-ops.js`, `homebridge-ui/public/index.html`\n- Test: `test/config-ops.test.ts`, `test/ui-server.test.ts`\n\n**Acceptance Criteria:**\n- [ ] config.schema.json sets customUi true and customUiPath\n- [ ] /test-connection returns version and nvrName on success\n- [ ] /test-connection distinguishes bad key from unreachable host\n- [ ] /discover returns id, name, type and capability flags\n- [ ] setDeviceSetting writes only non-default values and prunes empty entries\n- [ ] setting a value equal to the default removes the override\n\n**Verify:** `npx vitest run test/config-ops.test.ts test/ui-server.test.ts` -> all passing\n\nFull step-by-step code is in `docs/superpowers/plans/2026-07-31-foundation.md`.\n\n```json:metadata\n{\"files\":[\"config.schema.json\",\"homebridge-ui/server.js\",\"homebridge-ui/public/config-ops.js\",\"homebridge-ui/public/index.html\",\"test/config-ops.test.ts\",\"test/ui-server.test.ts\"],\"verifyCommand\":\"npx vitest run test/config-ops.test.ts test/ui-server.test.ts\",\"modelTier\":\"standard\",\"acceptanceCriteria\":[\"config.schema.json sets customUi true and customUiPath\",\"/test-connection returns version and nvrName on success\",\"/test-connection distinguishes bad key from unreachable host\",\"/discover returns id, name, type and capability flags\",\"setDeviceSetting writes only non-default values and prunes empty entries\",\"setting a value equal to the default removes the override\"]}\n```",
+      "blockedBy": [
+        5
+      ]
+    },
+    {
+      "id": 8,
+      "subject": "Task 8: Live smoke check and README",
+      "status": "completed",
+      "description": "**Goal:** A repeatable hardware check and honest user-facing documentation.\n\n**USER-ORDERED GATE — NON-SKIPPABLE.** This task was requested by the user in the current conversation. It MUST NOT be closed by walking around it, by declaring it \"verified inline\", or by substituting a cheaper check. Close only after every item in `acceptanceCriteria` has been re-validated independently, with output captured.\n\n**Files:**\n- Create: `scripts/live-check.mjs`, `README.md`, `.env.example`\n- Verify only: `.gitignore` (`.env` already ignored)\n\n**Acceptance Criteria:**\n- [ ] npm run live-check reports PASS or FAIL per endpoint against the real console and exits 0\n- [ ] the script exits non-zero if any required endpoint fails\n- [ ] the script never prints the API key\n- [ ] README documents API key creation, the three known API gaps, and the HKSV iCloud plan requirement\n- [ ] .env.example shows required variables with no real values\n- [ ] no real API key appears anywhere in the repository\n\n**Verify:** `npm run live-check` -> exits 0 against the live console with every line PASS\n\nFull step-by-step code is in `docs/superpowers/plans/2026-07-31-foundation.md`.\n\n```json:metadata\n{\"files\":[\"scripts/live-check.mjs\",\"README.md\",\".env.example\"],\"verifyCommand\":\"npm run live-check\",\"modelTier\":\"standard\",\"userGate\":true,\"tags\":[\"user-gate\"],\"gateScope\":\"live-hardware\",\"failurePolicy\":\"stop\",\"acceptanceCriteria\":[\"npm run live-check reports PASS or FAIL per endpoint against the real console and exits 0\",\"the script exits non-zero if any required endpoint fails\",\"the script never prints the API key\",\"README documents API key creation, the three known API gaps, and the HKSV iCloud plan requirement\",\".env.example shows required variables with no real values\",\"no real API key appears anywhere in the repository\"]}\n```",
+      "blockedBy": [
+        6,
+        7
+      ]
+    }
+  ],
+  "lastUpdated": "2026-07-31T18:24:00+10:00"
+}

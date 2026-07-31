@@ -1,0 +1,70 @@
+{
+  "planPath": "docs/superpowers/plans/2026-07-31-camera-sensors.md",
+  "tasks": [
+    {
+      "id": 0,
+      "subject": "Task 0: Capture real event fixtures",
+      "status": "pending",
+      "description": "**Goal:** Produce real motion, smartDetectZone, ring and end-frame payloads from the live console, so every downstream test is built on observed data rather than the spec.\n\n**USER-ORDERED GATE — NON-SKIPPABLE.** This task was requested by the user in the current conversation. It MUST NOT be closed by walking around it, by declaring it \"verified inline\", or by substituting a cheaper check. Close only after every item in `acceptanceCriteria` has been re-validated independently, with output captured.\n\n**Files:**\n- Create: `scripts/capture-events.mjs`\n- Create: `test/fixtures/events/{motion,smart-detect,ring,end-frames}.json`\n\n**Acceptance Criteria:**\n- [ ] capture script connects to both subscriptions and writes frames with timestamps\n- [ ] fixtures contain a real motion event, a smartDetectZone event with non-empty smartDetectTypes, and a ring event\n- [ ] fixtures contain an update frame with a non-null end for a previously-seen eventId\n- [ ] redaction is consistent so event.device still matches the camera ids in the existing fixtures\n- [ ] no API key, real MAC or stream token in any fixture\n\n**Verify:** node scripts/capture-events.mjs --seconds 120 produces frames; grep for secrets finds nothing\n\nFull step-by-step code is in `docs/superpowers/plans/2026-07-31-camera-sensors.md`.\n\n```json:metadata\n{\"files\":[],\"verifyCommand\":\"node scripts/capture-events.mjs --seconds 120 produces frames; grep for secrets finds nothing\",\"acceptanceCriteria\":[\"capture script connects to both subscriptions and writes frames with timestamps\",\"fixtures contain a real motion event, a smartDetectZone event with non-empty smartDetectTypes, and a ring event\",\"fixtures contain an update frame with a non-null end for a previously-seen eventId\",\"redaction is consistent so event.device still matches the camera ids in the existing fixtures\",\"no API key, real MAC or stream token in any fixture\"],\"modelTier\":\"standard\",\"userGate\":true,\"tags\":[\"user-gate\"],\"failurePolicy\":\"stop\"}\n```"
+    },
+    {
+      "id": 1,
+      "subject": "Task 1: Pure event router",
+      "status": "pending",
+      "description": "**Goal:** A synchronous, HomeKit-free function turning an event frame into the sensor subtypes it drives and its phase.\n\n**Files:**\n- Create: `src/accessories/router.ts`\n- Test: `test/router.test.ts`\n\n**Acceptance Criteria:**\n- [ ] routeEvent returns null for unhandled input and never throws\n- [ ] motion maps to the motion subtype\n- [ ] all three smart-detect channels map to detect-<type> subtypes\n- [ ] smartAudioDetect maps only alrmSmoke and alrmCmonx\n- [ ] ring maps to subtype ring with stateless true\n- [ ] phase distinguishes start, end and momentary\n- [ ] an unknown detection type is ignored not thrown\n\n**Verify:** npx vitest run test/router.test.ts -> all passing\n\nFull step-by-step code is in `docs/superpowers/plans/2026-07-31-camera-sensors.md`.\n\n```json:metadata\n{\"files\":[],\"verifyCommand\":\"npx vitest run test/router.test.ts -> all passing\",\"acceptanceCriteria\":[\"routeEvent returns null for unhandled input and never throws\",\"motion maps to the motion subtype\",\"all three smart-detect channels map to detect-<type> subtypes\",\"smartAudioDetect maps only alrmSmoke and alrmCmonx\",\"ring maps to subtype ring with stateless true\",\"phase distinguishes start, end and momentary\",\"an unknown detection type is ignored not thrown\"],\"modelTier\":\"standard\"}\n```",
+      "blockedBy": [
+        0
+      ]
+    },
+    {
+      "id": 2,
+      "subject": "Task 2: Active-event tracker",
+      "status": "pending",
+      "description": "**Goal:** Reference-counted sensor state with failsafe timers, so overlapping events cannot clear a sensor early and a lost end-frame cannot strand one on forever.\n\n**Files:**\n- Create: `src/accessories/tracker.ts`\n- Test: `test/tracker.test.ts`\n\n**Acceptance Criteria:**\n- [ ] overlapping events keep a subtype active until both end\n- [ ] start reports a transition only on 0 to 1 holders\n- [ ] end reports a transition only on the drop to 0 holders\n- [ ] momentary returns an on-then-off pair\n- [ ] a stateless ring returns one active true and stores nothing\n- [ ] a failsafe timer clears an event whose end never arrives\n- [ ] clearAll deactivates everything and returns the transitions\n- [ ] stop cancels every timer\n- [ ] a duplicate start does not double-count\n\n**Verify:** npx vitest run test/tracker.test.ts -> all passing\n\nFull step-by-step code is in `docs/superpowers/plans/2026-07-31-camera-sensors.md`.\n\n```json:metadata\n{\"files\":[],\"verifyCommand\":\"npx vitest run test/tracker.test.ts -> all passing\",\"acceptanceCriteria\":[\"overlapping events keep a subtype active until both end\",\"start reports a transition only on 0 to 1 holders\",\"end reports a transition only on the drop to 0 holders\",\"momentary returns an on-then-off pair\",\"a stateless ring returns one active true and stores nothing\",\"a failsafe timer clears an event whose end never arrives\",\"clearAll deactivates everything and returns the transitions\",\"stop cancels every timer\",\"a duplicate start does not double-count\"],\"modelTier\":\"standard\"}\n```",
+      "blockedBy": [
+        1
+      ]
+    },
+    {
+      "id": 3,
+      "subject": "Task 3: Camera service builder",
+      "status": "pending",
+      "description": "**Goal:** Create, diff and remove HAP services on a camera accessory, and apply sensor changes to them.\n\n**Files:**\n- Create: `src/accessories/camera.ts`\n- Test: `test/camera.test.ts`\n\n**Acceptance Criteria:**\n- [ ] camera gets AccessoryInformation, a motion sensor, and one sensor per enabled smart-detect type\n- [ ] a supported-but-disabled type produces no sensor\n- [ ] alrmSmoke and alrmCmonx produce Smoke and CO sensors only when enabled\n- [ ] a camera with hasSpeaker gets a Doorbell service\n- [ ] re-running the builder is idempotent\n- [ ] disabling a type removes exactly that service\n- [ ] applyChange sets the right characteristic and ignores unknown subtypes\n\n**Verify:** npx vitest run test/camera.test.ts && npx tsc --noEmit\n\nFull step-by-step code is in `docs/superpowers/plans/2026-07-31-camera-sensors.md`.\n\n```json:metadata\n{\"files\":[],\"verifyCommand\":\"npx vitest run test/camera.test.ts && npx tsc --noEmit\",\"acceptanceCriteria\":[\"camera gets AccessoryInformation, a motion sensor, and one sensor per enabled smart-detect type\",\"a supported-but-disabled type produces no sensor\",\"alrmSmoke and alrmCmonx produce Smoke and CO sensors only when enabled\",\"a camera with hasSpeaker gets a Doorbell service\",\"re-running the builder is idempotent\",\"disabling a type removes exactly that service\",\"applyChange sets the right characteristic and ignores unknown subtypes\"],\"modelTier\":\"frontier\"}\n```",
+      "blockedBy": [
+        0
+      ]
+    },
+    {
+      "id": 4,
+      "subject": "Task 4: Wire event pipeline into platform",
+      "status": "pending",
+      "description": "**Goal:** Connect protectEvent through router, tracker and builder, and build services during reconcile.\n\n**Files:**\n- Modify: `src/platform.ts`\n- Test: `test/platform.test.ts` (extend)\n\n**Acceptance Criteria:**\n- [ ] protectEvent frames drive the matching accessory services\n- [ ] an event for an unknown device id is ignored silently\n- [ ] a malformed frame does not throw out of the handler\n- [ ] resyncRequired clears the tracker and applies the changes\n- [ ] the failsafe callback applies changes to services\n- [ ] shutdown stops the tracker\n- [ ] services are built during reconcile and rebuilt on payload change\n- [ ] a degraded discovery removes no services\n\n**Verify:** npx vitest run test/platform.test.ts && npm run build\n\nFull step-by-step code is in `docs/superpowers/plans/2026-07-31-camera-sensors.md`.\n\n```json:metadata\n{\"files\":[],\"verifyCommand\":\"npx vitest run test/platform.test.ts && npm run build\",\"acceptanceCriteria\":[\"protectEvent frames drive the matching accessory services\",\"an event for an unknown device id is ignored silently\",\"a malformed frame does not throw out of the handler\",\"resyncRequired clears the tracker and applies the changes\",\"the failsafe callback applies changes to services\",\"shutdown stops the tracker\",\"services are built during reconcile and rebuilt on payload change\",\"a degraded discovery removes no services\"],\"modelTier\":\"frontier\"}\n```",
+      "blockedBy": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "id": 5,
+      "subject": "Task 5: Status LED switch",
+      "status": "pending",
+      "description": "**Goal:** A Switch per camera that reads ledSettings.isEnabled and writes it back to Protect.\n\n**Files:**\n- Modify: `src/accessories/camera.ts`, `src/platform.ts`\n- Test: `test/camera.test.ts` (extend)\n\n**Acceptance Criteria:**\n- [ ] cameras with hasLedStatus get an led Switch and Sidegate does not\n- [ ] the switch reflects ledSettings.isEnabled\n- [ ] a deviceUpdate frame changing the LED updates the switch\n- [ ] setting the switch calls patchCamera with the exact body\n- [ ] a failed write reverts the characteristic and logs a warning\n\n**Verify:** npx vitest run test/camera.test.ts && npm run build\n\nFull step-by-step code is in `docs/superpowers/plans/2026-07-31-camera-sensors.md`.\n\n```json:metadata\n{\"files\":[],\"verifyCommand\":\"npx vitest run test/camera.test.ts && npm run build\",\"acceptanceCriteria\":[\"cameras with hasLedStatus get an led Switch and Sidegate does not\",\"the switch reflects ledSettings.isEnabled\",\"a deviceUpdate frame changing the LED updates the switch\",\"setting the switch calls patchCamera with the exact body\",\"a failed write reverts the characteristic and logs a warning\"],\"modelTier\":\"standard\"}\n```",
+      "blockedBy": [
+        3,
+        4
+      ]
+    },
+    {
+      "id": 6,
+      "subject": "Task 6: Live verification on real Homebridge",
+      "status": "pending",
+      "description": "**Goal:** Prove on the real Homebridge instance that sensors fire, the doorbell rings, and the LED switch works.\n\n**USER-ORDERED GATE — NON-SKIPPABLE.** This task was requested by the user in the current conversation. It MUST NOT be closed by walking around it, by declaring it \"verified inline\", or by substituting a cheaper check. Close only after every item in `acceptanceCriteria` has been re-validated independently, with output captured.\n\n**Files:**\n- Modify: `README.md`, `CHANGELOG.md`\n\n**Acceptance Criteria:**\n- [ ] plugin installed on Homebridge at 192.168.1.50:8581 and loads without error\n- [ ] each camera shows Motion plus one sensor per enabled type; Backyard and Sidegate show no Vehicle sensor\n- [ ] walking past a camera trips Motion and Person and both clear without a fixed timer\n- [ ] pressing the doorbell fires the Doorbell in Home.app\n- [ ] toggling the LED switch changes the real camera LED\n- [ ] changing the LED in the Protect app updates the switch in HomeKit\n- [ ] README documents the three known ceilings\n- [ ] CHANGELOG has a 0.2.0 entry\n\n**Verify:** Homebridge debug log shows sensor transitions; user confirms Home.app behaviour\n\nFull step-by-step code is in `docs/superpowers/plans/2026-07-31-camera-sensors.md`.\n\n```json:metadata\n{\"files\":[],\"verifyCommand\":\"Homebridge debug log shows sensor transitions; user confirms Home.app behaviour\",\"acceptanceCriteria\":[\"plugin installed on Homebridge at 192.168.1.50:8581 and loads without error\",\"each camera shows Motion plus one sensor per enabled type; Backyard and Sidegate show no Vehicle sensor\",\"walking past a camera trips Motion and Person and both clear without a fixed timer\",\"pressing the doorbell fires the Doorbell in Home.app\",\"toggling the LED switch changes the real camera LED\",\"changing the LED in the Protect app updates the switch in HomeKit\",\"README documents the three known ceilings\",\"CHANGELOG has a 0.2.0 entry\"],\"modelTier\":\"standard\",\"userGate\":true,\"tags\":[\"user-gate\"],\"failurePolicy\":\"stop\"}\n```",
+      "blockedBy": [
+        4,
+        5
+      ]
+    }
+  ],
+  "lastUpdated": "2026-07-31T21:15:00+10:00"
+}
