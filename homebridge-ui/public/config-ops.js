@@ -32,6 +32,24 @@ function defaultFor(config, key) {
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 
 /**
+ * Builds the device card header from DOM APIs only — never `innerHTML`.
+ * `device.name`/`device.type` come from the Protect console and are
+ * attacker-controlled (anyone who can rename a camera in the Protect app),
+ * so they must land as `textContent`, never be parsed as markup. Extracted
+ * here (rather than left inline in index.html) so it has a DOM-free unit
+ * test guarding against this regressing back to a template literal. `doc`
+ * is injected so the test can supply a minimal fake without a real DOM.
+ */
+export function renderDeviceHeader(doc, device) {
+  const nameEl = doc.createElement('strong')
+  nameEl.textContent = device.name ?? ''
+  const typeEl = doc.createElement('span')
+  typeEl.className = 'up-muted'
+  typeEl.textContent = device.type ?? ''
+  return [nameEl, ' ', typeEl]
+}
+
+/**
  * Writes an override only when it differs from the effective default, so an
  * untouched device contributes nothing to config.json and changing a default
  * actually moves every untouched device.

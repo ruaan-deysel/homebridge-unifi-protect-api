@@ -73,4 +73,17 @@ declare module '*/homebridge-ui/public/config-ops.js' {
     key: string,
     value: unknown,
   ): ConfigShape
+
+  export interface MinimalDomElement {
+    tagName: string
+    textContent: string
+    className: string
+  }
+  export interface MinimalDocument {
+    createElement: (tag: string) => MinimalDomElement
+  }
+  export function renderDeviceHeader(
+    doc: MinimalDocument,
+    device: { name?: string, type?: string },
+  ): (MinimalDomElement | string)[]
 }

@@ -17,7 +17,7 @@
 <div id="devices"></div>
 
 <script type="module">
-  import { ensureConfig, setDeviceSetting } from './config-ops.js'
+  import { ensureConfig, renderDeviceHeader, setDeviceSetting } from './config-ops.js'
 
   const statusEl = document.getElementById('status')
   const devicesEl = document.getElementById('devices')
@@ -40,7 +40,8 @@
     for (const device of devices) {
       const card = document.createElement('div')
       card.className = 'up-card'
-      card.innerHTML = `<strong>${device.name}</strong> <span class="up-muted">${device.type}</span>`
+      // device.name/device.type are console-supplied — never innerHTML them.
+      card.append(...renderDeviceHeader(document, device))
 
       const grid = document.createElement('div')
       grid.className = 'up-grid'
@@ -49,8 +50,11 @@
         const id = `${device.id}-${key}`
         const wrap = document.createElement('label')
         wrap.setAttribute('for', id)
-        wrap.innerHTML = `<input type="checkbox" id="${id}"> ${label}`
-        const input = wrap.querySelector('input')
+        // id embeds device.id (console-supplied) — build with DOM APIs, never innerHTML.
+        const input = document.createElement('input')
+        input.type = 'checkbox'
+        input.id = id
+        wrap.append(input, ` ${label}`)
         input.checked = Boolean(settingOf(device.id, key, fallback))
         input.addEventListener('change', async () => {
           config = setDeviceSetting(config, device.id, key, input.checked)
