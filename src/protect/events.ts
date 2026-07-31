@@ -77,8 +77,16 @@ export class ProtectEvents extends EventEmitter<ProtectEventsMap> {
   start(): void {
     this.stopped = false
     this.authFailed = false
-    for (const channel of CHANNELS)
+    for (const channel of CHANNELS) {
+      // Leave a subscription that is already live alone. The platform calls
+      // `start()` again on its retry paths, and tearing down a healthy socket
+      // just to redial it emits a spurious `resyncRequired` — a full, pointless
+      // REST discovery pass on every startup.
+      const socket = this.stateOf(channel).socket
+      if (socket && (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN))
+        continue
       this.connect(channel)
+    }
   }
 
   stop(): void {
@@ -119,6 +127,12 @@ export class ProtectEvents extends EventEmitter<ProtectEventsMap> {
     socket.onerror = null
     socket.onclose = null
     socket.removeAllListeners()
+    // `close()` on a CONNECTING socket routes to ws's `abortHandshake`, which
+    // emits 'error' on the next tick. With no listener left attached node
+    // rethrows it as an uncaught exception and takes the process down. A
+    // shutdown while the console is unreachable hits this every time — the dial
+    // hangs on the SYN, so the socket is CONNECTING for nearly all of its life.
+    socket.on('error', () => {})
     socket.close()
   }
 
@@ -183,6 +197,8 @@ export class ProtectEvents extends EventEmitter<ProtectEventsMap> {
     socket.onclose = () => {
       clearInterval(state.pingTimer)
       clearTimeout(state.stableTimer)
+      state.pingTimer = undefined
+      state.stableTimer = undefined
       state.socket = undefined
       this.scheduleReconnect(channel)
     }

@@ -35,6 +35,10 @@ class FakeSocket extends EventEmitter {
   }
 
   close() {
+    // Mirrors `ws`: closing a CONNECTING socket aborts the handshake and emits
+    // 'error'. With no listener attached, node rethrows it and kills the process.
+    if (this.readyState === 0)
+      this.emit('error', new Error('WebSocket was closed before the connection was established'))
     this.readyState = 3
   }
 
@@ -387,25 +391,66 @@ describe('protectEvents', () => {
     events.stop()
   })
 
-  it('is idempotent across a repeated start()', async () => {
+  it('leaves live subscriptions untouched on a repeated start()', async () => {
     const events = makeEvents()
     const seen: unknown[] = []
+    const resyncs: unknown[] = []
     events.on('deviceUpdate', payload => seen.push(payload))
+    events.on('resyncRequired', channel => resyncs.push(channel))
     events.start()
-    const stale = FakeSocket.instances[0]!
-    events.start()
+    const devices = FakeSocket.instances[0]!
+    devices.open()
+    FakeSocket.instances[1]!.open()
 
-    // The second start replaced both sockets. The stale one is detached, so its
-    // close must not spawn a third reconnect chain.
-    const live = FakeSocket.instances.at(-2)!
-    stale.fail()
+    // The platform calls start() again on its retry paths. Replacing a healthy
+    // socket would drop it and cost a full spurious discovery pass.
+    events.start()
     await vi.advanceTimersByTimeAsync(120_000)
-    expect(FakeSocket.instances).toHaveLength(4)
 
-    live.open()
-    live.send(JSON.stringify({ id: 'cam1' }))
+    expect(FakeSocket.instances).toHaveLength(2)
+    expect(devices.readyState).toBe(1)
+    expect(resyncs).toEqual([])
+
+    devices.send(JSON.stringify({ id: 'cam1' }))
     expect(seen).toEqual([{ id: 'cam1' }]) // emitted once, not twice
     events.stop()
+  })
+
+  it('restarts only the channels that are actually down', async () => {
+    const events = makeEvents()
+    events.start()
+    const [devices, eventStream] = [FakeSocket.instances[0]!, FakeSocket.instances[1]!]
+    devices.open()
+    eventStream.open()
+    eventStream.fail() // this one is down, with a reconnect pending
+
+    events.start()
+
+    expect(FakeSocket.instances).toHaveLength(3) // devices untouched, events redialled
+    expect(devices.readyState).toBe(1)
+    events.stop()
+  })
+
+  it('does not crash when stop() closes a socket that never connected', () => {
+    const events = makeEvents()
+    events.start()
+
+    // Every socket is still CONNECTING — the normal shape of a shutdown while
+    // the console is unreachable, since the dial hangs on the SYN.
+    expect(FakeSocket.instances[0]!.readyState).toBe(0)
+    expect(() => events.stop()).not.toThrow()
+  })
+
+  it('does not crash when a reconnect replaces a socket that never connected', async () => {
+    const events = makeEvents()
+    events.start()
+    FakeSocket.instances[0]!.fail()
+    await vi.advanceTimersByTimeAsync(2000)
+
+    // The redial is CONNECTING; a second failure tears it down mid-handshake.
+    const pending = FakeSocket.instances.at(-1)!
+    expect(pending.readyState).toBe(0)
+    expect(() => events.stop()).not.toThrow()
   })
 
   it('survives a stop() then start() without leaking the old sockets', async () => {
