@@ -1,0 +1,33 @@
+# Ignore node_modules folder
+node_modules/
+
+# Ignore build output folder
+dist/
+
+# Ignore logs
+logs/
+*.log
+
+# Ignore .env files which might contain sensitive information
+.env
+
+# Ignore OS generated files
+.DS_Store
+Thumbs.db
+# Ignore graphify tool output
+graphify-out/
+
+coverage/
+*.tsbuildinfo
+
+# Packed tarballs
+*.tgz
+
+# Playwright MCP scratch output
+.playwright-mcp/
+
+# SDD workspace: ledger, review packages, agent reports — scratch, never published
+.superpowers/
+
+# Internal planning artefacts — not part of the published project
+docs/superpowers/
