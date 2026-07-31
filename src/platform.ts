@@ -50,6 +50,19 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
   private retryDelayMs = RETRY_MIN_MS
   private retryDriven = false
   /**
+   * UUIDs missing from the last successful discovery. A device must be absent
+   * from TWO consecutive successful discoveries before it is unregistered.
+   *
+   * A proportional threshold ("refuse to delete more than half") is wrong at
+   * both ends — it is far too loose on a 2-camera install and far too tight on
+   * a 40-camera one — and asking the user to confirm needs UI this release does
+   * not have. Requiring agreement costs a genuinely deleted camera one extra
+   * discovery cycle before it leaves HomeKit; the alternative cost is a console
+   * answering mid-reboot with a partial inventory irreversibly wiping rooms,
+   * scenes and automations.
+   */
+  private readonly pendingRemoval = new Set<string>()
+  /**
    * One-way: Homebridge never restarts a platform in-process, so there is no
    * path back. If that ever changes, clear it in `didFinishLaunching` — never
    * at construction, which runs before the shutdown it would be undoing.
@@ -90,6 +103,10 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
   private discoverSafely(): void {
     this.discover().catch((error: unknown) => {
       this.log.error(`Discovery failed unexpectedly: ${error instanceof Error ? error.message : String(error)}`)
+      // Without this the plugin is permanently blind: an unexpected throw (from
+      // reconcile(), say) leaves no event bus, no polling and — unlike every
+      // other failure path — no retry either.
+      this.scheduleRetry()
     })
   }
 
@@ -110,15 +127,15 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
       this.pending = true
       return this.inFlight
     }
+    let trailing = false
     this.inFlight = this.runDiscovery().finally(() => {
       this.inFlight = undefined
-    })
-    return this.inFlight.then(() => {
-      if (!this.pending)
-        return
+      // Cleared here, not in the `then`: a rejecting run would otherwise leave
+      // `pending` latched and buy the next caller a spurious extra pass.
+      trailing = this.pending
       this.pending = false
-      return this.discover()
     })
+    return this.inFlight.then(() => (trailing ? this.discover() : undefined))
   }
 
   private async runDiscovery(): Promise<void> {
@@ -198,6 +215,8 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
   private reconcile(devices: DiscoveredDevice[]): void {
     const config = this.config!
     const wanted = new Map<string, DiscoveredDevice>()
+    // Every device the console actually reported, before the expose filter.
+    const reported = new Set<string>()
     let usable = 0
 
     for (const device of devices) {
@@ -209,11 +228,13 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
         continue
       }
       usable++
+      const uuid = this.api.hap.uuid.generate(device.id)
+      reported.add(uuid)
       // Counted before the expose filter: flipping every device to
       // `expose: false` is a legitimate removal and must still unregister.
       if (!settingsFor(config, device.id).expose)
         continue
-      wanted.set(this.api.hap.uuid.generate(device.id), device)
+      wanted.set(uuid, device)
     }
 
     for (const [uuid, device] of wanted) {
@@ -256,10 +277,23 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
     }
 
     for (const [uuid, accessory] of this.accessories) {
-      if (wanted.has(uuid))
+      if (wanted.has(uuid)) {
+        // Back in the inventory — whatever made it vanish was transient.
+        this.pendingRemoval.delete(uuid)
         continue
+      }
+      // Still reported by the console, just filtered out by `expose: false`.
+      // That is the user's own explicit instruction, not a partial inventory,
+      // so it takes effect now — deferring it would strand the accessory until
+      // some unrelated event happened to trigger a second discovery.
+      if (!reported.has(uuid) && !this.pendingRemoval.has(uuid)) {
+        this.pendingRemoval.add(uuid)
+        this.log.info(`"${accessory.displayName}" is missing from the console inventory. Keeping it until a second discovery agrees.`)
+        continue
+      }
       this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory])
       this.accessories.delete(uuid)
+      this.pendingRemoval.delete(uuid)
       this.log.info(`Removed "${accessory.displayName}".`)
     }
   }

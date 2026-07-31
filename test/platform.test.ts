@@ -20,14 +20,20 @@ function makeApi() {
 
 const validConfig = { platform: 'UniFiProtect', name: 'UniFi Protect', host: '10.0.0.1', apiKey: 'k' }
 
-function makeClient(cameras: unknown[]) {
+/**
+ * Routes by `modelKey` rather than hardcoding `[]` for everything but cameras —
+ * otherwise no test ever reconciles a non-camera device and dropping any of the
+ * four other endpoints from fetchInventory() stays green.
+ */
+function makeClient(devices: unknown[]) {
+  const of = (modelKey: string) => devices.filter(d => (d as { modelKey?: string })?.modelKey === modelKey)
   return {
     getMetaInfo: vi.fn(async () => ({ applicationVersion: '7.1.87' })),
-    getCameras: vi.fn(async () => cameras),
-    getLights: vi.fn(async () => []),
-    getSensors: vi.fn(async () => []),
-    getChimes: vi.fn(async () => []),
-    getViewers: vi.fn(async () => []),
+    getCameras: vi.fn(async () => of('camera')),
+    getLights: vi.fn(async () => of('light')),
+    getSensors: vi.fn(async () => of('sensor')),
+    getChimes: vi.fn(async () => of('chime')),
+    getViewers: vi.fn(async () => of('viewer')),
   }
 }
 
@@ -54,6 +60,45 @@ describe('uniFiProtectPlatform', () => {
     expect(api.registerPlatformAccessories).not.toHaveBeenCalled()
   })
 
+  // Nothing else in the suite drives discovery the way Homebridge does. Without
+  // this, deleting the `didFinishLaunching` subscription leaves every test green
+  // while the plugin discovers nothing at all on a real boot.
+  it('discovers when Homebridge emits didFinishLaunching', async () => {
+    const { api, platform } = makePlatform(validConfig, [{ id: 'cam1', name: 'Doorbell', modelKey: 'camera' }])
+
+    api.emit('didFinishLaunching')
+
+    await vi.waitFor(() => expect(platform.accessories.has('uuid-cam1')).toBe(true))
+  })
+
+  // discoverSafely's catch is the only thing between a throwing discovery and a
+  // Node >= 15 unhandled rejection taking all of Homebridge down with it.
+  it('swallows a rejecting discovery and schedules a retry instead of dying', async () => {
+    const { api, platform } = makePlatform(validConfig, [{ id: 'cam1', name: 'Doorbell', modelKey: 'camera' }])
+    const unhandled = vi.fn()
+    process.on('unhandledRejection', unhandled)
+    api.registerPlatformAccessories = vi.fn(() => {
+      throw new Error('hap exploded')
+    })
+
+    try {
+      api.emit('didFinishLaunching')
+      await vi.waitFor(() => expect(log.error).toHaveBeenCalled())
+      // Let any unhandled rejection surface before we assert none did.
+      await new Promise(resolve => setImmediate(resolve))
+
+      expect(unhandled).not.toHaveBeenCalled()
+      expect(JSON.stringify(log.error.mock.calls)).toContain('hap exploded')
+      // F4: without a retry here the plugin is blind forever — no bus, no polling.
+      expect(JSON.stringify(log.info.mock.calls)).toContain('Retrying discovery')
+    }
+    finally {
+      process.off('unhandledRejection', unhandled)
+      platform.accessories.clear()
+      api.emit('shutdown')
+    }
+  })
+
   it('registers one bridged accessory per exposed device', async () => {
     const { api, platform } = makePlatform(validConfig, [{ id: 'cam1', name: 'Doorbell', modelKey: 'camera' }])
 
@@ -72,7 +117,7 @@ describe('uniFiProtectPlatform', () => {
     expect(api.registerPlatformAccessories).not.toHaveBeenCalled()
   })
 
-  it('unregisters a device that vanished from a successful discovery', async () => {
+  it('unregisters a device that vanished, but only once two discoveries agree', async () => {
     const survivor = { id: 'cam2', name: 'Garage', modelKey: 'camera' }
     const { api, platform } = makePlatform(validConfig, [{ id: 'cam1', name: 'Doorbell', modelKey: 'camera' }, survivor])
     await platform.discover()
@@ -80,8 +125,55 @@ describe('uniFiProtectPlatform', () => {
     platform.client = makeClient([survivor]) as never
     await platform.discover()
 
+    // First disagreement: deferred, not deleted.
+    expect(api.unregisterPlatformAccessories).not.toHaveBeenCalled()
+    expect(platform.accessories.has('uuid-cam1')).toBe(true)
+
+    await platform.discover()
+
     expect(api.unregisterPlatformAccessories).toHaveBeenCalledTimes(1)
     expect(platform.accessories.has('uuid-cam1')).toBe(false)
+  })
+
+  // B2: the C1 guard was all-or-nothing while the deletion loop was per-device,
+  // so a console answering mid-reboot with 1 of 20 devices wiped 19 of them.
+  it('keeps accessories when a partial inventory drops most of them', async () => {
+    const all = Array.from({ length: 20 }, (_, i) => ({ id: `cam${i}`, name: `Cam ${i}`, modelKey: 'camera' }))
+    const { api, platform } = makePlatform(validConfig, all)
+    await platform.discover()
+    expect(platform.accessories.size).toBe(20)
+
+    platform.client = makeClient([all[0]]) as never
+    await platform.discover()
+
+    expect(api.unregisterPlatformAccessories).not.toHaveBeenCalled()
+    expect(platform.accessories.size).toBe(20)
+
+    // ...and a device that reappears clears its deferral, so a flapping console
+    // never accumulates its way to a deletion.
+    platform.client = makeClient(all) as never
+    await platform.discover()
+    platform.client = makeClient([all[0]]) as never
+    await platform.discover()
+
+    expect(api.unregisterPlatformAccessories).not.toHaveBeenCalled()
+    expect(platform.accessories.size).toBe(20)
+  })
+
+  it('reconciles lights, sensors, chimes and viewers, not only cameras', async () => {
+    const { platform } = makePlatform(validConfig, [
+      { id: 'cam1', name: 'Doorbell', modelKey: 'camera' },
+      { id: 'light1', name: 'Floodlight', modelKey: 'light' },
+      { id: 'sensor1', name: 'Door', modelKey: 'sensor' },
+      { id: 'chime1', name: 'Hallway', modelKey: 'chime' },
+      { id: 'viewer1', name: 'Wall', modelKey: 'viewer' },
+    ])
+
+    await platform.discover()
+
+    expect([...platform.accessories.keys()].sort()).toEqual(
+      ['uuid-cam1', 'uuid-chime1', 'uuid-light1', 'uuid-sensor1', 'uuid-viewer1'],
+    )
   })
 
   it('unregisters a device the user has since excluded', async () => {
