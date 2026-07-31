@@ -2,9 +2,18 @@
 
 export const DEFAULTS = { exposeNewDevices: true, quality: 'high', hksv: false }
 
+/**
+ * Normalises the platform block WITHOUT dropping anything it does not know
+ * about. `updatePluginConfig` replaces the whole block ("Existing blocks not
+ * included will be removed"), and Homebridge stores the child bridge's
+ * username, port and PIN under `_bridge` right here. Rebuilding from a
+ * whitelist unpaired the bridge on every save — re-pairing every accessory and
+ * losing rooms, scenes and automations. So: spread first, normalise over it.
+ */
 export function ensureConfig(raw) {
   const config = raw ?? {}
   return {
+    ...config,
     platform: 'UniFiProtect',
     name: config.name ?? 'UniFi Protect',
     host: config.host ?? '',

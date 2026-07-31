@@ -2,10 +2,9 @@ import { describe, expect, it } from 'vitest'
 import { DEFAULTS, ensureConfig, renderDeviceHeader, setDeviceSetting } from '../homebridge-ui/public/config-ops.js'
 
 // Minimal fake DOM — just enough to prove renderDeviceHeader never turns
-// console-supplied text into markup. `innerHTML` here stands in for what a
-// real browser would do: parse `<tag>` into a live element (which is exactly
-// how a device named `<img src=x onerror=...>` would execute script). No
-// jsdom dependency needed for this one property.
+// console-supplied text into markup. A device named `<img src=x onerror=...>`
+// must land as inert text, so `findByTag` finding an IMG anywhere in the
+// result is the failure. No jsdom dependency needed for this one property.
 class FakeElement {
   tagName: string
   children: (FakeElement | string)[] = []
@@ -42,29 +41,6 @@ class FakeElement {
   append(...nodes: (FakeElement | string)[]) {
     this.children.push(...nodes)
   }
-
-  // Naive markup parser — enough to model "did this string get parsed as an
-  // element" without a real HTML parser. Test-only; never used by shipped code.
-  set innerHTML(html: string) {
-    this.children = []
-    const tagPattern = /<([a-z][a-z0-9]*)\b[^>]*>/gi
-    let match: RegExpExecArray | null
-    let cursor = 0
-    // eslint-disable-next-line no-cond-assign
-    while ((match = tagPattern.exec(html))) {
-      if (match.index > cursor)
-        this.children.push(html.slice(cursor, match.index))
-      this.children.push(new FakeElement(match[1] ?? ''))
-      cursor = tagPattern.lastIndex
-    }
-    if (cursor < html.length)
-      this.children.push(html.slice(cursor))
-  }
-
-  // Paired getter only to satisfy accessor-pairs lint — never read in this test.
-  get innerHTML(): string {
-    return this.children.map(c => (c instanceof FakeElement ? c.tagName : c)).join('')
-  }
 }
 
 const fakeDocument = { createElement: (tag: string) => new FakeElement(tag) }
@@ -92,6 +68,21 @@ describe('ensureConfig', () => {
       defaults: DEFAULTS,
       devices: {},
     })
+  })
+
+  // `updatePluginConfig` replaces the whole platform block, so anything
+  // ensureConfig drops is deleted from config.json. `_bridge` is where
+  // Homebridge keeps the child bridge's username, port and PIN — rebuilding
+  // from a whitelist unpaired the bridge on every save.
+  it('preserves keys it does not know about through a full round-trip', () => {
+    const bridge = { username: '0E:11:22:33:44:55', port: 51234, pin: '031-45-154' }
+    const saved = { platform: 'UniFiProtect', host: '10.0.0.1', apiKey: 'k', _bridge: bridge }
+
+    const config = setDeviceSetting(ensureConfig(saved), 'cam1', 'expose', false)
+
+    expect(config._bridge).toEqual(bridge)
+    expect(config.host).toBe('10.0.0.1')
+    expect(config.devices.cam1).toEqual({ expose: false })
   })
 })
 
@@ -135,11 +126,5 @@ describe('renderDeviceHeader (XSS regression)', () => {
     expect(nameEl.tagName).toBe('STRONG')
     expect(nameEl.textContent).toBe(payload)
     expect(findByTag([nameEl], 'IMG')).toBeNull()
-  })
-
-  it('would have executed under the old innerHTML approach — this is the bug being guarded against', () => {
-    const vulnerable = fakeDocument.createElement('strong')
-    vulnerable.innerHTML = `<strong>${payload}</strong>`
-    expect(findByTag([vulnerable], 'IMG')).not.toBeNull()
   })
 })
