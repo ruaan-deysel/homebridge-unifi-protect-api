@@ -46,7 +46,7 @@
       const grid = document.createElement('div')
       grid.className = 'up-grid'
 
-      const toggle = (key, label, fallback) => {
+      const toggle = (key, label, fallback, comingLater) => {
         const id = `${device.id}-${key}`
         const wrap = document.createElement('label')
         wrap.setAttribute('for', id)
@@ -56,10 +56,21 @@
         input.id = id
         wrap.append(input, ` ${label}`)
         input.checked = Boolean(settingOf(device.id, key, fallback))
-        input.addEventListener('change', async () => {
-          config = setDeviceSetting(config, device.id, key, input.checked)
-          await save()
-        })
+        if (comingLater) {
+          // Shown, but inert and said so plainly. This release has no camera
+          // services yet, so honouring the flag is impossible — offering a
+          // live checkbox that quietly does nothing would be the dishonest
+          // option, and hiding it entirely hides the roadmap.
+          input.disabled = true
+          wrap.className = 'up-muted'
+          wrap.append(' — arriving in a later release')
+        }
+        else {
+          input.addEventListener('change', async () => {
+            config = setDeviceSetting(config, device.id, key, input.checked)
+            await save()
+          })
+        }
         grid.append(wrap)
       }
 
@@ -68,9 +79,9 @@
       // honour it, so the UI never lets someone flip a setting that will
       // silently do nothing.
       if (device.type === 'camera') {
-        toggle('hksv', 'HomeKit Secure Video', config.defaults.hksv)
+        toggle('hksv', 'HomeKit Secure Video', config.defaults.hksv, true)
         if (device.hasSpeaker)
-          toggle('talkback', 'Two-way audio', false)
+          toggle('talkback', 'Two-way audio', false, true)
       }
 
       card.append(grid)

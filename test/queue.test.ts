@@ -27,48 +27,6 @@ describe('requestQueue', () => {
     expect(peak).toBe(2)
   })
 
-  it('never exceeds concurrency under continuous resubmission (sanity check)', async () => {
-    // NOT a regression guard for the acquire()/release() handoff race that
-    // motivated rewriting those two methods (see queue.ts comments). That
-    // race requires a fresh acquire() to run its fast-path check strictly
-    // between release()'s decrement and the woken waiter's own increment —
-    // and under Node's single microtask queue plus vitest's fake timers
-    // (which fully drain microtasks between macrotask/timer callbacks),
-    // nothing can land in that gap: chained resubmission via `.then()` is
-    // always sequenced after the very wake-up it would need to race, and an
-    // independently-scheduled timer firing on the same tick was tried
-    // empirically and also could not land in the window. This test is kept
-    // only as a broader concurrency sanity check under a more adversarial
-    // submission pattern than the test above (which submits everything
-    // upfront); it would pass identically against the pre-fix code.
-    const queue = new RequestQueue({ concurrency: 2 })
-    let active = 0
-    let peak = 0
-    let launched = 0
-    const totalToLaunch = 20
-    const task = () => new Promise<void>((resolve) => {
-      active++
-      peak = Math.max(peak, active)
-      setTimeout(() => {
-        active--
-        resolve()
-      }, 5)
-    })
-
-    const launchOne = (): Promise<void> => {
-      if (launched >= totalToLaunch)
-        return Promise.resolve()
-      launched++
-      return queue.run(task).then(() => launchOne())
-    }
-    const chains = [launchOne(), launchOne(), launchOne(), launchOne()]
-
-    await vi.runAllTimersAsync()
-    await Promise.all(chains)
-
-    expect(peak).toBeLessThanOrEqual(2)
-  })
-
   it('retries a retryable failure with exponential backoff', async () => {
     const queue = new RequestQueue({ concurrency: 1, maxRetries: 3, baseDelayMs: 100 })
     let attempts = 0

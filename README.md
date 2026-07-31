@@ -11,9 +11,18 @@ connectivity over REST and both WebSocket channels, and reconciles the Homebridg
 cache. **It does not yet expose any HomeKit accessory services** (no camera streaming, no
 sensors, no lights) — that arrives in a later release. See `CHANGELOG.md`.
 
+> **What you will see in Home.app:** one accessory per Protect device, each of them
+> **empty** — no controls, no streams, no sensor readings. That is expected for 0.1.0,
+> not a misconfiguration. The accessories exist so that later releases can attach services
+> to them without you having to re-pair or re-assign rooms. If you would rather not have
+> empty tiles in Home.app yet, untick the devices in the plugin's settings screen.
+
 ## Requirements
 
-- UniFi Protect 6.1 or later
+- UniFi Protect **7.1.87** — the only firmware this release has been tested against, on a
+  UniFi console with the Integration API enabled. Ubiquiti introduced the Integration API in
+  Protect 6.1, so earlier 6.x/7.x builds may well work, but nothing below 7.1.87 has been
+  verified.
 - Homebridge v2
 - Node.js 22 or 24
 

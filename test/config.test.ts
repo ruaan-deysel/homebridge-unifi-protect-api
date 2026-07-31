@@ -20,6 +20,13 @@ describe('parseConfig', () => {
     )
   })
 
+  // An empty string, not a missing key, is what a user who saves the settings
+  // form blank actually produces.
+  it('rejects an empty host or api key', () => {
+    expect(parseConfig({ ...minimal, host: '' }).success).toBe(false)
+    expect(parseConfig({ ...minimal, apiKey: '' }).success).toBe(false)
+  })
+
   it('applies defaults when none are supplied', () => {
     const result = parseConfig(minimal)
     expect(result.success).toBe(true)

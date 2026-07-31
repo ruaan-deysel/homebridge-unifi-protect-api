@@ -188,8 +188,16 @@ function objectOf(node, name) {
   const fn = node.additionalProperties === false ? 'z.strictObject' : 'z.looseObject'
   const body = entries.length ? `${fn}({\n${entries.join('\n')}\n})` : `${fn}({})`
   // A schema whose additionalProperties is itself a schema constrains the values.
-  if (node.additionalProperties && typeof node.additionalProperties === 'object')
+  if (node.additionalProperties && typeof node.additionalProperties === 'object') {
+    // z.record() has no place for declared properties, so emitting one here
+    // would silently discard every one of them — exactly the class of quiet
+    // weakening the keyword whitelist exists to catch. No occurrence in the
+    // current spec; if one appears, the generator must be taught the shape
+    // rather than quietly dropping it.
+    if (entries.length)
+      throw new Error(`gen-zod: ${node.title ?? name} declares both properties and a schema-valued additionalProperties — z.record() cannot carry the properties. Teach the generator this shape.`)
     return `z.record(z.string(), ${convert(node.additionalProperties, name)})`
+  }
   return body
 }
 

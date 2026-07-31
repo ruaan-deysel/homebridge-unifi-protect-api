@@ -26,5 +26,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run lint
+      # The generated schemas are committed; a hand-edit or a stale run must
+      # not survive review.
+      - run: npm run gen:zod && git diff --exit-code src/protect/schemas.ts
       - run: npm test
       - run: npm run build
