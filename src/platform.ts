@@ -32,6 +32,13 @@ const deviceSchemas = new Map<string, z.ZodType>([
 const RETRY_MIN_MS = 15_000
 const RETRY_MAX_MS = 300_000
 
+/**
+ * How long a device must stay missing from the console inventory before it is
+ * unregistered. Comfortably longer than a console reboot's enumeration window,
+ * and short enough that a genuinely deleted camera leaves HomeKit the same day.
+ */
+const CONFIRM_MIN_MS = 60_000
+
 function labelFor(device: DiscoveredDevice): string {
   return device.name?.trim() || `Protect ${device.modelKey} ${device.id}`
 }
@@ -50,18 +57,29 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
   private retryDelayMs = RETRY_MIN_MS
   private retryDriven = false
   /**
-   * UUIDs missing from the last successful discovery. A device must be absent
-   * from TWO consecutive successful discoveries before it is unregistered.
+   * UUID -> the timestamp it first went missing. A device must stay absent for
+   * at least `confirmRemovalAfterMs` before it is unregistered.
+   *
+   * Deliberately a clock, not a discovery counter. Counting discoveries makes
+   * the gate depend on discovery timing, and discoveries can arrive seconds
+   * apart: `resyncRequired` fires per channel on socket open, and there are two
+   * channels, so a rebooting console's reconnects can deliver two passes well
+   * inside the same partial-inventory window — the second one "confirming" the
+   * first and deleting everything the gate exists to protect.
    *
    * A proportional threshold ("refuse to delete more than half") is wrong at
-   * both ends — it is far too loose on a 2-camera install and far too tight on
-   * a 40-camera one — and asking the user to confirm needs UI this release does
-   * not have. Requiring agreement costs a genuinely deleted camera one extra
-   * discovery cycle before it leaves HomeKit; the alternative cost is a console
-   * answering mid-reboot with a partial inventory irreversibly wiping rooms,
-   * scenes and automations.
+   * both ends — far too loose on a 2-camera install, far too tight on a
+   * 40-camera one — and asking the user to confirm needs UI this release does
+   * not have. The only cost is that a genuinely deleted camera lingers for one
+   * confirmation window; the alternative cost is a console answering mid-reboot
+   * with a partial inventory irreversibly wiping rooms, scenes and automations.
    */
-  private readonly pendingRemoval = new Set<string>()
+  private readonly pendingRemoval = new Map<string, number>()
+  /**
+   * Public so tests can shorten the window instead of faking an hour of clock —
+   * a test that advances timers by an hour is easy to misread later.
+   */
+  confirmRemovalAfterMs = CONFIRM_MIN_MS
   /**
    * One-way: Homebridge never restarts a platform in-process, so there is no
    * path back. If that ever changes, clear it in `didFinishLaunching` — never
@@ -132,6 +150,10 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
       this.inFlight = undefined
       // Cleared here, not in the `then`: a rejecting run would otherwise leave
       // `pending` latched and buy the next caller a spurious extra pass.
+      // ponytail: a trailing pass requested mid-run is therefore DROPPED when
+      // the run rejects — discoverSafely's scheduleRetry() covers it, just
+      // later than the resync asked for. Re-run it eagerly here only if that
+      // delay ever proves to matter.
       trailing = this.pending
       this.pending = false
     })
@@ -286,9 +308,12 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
       // That is the user's own explicit instruction, not a partial inventory,
       // so it takes effect now — deferring it would strand the accessory until
       // some unrelated event happened to trigger a second discovery.
-      if (!reported.has(uuid) && !this.pendingRemoval.has(uuid)) {
-        this.pendingRemoval.add(uuid)
-        this.log.info(`"${accessory.displayName}" is missing from the console inventory. Keeping it until a second discovery agrees.`)
+      const firstMissed = this.pendingRemoval.get(uuid)
+      if (!reported.has(uuid) && (firstMissed === undefined || Date.now() - firstMissed < this.confirmRemovalAfterMs)) {
+        if (firstMissed === undefined) {
+          this.pendingRemoval.set(uuid, Date.now())
+          this.log.info(`"${accessory.displayName}" is missing from the console inventory. Keeping it until a later discovery agrees.`)
+        }
         continue
       }
       this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory])

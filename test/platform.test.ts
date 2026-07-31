@@ -117,9 +117,13 @@ describe('uniFiProtectPlatform', () => {
     expect(api.registerPlatformAccessories).not.toHaveBeenCalled()
   })
 
-  it('unregisters a device that vanished, but only once two discoveries agree', async () => {
+  it('unregisters a device that vanished, but only once the confirmation window has passed', async () => {
     const survivor = { id: 'cam2', name: 'Garage', modelKey: 'camera' }
     const { api, platform } = makePlatform(validConfig, [{ id: 'cam1', name: 'Doorbell', modelKey: 'camera' }, survivor])
+    // A zero window still requires a *later* discovery — the first sighting of
+    // a missing device only records when it went missing. Shortened rather than
+    // faked with timers so the test reads as "no waiting", not "an hour later".
+    platform.confirmRemovalAfterMs = 0
     await platform.discover()
 
     platform.client = makeClient([survivor]) as never
@@ -158,6 +162,49 @@ describe('uniFiProtectPlatform', () => {
 
     expect(api.unregisterPlatformAccessories).not.toHaveBeenCalled()
     expect(platform.accessories.size).toBe(20)
+  })
+
+  // The gate must measure elapsed time, not count discoveries. `resyncRequired`
+  // fires per channel on socket open and there are two channels, so a rebooting
+  // console's reconnects deliver back-to-back passes — and a counting gate lets
+  // the second one "confirm" the first from inside the very partial-inventory
+  // window the gate exists to survive.
+  it('does not unregister when a second discovery arrives inside the confirmation window', async () => {
+    const all = Array.from({ length: 20 }, (_, i) => ({ id: `cam${i}`, name: `Cam ${i}`, modelKey: 'camera' }))
+    const { api, platform } = makePlatform(validConfig, all)
+    await platform.discover()
+    expect(platform.accessories.size).toBe(20)
+
+    // Both passes see the same partial inventory, seconds apart — the default
+    // 60s window, not a shortened one.
+    platform.client = makeClient([all[0]]) as never
+    await platform.discover()
+    await platform.discover()
+
+    expect(api.unregisterPlatformAccessories).not.toHaveBeenCalled()
+    expect(platform.accessories.size).toBe(20)
+  })
+
+  it('unregisters once a device has stayed missing past the confirmation window', async () => {
+    vi.useFakeTimers()
+    try {
+      const survivor = { id: 'cam2', name: 'Garage', modelKey: 'camera' }
+      const { api, platform } = makePlatform(validConfig, [{ id: 'cam1', name: 'Doorbell', modelKey: 'camera' }, survivor])
+      await platform.discover()
+
+      platform.client = makeClient([survivor]) as never
+      await platform.discover()
+      expect(api.unregisterPlatformAccessories).not.toHaveBeenCalled()
+
+      vi.setSystemTime(Date.now() + 61_000)
+      await platform.discover()
+
+      expect(api.unregisterPlatformAccessories).toHaveBeenCalledTimes(1)
+      expect(platform.accessories.has('uuid-cam1')).toBe(false)
+    }
+    finally {
+      vi.useRealTimers()
+    }
   })
 
   it('reconciles lights, sensors, chimes and viewers, not only cameras', async () => {

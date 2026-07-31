@@ -2,9 +2,13 @@ import { describe, expect, it } from 'vitest'
 import { DEFAULTS, ensureConfig, renderDeviceHeader, setDeviceSetting } from '../homebridge-ui/public/config-ops.js'
 
 // Minimal fake DOM — just enough to prove renderDeviceHeader never turns
-// console-supplied text into markup. A device named `<img src=x onerror=...>`
-// must land as inert text, so `findByTag` finding an IMG anywhere in the
-// result is the failure. No jsdom dependency needed for this one property.
+// console-supplied text into markup. The load-bearing assertion is the
+// `textContent` one: it holds only if the payload was assigned via textContent,
+// and fails against an `innerHTML`/template-literal implementation, which would
+// have parsed the string into child elements and left `_text` empty. The
+// `findByTag(..., 'IMG')` check is a cheap belt-and-braces restatement — this
+// FakeElement has no markup parser, so nothing here can synthesise an IMG.
+// No jsdom dependency needed for the one property under test.
 class FakeElement {
   tagName: string
   children: (FakeElement | string)[] = []

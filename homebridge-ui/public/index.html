@@ -61,6 +61,11 @@
           // services yet, so honouring the flag is impossible — offering a
           // live checkbox that quietly does nothing would be the dishonest
           // option, and hiding it entirely hides the roadmap.
+          // Sub-project 2 must drop `comingLater` when the services land, or
+          // the settings stay permanently unreachable. Note also that a
+          // hand-edited `hksv: true` renders checked-but-disabled and cannot
+          // be cleared here — harmless while nothing reads it, but it must not
+          // outlive this release.
           input.disabled = true
           wrap.className = 'up-muted'
           wrap.append(' — arriving in a later release')
