@@ -48,6 +48,8 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
   private pending = false
   private retryTimer?: ReturnType<typeof setTimeout>
   private retryDelayMs = RETRY_MIN_MS
+  private retryDriven = false
+  private stopped = false
 
   constructor(
     private readonly log: Logging,
@@ -67,6 +69,10 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
 
     this.api.on('didFinishLaunching', () => this.discoverSafely())
     this.api.on('shutdown', () => {
+      // Clearing the timer is not enough: a discovery still in flight can fail
+      // after shutdown and schedule a fresh retry, whose `events.start()` clears
+      // the bus's own `stopped` and brings the sockets back up.
+      this.stopped = true
       clearTimeout(this.retryTimer)
       this.events?.stop()
     })
@@ -111,8 +117,14 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
   }
 
   private async runDiscovery(): Promise<void> {
-    if (!this.config || this.authFailed)
+    if (!this.config || this.authFailed || this.stopped)
       return
+
+    // Captured up front: a retry-driven pass must not reset the backoff, or a
+    // proxy that permanently 401s the WebSocket upgrade while REST stays healthy
+    // loops at the floor delay forever — every retry succeeding at REST.
+    const retryDriven = this.retryDriven
+    this.retryDriven = false
 
     let devices: DiscoveredDevice[]
     try {
@@ -136,19 +148,21 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
       return
     }
 
-    this.retryDelayMs = RETRY_MIN_MS
+    if (!retryDriven)
+      this.retryDelayMs = RETRY_MIN_MS
     this.reconcile(devices)
     this.startEvents()
   }
 
   private scheduleRetry(): void {
-    if (this.retryTimer)
+    if (this.retryTimer || this.stopped)
       return
     const delay = this.retryDelayMs
     this.retryDelayMs = Math.min(delay * 2, RETRY_MAX_MS)
     this.log.info(`Retrying discovery in ${Math.round(delay / 1000)}s.`)
     this.retryTimer = setTimeout(() => {
       this.retryTimer = undefined
+      this.retryDriven = true
       this.discoverSafely()
     }, delay)
     // A pending retry must never hold the process open.
@@ -172,6 +186,7 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
   private reconcile(devices: DiscoveredDevice[]): void {
     const config = this.config!
     const wanted = new Map<string, DiscoveredDevice>()
+    let usable = 0
 
     for (const device of devices) {
       // `validate` degrades to the raw payload on a schema mismatch, so `id` is
@@ -181,6 +196,9 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
         this.log.warn('Skipping a device the console returned without an id.')
         continue
       }
+      usable++
+      // Counted before the expose filter: flipping every device to
+      // `expose: false` is a legitimate removal and must still unregister.
       if (!settingsFor(config, device.id).expose)
         continue
       wanted.set(this.api.hap.uuid.generate(device.id), device)
@@ -218,8 +236,10 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
     // rooms, scenes and automations do not come back.
     // ponytail: a user who genuinely removes their last Protect device must
     // delete that one accessory by hand. A vastly better failure than the other.
-    if (devices.length === 0 && this.accessories.size > 0) {
-      this.log.warn(`The console reported no devices at all while ${this.accessories.size} accessory/ies are cached. Keeping them — remove any genuinely stale accessory by hand.`)
+    // `usable`, not `devices.length` — an array of id-less objects is just as
+    // broken a response as an empty one, and would wipe the cache identically.
+    if (usable === 0 && this.accessories.size > 0) {
+      this.log.warn(`The console reported no usable devices while ${this.accessories.size} accessory/ies are cached. Keeping them — remove any genuinely stale accessory by hand.`)
       return
     }
 

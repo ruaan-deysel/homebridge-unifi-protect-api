@@ -113,6 +113,18 @@ describe('uniFiProtectPlatform', () => {
     expect(platform.accessories.size).toBe(1)
   })
 
+  // N3: an array of id-less objects is as broken a response as an empty one.
+  it('keeps accessories when every discovered device lacks an id', async () => {
+    const { api, platform } = makePlatform(validConfig, [{ id: 'cam1', name: 'Doorbell', modelKey: 'camera' }])
+    await platform.discover()
+
+    platform.client = makeClient([{ name: 'Doorbell', modelKey: 'camera' }]) as never
+    await platform.discover()
+
+    expect(api.unregisterPlatformAccessories).not.toHaveBeenCalled()
+    expect(platform.accessories.size).toBe(1)
+  })
+
   it('keeps accessories when the console is unreachable', async () => {
     const { api, platform } = makePlatform(validConfig, [{ id: 'cam1', name: 'Doorbell', modelKey: 'camera' }])
     await platform.discover()
@@ -238,6 +250,64 @@ describe('uniFiProtectPlatform', () => {
     expect(bus.start).toHaveBeenCalledTimes(2)
     // Wired once, however many times the bus is restarted.
     expect(bus.listenerCount('deviceUpdate')).toBe(1)
+  })
+
+  // N1: every retry here succeeds at REST, so resetting the backoff on success
+  // turned this into a flat 15s loop forever.
+  it('backs off between repeated websocket auth failures', async () => {
+    vi.useFakeTimers()
+    try {
+      const { platform, bus } = makePlatform()
+      await platform.discover()
+      expect(bus.start).toHaveBeenCalledTimes(1)
+
+      bus.emit('authFailed', new ProtectAuthError('ws 401'))
+      await vi.advanceTimersByTimeAsync(15_000)
+      expect(bus.start).toHaveBeenCalledTimes(2)
+
+      // The second retry must wait 30s, not another 15.
+      bus.emit('authFailed', new ProtectAuthError('ws 401'))
+      await vi.advanceTimersByTimeAsync(20_000)
+      expect(bus.start).toHaveBeenCalledTimes(2)
+
+      await vi.advanceTimersByTimeAsync(15_000)
+      expect(bus.start).toHaveBeenCalledTimes(3)
+    }
+    finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // N2: a discovery in flight at shutdown could fail afterwards, schedule a
+  // retry past the clearTimeout, and bring the sockets back up.
+  it('never discovers or restarts the bus after shutdown', async () => {
+    vi.useFakeTimers()
+    try {
+      const { api, platform, bus } = makePlatform()
+      let fail = (_: unknown): void => {}
+      const hanging = makeClient([])
+      hanging.getMetaInfo = vi.fn(() => new Promise<never>((_, reject) => {
+        fail = reject
+      }))
+      platform.client = hanging as never
+
+      const inFlight = platform.discover()
+      api.emit('shutdown')
+      fail(new ProtectUnavailableError('down'))
+      await inFlight
+
+      expect(bus.stop).toHaveBeenCalled()
+
+      const after = makeClient([])
+      platform.client = after as never
+      await vi.advanceTimersByTimeAsync(600_000)
+
+      expect(after.getMetaInfo).not.toHaveBeenCalled()
+      expect(bus.start).not.toHaveBeenCalled()
+    }
+    finally {
+      vi.useRealTimers()
+    }
   })
 
   it('survives a malformed device update frame', async () => {
