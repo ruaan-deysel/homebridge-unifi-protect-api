@@ -57,8 +57,17 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
   private retryDelayMs = RETRY_MIN_MS
   private retryDriven = false
   /**
-   * UUID -> the timestamp it first went missing. A device must stay absent for
-   * at least `confirmRemovalAfterMs` before it is unregistered.
+   * UUID -> a `performance.now()` reading from when it first went missing. A
+   * device must stay absent for at least `confirmRemovalAfterMs` before it is
+   * unregistered.
+   *
+   * `performance.now()`, NEVER `Date.now()`: it is monotonic and immune to
+   * wall-clock steps. A Raspberry Pi has no battery-backed RTC, so after a
+   * power cut it boots with a stale clock and NTP steps it — often by hours,
+   * often within the first minute of uptime, which is exactly the window this
+   * gate exists to survive. A forward step landing between the first-missed
+   * reading and the next discovery would satisfy the gate instantly and let a
+   * single partial inventory confirm itself.
    *
    * Deliberately a clock, not a discovery counter. Counting discoveries makes
    * the gate depend on discovery timing, and discoveries can arrive seconds
@@ -309,9 +318,9 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
       // so it takes effect now — deferring it would strand the accessory until
       // some unrelated event happened to trigger a second discovery.
       const firstMissed = this.pendingRemoval.get(uuid)
-      if (!reported.has(uuid) && (firstMissed === undefined || Date.now() - firstMissed < this.confirmRemovalAfterMs)) {
+      if (!reported.has(uuid) && (firstMissed === undefined || performance.now() - firstMissed < this.confirmRemovalAfterMs)) {
         if (firstMissed === undefined) {
-          this.pendingRemoval.set(uuid, Date.now())
+          this.pendingRemoval.set(uuid, performance.now())
           this.log.info(`"${accessory.displayName}" is missing from the console inventory. Keeping it until a later discovery agrees.`)
         }
         continue

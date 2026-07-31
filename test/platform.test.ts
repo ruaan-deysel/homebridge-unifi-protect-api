@@ -185,8 +185,40 @@ describe('uniFiProtectPlatform', () => {
     expect(platform.accessories.size).toBe(20)
   })
 
+  // A Pi has no battery-backed RTC: after a power cut it boots with a stale
+  // clock and NTP steps it, often by hours and often within the first minute of
+  // uptime — the exact window this gate exists to survive. On a wall clock that
+  // step satisfies the window instantly and one partial inventory confirms
+  // itself. Fails against `Date.now()`, for precisely that reason.
+  it('is not fooled by an NTP step jumping the wall clock forward', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout'] })
+    try {
+      const survivor = { id: 'cam2', name: 'Garage', modelKey: 'camera' }
+      const { api, platform } = makePlatform(validConfig, [{ id: 'cam1', name: 'Doorbell', modelKey: 'camera' }, survivor])
+      await platform.discover()
+
+      platform.client = makeClient([survivor]) as never
+      await platform.discover()
+
+      // An hour of wall clock, no elapsed uptime.
+      vi.setSystemTime(Date.now() + 3_600_000)
+      await platform.discover()
+
+      expect(api.unregisterPlatformAccessories).not.toHaveBeenCalled()
+      expect(platform.accessories.has('uuid-cam1')).toBe(true)
+    }
+    finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // The counterweight to the test above: the gate must actually open, or it
+  // would be satisfied by a plugin that simply never deletes anything.
+  // `toFake: ['performance']` is required — vitest does not fake
+  // `performance.now()` by default, and the gate reads a monotonic clock, so
+  // `vi.setSystemTime` would move nothing and this test would pass vacuously.
   it('unregisters once a device has stayed missing past the confirmation window', async () => {
-    vi.useFakeTimers()
+    vi.useFakeTimers({ toFake: ['performance', 'setTimeout', 'clearTimeout'] })
     try {
       const survivor = { id: 'cam2', name: 'Garage', modelKey: 'camera' }
       const { api, platform } = makePlatform(validConfig, [{ id: 'cam1', name: 'Doorbell', modelKey: 'camera' }, survivor])
@@ -196,7 +228,7 @@ describe('uniFiProtectPlatform', () => {
       await platform.discover()
       expect(api.unregisterPlatformAccessories).not.toHaveBeenCalled()
 
-      vi.setSystemTime(Date.now() + 61_000)
+      vi.advanceTimersByTime(61_000)
       await platform.discover()
 
       expect(api.unregisterPlatformAccessories).toHaveBeenCalledTimes(1)
