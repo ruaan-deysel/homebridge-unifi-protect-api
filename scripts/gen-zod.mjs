@@ -28,15 +28,67 @@ const OPTIONAL_OVERRIDES = {
   nvrArmMode: ['armProfileId'],
 }
 
+/**
+ * Every JSON Schema keyword this generator understands, plus the annotation-only
+ * ones it deliberately ignores. `convert` throws on anything else.
+ *
+ * This is the point of the whitelist: silently ignoring an unrecognised keyword
+ * produces a quietly weaker schemas.ts with every test still green. A spec bump
+ * that introduces `pattern`, `not` or `prefixItems` must break the build, loudly,
+ * rather than emit validation that no longer says what the spec says.
+ */
+const HANDLED = new Set([
+  '$ref',
+  'type',
+  'const',
+  'enum',
+  'allOf',
+  'oneOf',
+  'anyOf',
+  'discriminator',
+  'items',
+  'properties',
+  'required',
+  'additionalProperties',
+  'format',
+  'minimum',
+  'maximum',
+  'exclusiveMinimum',
+  'minLength',
+  'maxLength',
+  'minItems',
+  'maxItems',
+])
+/** Documentation only — no effect on validation. */
+const IGNORED = new Set(['description', 'title', 'examples', 'example', 'deprecated'])
+
 function convert(node, name) {
   if (!node || typeof node !== 'object')
     return 'z.unknown()'
 
+  for (const key of Object.keys(node)) {
+    if (!HANDLED.has(key) && !IGNORED.has(key))
+      throw new Error(`gen-zod: unhandled JSON Schema keyword ${JSON.stringify(key)} in schema "${name}". Add a handler in convert() — do not ignore it, an ignored keyword silently weakens the generated schema.`)
+  }
+
   if (node.$ref) {
     const target = node.$ref.replace('#/components/schemas/', '')
+    // A build-time failure beats emitting a module that throws a TDZ
+    // ReferenceError at import time on a user's Homebridge instance.
     if (target === name)
-      return 'z.lazy(() => z.unknown())' // no self-refs in this spec; guard anyway
+      throw new Error(`gen-zod: schema "${name}" references itself; convert() cannot emit a recursive schema. Add a z.lazy wrapper if the spec ever needs one.`)
     return idOf(target)
+  }
+
+  // `type` may be an array such as ["string", "null"] — 95 occurrences in this
+  // spec. This MUST come before const/enum: several schemas are both nullable
+  // and enumerated (relayOutputState and friends), and checking enum first
+  // drops the .nullable() on the floor.
+  if (Array.isArray(node.type)) {
+    const nonNull = node.type.filter(t => t !== 'null')
+    const bases = nonNull.map(t => convert({ ...node, type: t }, name))
+    const base = bases.length === 1 ? bases[0] : `z.union([${bases.join(', ')}])`
+    return node.type.includes('null') ? `${base}.nullable()` : base
   }
 
   if (node.const !== undefined)
@@ -66,14 +118,6 @@ function convert(node, name) {
     return `z.union([${inner.join(', ')}])`
   }
 
-  // `type` may be an array such as ["string", "null"] — 95 occurrences in this spec.
-  if (Array.isArray(node.type)) {
-    const nonNull = node.type.filter(t => t !== 'null')
-    const bases = nonNull.map(t => convert({ ...node, type: t }, name))
-    const base = bases.length === 1 ? bases[0] : `z.union([${bases.join(', ')}])`
-    return node.type.includes('null') ? `${base}.nullable()` : base
-  }
-
   switch (node.type) {
     case 'string':
       return node.format === 'uri' ? 'z.url()' : withStr(node, 'z.string()')
@@ -86,7 +130,7 @@ function convert(node, name) {
     case 'null':
       return 'z.null()'
     case 'array':
-      return `z.array(${convert(node.items, name)})`
+      return withArr(node, `z.array(${convert(node.items, name)})`)
     case 'object':
       return objectOf(node, name)
     default:
@@ -109,13 +153,32 @@ function withNum(node, base) {
     s += `.min(${node.minimum})`
   if (node.maximum !== undefined)
     s += `.max(${node.maximum})`
+  // OpenAPI 3.1 follows JSON Schema 2020-12: exclusiveMinimum is a number, not
+  // a boolean modifier on `minimum`. 38 occurrences, all `*Event.start`.
+  if (node.exclusiveMinimum !== undefined)
+    s += `.gt(${node.exclusiveMinimum})`
+  return s
+}
+
+function withArr(node, base) {
+  let s = base
+  if (node.minItems !== undefined)
+    s += `.min(${node.minItems})`
+  if (node.maxItems !== undefined)
+    s += `.max(${node.maxItems})`
   return s
 }
 
 function objectOf(node, name) {
   const props = node.properties ?? {}
   const required = new Set(node.required ?? [])
-  for (const key of OPTIONAL_OVERRIDES[node.title ?? name] ?? []) required.delete(key)
+  // Self-policing: a no-op override is the dangerous direction. If the spec ever
+  // stops marking the field required, the entry must be deleted rather than left
+  // to rot as a silent permanent weakening of the schema.
+  for (const key of OPTIONAL_OVERRIDES[node.title ?? name] ?? []) {
+    if (!required.delete(key))
+      throw new Error(`gen-zod: OPTIONAL_OVERRIDES entry ${node.title ?? name}.${key} is no longer required in the spec — delete the entry.`)
+  }
   const entries = Object.entries(props).map(([key, value]) => {
     const optional = required.has(key) ? '' : '.optional()'
     return `  ${JSON.stringify(key)}: ${convert(value, name)}${optional},`
@@ -144,9 +207,10 @@ function order(names) {
       .filter(n => !done.has(n) && [...deps.get(n)].every(d => done.has(d) || !deps.has(d)))
       .sort()
     if (!ready.length) {
-      // Cycle: emit the rest alphabetically. This spec has none, but never hang.
-      out.push(...names.filter(n => !done.has(n)).sort())
-      break
+      // A mutual $ref cycle cannot be emitted as plain const declarations: the
+      // module would throw a TDZ ReferenceError at import time on a user's
+      // Homebridge instance. Fail the build instead — this spec has no cycles.
+      throw new Error(`gen-zod: $ref cycle among [${names.filter(n => !done.has(n)).sort().join(', ')}]. Emitting these needs z.lazy(); plain consts would TDZ at import.`)
     }
     for (const n of ready) {
       out.push(n)
@@ -176,7 +240,14 @@ const body = names.map((n) => {
   const id = idOf(n)
   const type = id.replace(/Schema$/, '')
   const typeName = type.charAt(0).toUpperCase() + type.slice(1)
-  return `export const ${id} = ${convert(schemas[n], n)}\nexport type ${typeName} = z.infer<typeof ${id}>\n`
+  const expr = convert(schemas[n], n)
+  // Almost every schema here is looseObject. The handful the spec closes with
+  // `additionalProperties: false` behave the opposite way, and a consumer that
+  // assumes otherwise will see valid payloads rejected after a firmware bump.
+  const warn = expr.startsWith('z.strictObject')
+    ? '// WARNING: the spec sets `additionalProperties: false` on this schema, so unlike\n// every looseObject below it REJECTS unknown fields. A newer firmware adding a\n// field here fails validation — consumers must degrade rather than throw.\n'
+    : ''
+  return `${warn}export const ${id} = ${expr}\nexport type ${typeName} = z.infer<typeof ${id}>\n`
 }).join('\n')
 
 writeFileSync(OUT, `// GENERATED by scripts/gen-zod.mjs from ${SPEC}. Do not edit by hand.

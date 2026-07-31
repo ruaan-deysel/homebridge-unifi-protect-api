@@ -1,34 +1,60 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { cameraSchema, chimeSchema, existingRtspsStreamsSchema, liveviewSchema, nvrSchema } from '../src/protect/schemas.js'
+import {
+  cameraSchema,
+  chimeSchema,
+  existingRtspsStreamsSchema,
+  liveviewSchema,
+  nvrSchema,
+  relayOutputStateSchema,
+} from '../src/protect/schemas.js'
 
 const load = (n: string) => JSON.parse(readFileSync(`test/fixtures/${n}.json`, 'utf8'))
 
 describe('generated schemas parse real hardware payloads', () => {
   it('parses every camera', () => {
-    for (const camera of load('cameras'))
-      expect(cameraSchema.safeParse(camera).success).toBe(true)
+    // .parse, not .safeParse(...).success — a failure must name the offending
+    // field in CI rather than print `false !== true`.
+    for (const camera of load('cameras')) cameraSchema.parse(camera)
   })
 
   it('parses chimes, liveviews and the nvr', () => {
-    for (const chime of load('chimes'))
-      expect(chimeSchema.safeParse(chime).success).toBe(true)
-    for (const view of load('liveviews'))
-      expect(liveviewSchema.safeParse(view).success).toBe(true)
-    expect(nvrSchema.safeParse(load('nvrs')).success).toBe(true)
+    for (const chime of load('chimes')) chimeSchema.parse(chime)
+    for (const view of load('liveviews')) liveviewSchema.parse(view)
+    nvrSchema.parse(load('nvrs'))
   })
 
   it('parses the rtsps stream response', () => {
-    expect(existingRtspsStreamsSchema.safeParse(load('rtsps-stream')).success).toBe(true)
+    existingRtspsStreamsSchema.parse(load('rtsps-stream'))
+  })
+
+  it('rejects unknown fields on the rtsps stream response', () => {
+    // The spec sets additionalProperties: false here, so this schema alone does
+    // NOT preserve unknown fields. Pinned deliberately: it is the one place a
+    // firmware bump can fail validation, which is why consumers must degrade.
+    expect(existingRtspsStreamsSchema.safeParse({ ...load('rtsps-stream'), ultra: null }).success).toBe(false)
+  })
+
+  it('accepts null for nullable enums such as relay output state', () => {
+    // type: ["string","null"] alongside `enum` — the generator must emit both
+    // the enum and the .nullable(), not just whichever branch it checks first.
+    expect(relayOutputStateSchema.parse(null)).toBeNull()
+    expect(relayOutputStateSchema.parse('offOtp')).toBe('offOtp')
   })
 
   it('keeps redacted cross-references consistent', () => {
-    // Redaction is hash-based, so chimes[].cameraIds must still resolve to a
-    // camera id. If this fails the fixtures were redacted inconsistently and
-    // any reconciliation test built on them is meaningless.
+    // Redaction is hash-based, so every id that points at a camera must still
+    // resolve. If this fails the fixtures were redacted inconsistently and any
+    // reconciliation test built on them is meaningless.
     const ids = new Set(load('cameras').map((c: { id: string }) => c.id))
     for (const chime of load('chimes')) {
       for (const id of chime.cameraIds) expect(ids.has(id)).toBe(true)
+      for (const ring of chime.ringSettings) expect(ids.has(ring.cameraId)).toBe(true)
+    }
+    for (const view of load('liveviews')) {
+      for (const slot of view.slots) {
+        for (const id of slot.cameras) expect(ids.has(id)).toBe(true)
+      }
     }
   })
 
@@ -38,7 +64,7 @@ describe('generated schemas parse real hardware payloads', () => {
     expect((parsed as Record<string, unknown>).someFutureField).toBe(42)
   })
 
-  it('accepts an unknown enum member without throwing', () => {
+  it('rejects an unknown enum member — Task 3 must degrade, not throw', () => {
     // A new videoMode in a future firmware must degrade, not crash the plugin.
     const [camera] = load('cameras')
     const result = cameraSchema.safeParse({ ...camera, videoMode: 'someFutureMode' })

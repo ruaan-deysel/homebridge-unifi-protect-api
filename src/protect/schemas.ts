@@ -222,6 +222,9 @@ export type ChimeModelKey = z.infer<typeof chimeModelKeySchema>
 export const createdAtSchema = z.number()
 export type CreatedAt = z.infer<typeof createdAtSchema>
 
+// WARNING: the spec sets `additionalProperties: false` on this schema, so unlike
+// every looseObject below it REJECTS unknown fields. A newer firmware adding a
+// field here fails validation — consumers must degrade rather than throw.
 export const createdRtspsStreamsSchema = z.strictObject({
   "high": z.url().optional(),
   "medium": z.url().optional(),
@@ -256,6 +259,9 @@ export type EventId = z.infer<typeof eventIdSchema>
 export const eventModelKeySchema = z.literal("event")
 export type EventModelKey = z.infer<typeof eventModelKeySchema>
 
+// WARNING: the spec sets `additionalProperties: false` on this schema, so unlike
+// every looseObject below it REJECTS unknown fields. A newer firmware adding a
+// field here fails validation — consumers must degrade rather than throw.
 export const existingRtspsStreamsSchema = z.strictObject({
   "high": z.url().nullable().optional(),
   "medium": z.url().nullable().optional(),
@@ -507,10 +513,10 @@ export type RelayId = z.infer<typeof relayIdSchema>
 export const relayInputActionOutputIdSchema = z.number().nullable()
 export type RelayInputActionOutputId = z.infer<typeof relayInputActionOutputIdSchema>
 
-export const relayInputActionTriggerSchema = z.enum(["switchedOn", "switchedOff"])
+export const relayInputActionTriggerSchema = z.enum(["switchedOn", "switchedOff"]).nullable()
 export type RelayInputActionTrigger = z.infer<typeof relayInputActionTriggerSchema>
 
-export const relayInputActionTypeSchema = z.enum(["setOutputOn", "setOutputOff", "toggleOutput", "followInput"])
+export const relayInputActionTypeSchema = z.enum(["setOutputOn", "setOutputOff", "toggleOutput", "followInput"]).nullable()
 export type RelayInputActionType = z.infer<typeof relayInputActionTypeSchema>
 
 export const relayInputIdSchema = z.number()
@@ -519,7 +525,7 @@ export type RelayInputId = z.infer<typeof relayInputIdSchema>
 export const relayInputNameSchema = z.string().nullable()
 export type RelayInputName = z.infer<typeof relayInputNameSchema>
 
-export const relayInputStateSchema = z.enum(["on", "off"])
+export const relayInputStateSchema = z.enum(["on", "off"]).nullable()
 export type RelayInputState = z.infer<typeof relayInputStateSchema>
 
 export const relayLedIsEnabledSchema = z.boolean()
@@ -543,10 +549,10 @@ export type RelayOutputPulseDuration = z.infer<typeof relayOutputPulseDurationSc
 export const relayOutputRebootStateSchema = z.enum(["restore", "on", "off"])
 export type RelayOutputRebootState = z.infer<typeof relayOutputRebootStateSchema>
 
-export const relayOutputStateSchema = z.enum(["on", "off", "offOtp"])
+export const relayOutputStateSchema = z.enum(["on", "off", "offOtp"]).nullable()
 export type RelayOutputState = z.infer<typeof relayOutputStateSchema>
 
-export const relayOutputTypeSchema = z.enum(["garageDoor", "gate", "valve", "siren", "custom"])
+export const relayOutputTypeSchema = z.enum(["garageDoor", "gate", "valve", "siren", "custom"]).nullable()
 export type RelayOutputType = z.infer<typeof relayOutputTypeSchema>
 
 export const ringtoneIdSchema = z.string()
@@ -555,7 +561,7 @@ export type RingtoneId = z.infer<typeof ringtoneIdSchema>
 export const sensorAlarmTriggeredAtSchema = z.number().nullable()
 export type SensorAlarmTriggeredAt = z.infer<typeof sensorAlarmTriggeredAtSchema>
 
-export const sensorArmProfileIdsSchema = z.array(z.string().max(64)).nullable()
+export const sensorArmProfileIdsSchema = z.array(z.string().max(64)).max(32).nullable()
 export type SensorArmProfileIds = z.infer<typeof sensorArmProfileIdsSchema>
 
 export const sensorExternalLeakDetectedAtSchema = z.number().nullable()
@@ -660,13 +666,13 @@ export type SpeakerVolume = z.infer<typeof speakerVolumeSchema>
 export const streamLimitSchema = z.number()
 export type StreamLimit = z.infer<typeof streamLimitSchema>
 
-export const talkbackStreamBitsPerSampleSchema = z.number().int()
+export const talkbackStreamBitsPerSampleSchema = z.number().int().gt(0)
 export type TalkbackStreamBitsPerSample = z.infer<typeof talkbackStreamBitsPerSampleSchema>
 
 export const talkbackStreamCodecSchema = z.string()
 export type TalkbackStreamCodec = z.infer<typeof talkbackStreamCodecSchema>
 
-export const talkbackStreamSamplingRateSchema = z.number().int()
+export const talkbackStreamSamplingRateSchema = z.number().int().gt(0)
 export type TalkbackStreamSamplingRate = z.infer<typeof talkbackStreamSamplingRateSchema>
 
 export const talkbackStreamUrlSchema = z.url()
@@ -765,7 +771,7 @@ export const alarmHubBatteryConnectedEventSchema = z.looseObject({
   "id": eventIdSchema,
   "modelKey": eventModelKeySchema,
   "type": z.literal("alarmHubBatteryConnected"),
-  "start": z.number(),
+  "start": z.number().gt(0),
   "end": z.number().nullable().optional(),
   "device": deviceIdSchema,
 })
@@ -775,7 +781,7 @@ export const alarmHubBatteryLowEventSchema = z.looseObject({
   "id": eventIdSchema,
   "modelKey": eventModelKeySchema,
   "type": z.literal("alarmHubBatteryLow"),
-  "start": z.number(),
+  "start": z.number().gt(0),
   "end": z.number().nullable().optional(),
   "device": deviceIdSchema,
 })
@@ -785,7 +791,7 @@ export const alarmHubButtonPressEventSchema = z.looseObject({
   "id": eventIdSchema,
   "modelKey": eventModelKeySchema,
   "type": z.literal("alarmHubButtonPress"),
-  "start": z.number(),
+  "start": z.number().gt(0),
   "end": z.number().nullable().optional(),
   "device": deviceIdSchema,
   "metadata": z.looseObject({
@@ -815,7 +821,7 @@ export const alarmHubEntryClosedEventSchema = z.looseObject({
   "id": eventIdSchema,
   "modelKey": eventModelKeySchema,
   "type": z.literal("alarmHubEntryClosed"),
-  "start": z.number(),
+  "start": z.number().gt(0),
   "end": z.number().nullable().optional(),
   "device": deviceIdSchema,
   "metadata": z.looseObject({
@@ -839,7 +845,7 @@ export const alarmHubEntryOpenedEventSchema = z.looseObject({
   "id": eventIdSchema,
   "modelKey": eventModelKeySchema,
   "type": z.literal("alarmHubEntryOpened"),
-  "start": z.number(),
+  "start": z.number().gt(0),
   "end": z.number().nullable().optional(),
   "device": deviceIdSchema,
   "metadata": z.looseObject({
@@ -863,7 +869,7 @@ export const alarmHubGlassBreakEventSchema = z.looseObject({
   "id": eventIdSchema,
   "modelKey": eventModelKeySchema,
   "type": z.literal("alarmHubGlassBreak"),
-  "start": z.number(),
+  "start": z.number().gt(0),
   "end": z.number().nullable().optional(),
   "device": deviceIdSchema,
   "metadata": z.looseObject({
@@ -890,7 +896,7 @@ export const alarmHubMotionEventSchema = z.looseObject({
   "id": eventIdSchema,
   "modelKey": eventModelKeySchema,
   "type": z.literal("alarmHubMotion"),
-  "start": z.number(),
+  "start": z.number().gt(0),
   "end": z.number().nullable().optional(),
   "device": deviceIdSchema,
   "metadata": z.looseObject({
@@ -914,7 +920,7 @@ export const alarmHubRelaySwitchedEventSchema = z.looseObject({
   "id": eventIdSchema,
   "modelKey": eventModelKeySchema,
   "type": z.literal("alarmHubRelaySwitched"),
-  "start": z.number(),
+  "start": z.number().gt(0),
   "end": z.number().nullable().optional(),
   "device": deviceIdSchema,
 })
@@ -924,7 +930,7 @@ export const alarmHubSmokeEventSchema = z.looseObject({
   "id": eventIdSchema,
   "modelKey": eventModelKeySchema,
   "type": z.literal("alarmHubSmoke"),
-  "start": z.number(),
+  "start": z.number().gt(0),
   "end": z.number().nullable().optional(),
   "device": deviceIdSchema,
   "metadata": z.looseObject({
@@ -951,7 +957,7 @@ export const alarmHubTamperEventSchema = z.looseObject({
   "id": eventIdSchema,
   "modelKey": eventModelKeySchema,
   "type": z.literal("alarmHubTamper"),
-  "start": z.number(),
+  "start": z.number().gt(0),
   "end": z.number().nullable().optional(),
   "device": deviceIdSchema,
   "metadata": z.looseObject({
@@ -1017,7 +1023,7 @@ export const cameraMotionEventSchema = z.looseObject({
   "id": eventIdSchema,
   "modelKey": eventModelKeySchema,
   "type": z.literal("motion"),
-  "start": z.number(),
+  "start": z.number().gt(0),
   "end": z.number().nullable().optional(),
   "device": deviceIdSchema,
 })
@@ -1033,7 +1039,7 @@ export const cameraSmartDetectAudioEventSchema = z.looseObject({
   "id": eventIdSchema,
   "modelKey": eventModelKeySchema,
   "type": z.literal("smartAudioDetect"),
-  "start": z.number(),
+  "start": z.number().gt(0),
   "end": z.number().nullable().optional(),
   "device": deviceIdSchema,
   "smartDetectTypes": z.array(z.enum(["alrmSmoke", "alrmCmonx", "alrmSiren", "alrmBabyCry", "alrmSpeak", "alrmBark", "alrmBurglar", "alrmCarHorn", "alrmGlassBreak"])).nullable(),
@@ -1044,7 +1050,7 @@ export const cameraSmartDetectLineEventSchema = z.looseObject({
   "id": eventIdSchema,
   "modelKey": eventModelKeySchema,
   "type": z.literal("smartDetectLine"),
-  "start": z.number(),
+  "start": z.number().gt(0),
   "end": z.number().nullable().optional(),
   "device": deviceIdSchema,
   "smartDetectTypes": z.array(z.enum(["person", "vehicle", "package", "licensePlate", "face", "animal"])).nullable(),
@@ -1055,7 +1061,7 @@ export const cameraSmartDetectLoiterEventSchema = z.looseObject({
   "id": eventIdSchema,
   "modelKey": eventModelKeySchema,
   "type": z.literal("smartDetectLoiterZone"),
-  "start": z.number(),
+  "start": z.number().gt(0),
   "end": z.number().nullable().optional(),
   "device": deviceIdSchema,
   "smartDetectTypes": z.array(z.enum(["person", "vehicle", "package", "licensePlate", "face", "animal"])).nullable(),
@@ -1066,7 +1072,7 @@ export const cameraSmartDetectZoneEventSchema = z.looseObject({
   "id": eventIdSchema,
   "modelKey": eventModelKeySchema,
   "type": z.literal("smartDetectZone"),
-  "start": z.number(),
+  "start": z.number().gt(0),
   "end": z.number().nullable().optional(),
   "device": deviceIdSchema,
   "smartDetectTypes": z.array(z.enum(["person", "vehicle", "package", "licensePlate", "face", "animal"])).nullable(),
@@ -1079,7 +1085,7 @@ export const chimeReferenceSchema = z.looseObject({
 })
 export type ChimeReference = z.infer<typeof chimeReferenceSchema>
 
-export const createdQualitiesSchema = z.array(channelQualitySchema)
+export const createdQualitiesSchema = z.array(channelQualitySchema).min(1)
 export type CreatedQualities = z.infer<typeof createdQualitiesSchema>
 
 export const deviceBulkReferenceSchema = z.union([z.looseObject({
@@ -1139,7 +1145,7 @@ export const fingerprintIdentifiedEventSchema = z.looseObject({
   "id": eventIdSchema,
   "modelKey": eventModelKeySchema,
   "type": z.literal("fingerprintIdentified"),
-  "start": z.number(),
+  "start": z.number().gt(0),
   "end": z.number().nullable().optional(),
   "device": deviceIdSchema,
   "metadata": fingerprintMetadataSchema,
@@ -1174,7 +1180,7 @@ export const lightMotionEventSchema = z.looseObject({
   "id": eventIdSchema,
   "modelKey": eventModelKeySchema,
   "type": z.literal("lightMotion"),
-  "start": z.number(),
+  "start": z.number().gt(0),
   "device": deviceIdSchema,
 })
 export type LightMotionEvent = z.infer<typeof lightMotionEventSchema>
@@ -1216,7 +1222,7 @@ export const nfcCardScannedEventSchema = z.looseObject({
   "id": eventIdSchema,
   "modelKey": eventModelKeySchema,
   "type": z.literal("nfcCardScanned"),
-  "start": z.number(),
+  "start": z.number().gt(0),
   "end": z.number().nullable().optional(),
   "device": deviceIdSchema,
   "metadata": nfcMetadataSchema,
@@ -1270,7 +1276,7 @@ export const relayInputChangedEventSchema = z.looseObject({
   "id": eventIdSchema,
   "modelKey": eventModelKeySchema,
   "type": z.literal("relayInputChanged"),
-  "start": z.number(),
+  "start": z.number().gt(0),
   "end": z.number().nullable().optional(),
   "device": deviceIdSchema,
   "metadata": z.looseObject({
@@ -1306,14 +1312,14 @@ export const relayReferenceSchema = z.looseObject({
 })
 export type RelayReference = z.infer<typeof relayReferenceSchema>
 
-export const removedQualitiesSchema = z.union([z.array(channelQualitySchema), channelQualitySchema])
+export const removedQualitiesSchema = z.union([z.array(channelQualitySchema).min(1), channelQualitySchema])
 export type RemovedQualities = z.infer<typeof removedQualitiesSchema>
 
 export const ringEventSchema = z.looseObject({
   "id": eventIdSchema,
   "modelKey": eventModelKeySchema,
   "type": z.literal("ring"),
-  "start": z.number(),
+  "start": z.number().gt(0),
   "end": z.number().nullable().optional(),
   "device": deviceIdSchema,
 })
@@ -1331,7 +1337,7 @@ export const sensorAlarmEventSchema = z.looseObject({
   "id": eventIdSchema,
   "modelKey": eventModelKeySchema,
   "type": z.literal("sensorAlarm"),
-  "start": z.number(),
+  "start": z.number().gt(0),
   "end": z.number().nullable().optional(),
   "device": deviceIdSchema,
   "metadata": z.looseObject({
@@ -1346,7 +1352,7 @@ export const sensorBatteryLowEventSchema = z.looseObject({
   "id": eventIdSchema,
   "modelKey": eventModelKeySchema,
   "type": z.literal("sensorBatteryLow"),
-  "start": z.number(),
+  "start": z.number().gt(0),
   "end": z.number().nullable().optional(),
   "device": deviceIdSchema,
   "metadata": z.looseObject({
@@ -1361,7 +1367,7 @@ export const sensorButtonPressedEventSchema = z.looseObject({
   "id": eventIdSchema,
   "modelKey": eventModelKeySchema,
   "type": z.literal("sensorButtonPressed"),
-  "start": z.number(),
+  "start": z.number().gt(0),
   "end": z.number().nullable().optional(),
   "device": deviceIdSchema,
   "metadata": z.looseObject({
@@ -1376,7 +1382,7 @@ export const sensorClosedEventSchema = z.looseObject({
   "id": eventIdSchema,
   "modelKey": eventModelKeySchema,
   "type": z.literal("sensorClosed"),
-  "start": z.number(),
+  "start": z.number().gt(0),
   "end": z.number().nullable().optional(),
   "device": deviceIdSchema,
   "metadata": z.looseObject({
@@ -1391,7 +1397,7 @@ export const sensorCoFaultEventSchema = z.looseObject({
   "id": eventIdSchema,
   "modelKey": eventModelKeySchema,
   "type": z.literal("sensorCoFault"),
-  "start": z.number(),
+  "start": z.number().gt(0),
   "end": z.number().nullable().optional(),
   "device": deviceIdSchema,
 })
@@ -1401,7 +1407,7 @@ export const sensorExtremeValueEventSchema = z.looseObject({
   "id": eventIdSchema,
   "modelKey": eventModelKeySchema,
   "type": z.literal("sensorExtremeValues"),
-  "start": z.number(),
+  "start": z.number().gt(0),
   "end": z.number().nullable().optional(),
   "device": deviceIdSchema,
   "metadata": z.looseObject({
@@ -1422,7 +1428,7 @@ export const sensorMotionEventSchema = z.looseObject({
   "id": eventIdSchema,
   "modelKey": eventModelKeySchema,
   "type": z.literal("sensorMotion"),
-  "start": z.number(),
+  "start": z.number().gt(0),
   "end": z.number().nullable().optional(),
   "device": deviceIdSchema,
 })
@@ -1432,7 +1438,7 @@ export const sensorOpenEventSchema = z.looseObject({
   "id": eventIdSchema,
   "modelKey": eventModelKeySchema,
   "type": z.literal("sensorOpened"),
-  "start": z.number(),
+  "start": z.number().gt(0),
   "end": z.number().nullable().optional(),
   "device": deviceIdSchema,
   "metadata": z.looseObject({
@@ -1453,7 +1459,7 @@ export const sensorSmokeBatteryLowEventSchema = z.looseObject({
   "id": eventIdSchema,
   "modelKey": eventModelKeySchema,
   "type": z.literal("sensorSmokeBatteryLow"),
-  "start": z.number(),
+  "start": z.number().gt(0),
   "end": z.number().nullable().optional(),
   "device": deviceIdSchema,
 })
@@ -1463,7 +1469,7 @@ export const sensorSmokeEndOfLifeEventSchema = z.looseObject({
   "id": eventIdSchema,
   "modelKey": eventModelKeySchema,
   "type": z.literal("sensorSmokeEndOfLife"),
-  "start": z.number(),
+  "start": z.number().gt(0),
   "end": z.number().nullable().optional(),
   "device": deviceIdSchema,
 })
@@ -1473,7 +1479,7 @@ export const sensorSmokeFaultEventSchema = z.looseObject({
   "id": eventIdSchema,
   "modelKey": eventModelKeySchema,
   "type": z.literal("sensorSmokeFault"),
-  "start": z.number(),
+  "start": z.number().gt(0),
   "end": z.number().nullable().optional(),
   "device": deviceIdSchema,
 })
@@ -1483,7 +1489,7 @@ export const sensorSmokeNeedsCleaningEventSchema = z.looseObject({
   "id": eventIdSchema,
   "modelKey": eventModelKeySchema,
   "type": z.literal("sensorSmokeNeedsCleaning"),
-  "start": z.number(),
+  "start": z.number().gt(0),
   "end": z.number().nullable().optional(),
   "device": deviceIdSchema,
 })
@@ -1493,7 +1499,7 @@ export const sensorSmokeTestEventSchema = z.looseObject({
   "id": eventIdSchema,
   "modelKey": eventModelKeySchema,
   "type": z.literal("sensorSmokeTest"),
-  "start": z.number(),
+  "start": z.number().gt(0),
   "end": z.number().nullable().optional(),
   "device": deviceIdSchema,
   "metadata": z.looseObject({
@@ -1522,7 +1528,7 @@ export const sensorTamperEventSchema = z.looseObject({
   "id": eventIdSchema,
   "modelKey": eventModelKeySchema,
   "type": z.literal("sensorTamper"),
-  "start": z.number(),
+  "start": z.number().gt(0),
   "end": z.number().nullable().optional(),
   "device": deviceIdSchema,
 })
@@ -1532,7 +1538,7 @@ export const sensorVapeEventSchema = z.looseObject({
   "id": eventIdSchema,
   "modelKey": eventModelKeySchema,
   "type": z.literal("sensorVape"),
-  "start": z.number(),
+  "start": z.number().gt(0),
   "end": z.number().nullable().optional(),
   "device": deviceIdSchema,
 })
@@ -1542,7 +1548,7 @@ export const sensorWaterLeakEventSchema = z.looseObject({
   "id": eventIdSchema,
   "modelKey": eventModelKeySchema,
   "type": z.literal("sensorWaterLeak"),
-  "start": z.number(),
+  "start": z.number().gt(0),
   "end": z.number().nullable().optional(),
   "device": deviceIdSchema,
   "metadata": z.looseObject({
