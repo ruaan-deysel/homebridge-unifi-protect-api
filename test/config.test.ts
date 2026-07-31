@@ -7,13 +7,17 @@ describe('parseConfig', () => {
   it('rejects a config with no host', () => {
     const result = parseConfig({ platform: 'UniFiProtect', apiKey: 'k' })
     expect(result.success).toBe(false)
-    expect(JSON.stringify(result)).toContain('host')
+    expect(!result.success && result.error.issues.map(issue => issue.message)).toContain(
+      'host is required — the IP or hostname of your UniFi console',
+    )
   })
 
   it('rejects a config with no api key', () => {
     const result = parseConfig({ platform: 'UniFiProtect', host: '10.0.0.1' })
     expect(result.success).toBe(false)
-    expect(JSON.stringify(result)).toContain('apiKey')
+    expect(!result.success && result.error.issues.map(issue => issue.message)).toContain(
+      'apiKey is required — create one in UniFi Site Manager → Integrations',
+    )
   })
 
   it('applies defaults when none are supplied', () => {
@@ -49,7 +53,11 @@ describe('settingsFor', () => {
 
   it('hides new devices when exposeNewDevices is false', () => {
     const strict = parseConfig({ ...minimal, defaults: { exposeNewDevices: false } })
-    expect(strict.success && settingsFor(strict.data, 'unseen').expose).toBe(false)
+    expect(strict.success && settingsFor(strict.data, 'unseen')).toMatchObject({
+      expose: false,
+      quality: 'high',
+      hksv: false,
+    })
   })
 
   it('leaves hksv off by default — the 200GB iCloud plan supports only one camera', () => {

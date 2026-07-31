@@ -21,8 +21,10 @@ const defaultsSchema = z.object({
 export const configSchema = z.object({
   platform: z.string(),
   name: z.string().default('UniFi Protect'),
-  host: z.string().min(1, 'host is required — the IP or hostname of your UniFi console'),
-  apiKey: z.string().min(1, 'apiKey is required — create one in UniFi Site Manager → Integrations'),
+  host: z.string({ error: 'host is required — the IP or hostname of your UniFi console' })
+    .min(1, 'host is required — the IP or hostname of your UniFi console'),
+  apiKey: z.string({ error: 'apiKey is required — create one in UniFi Site Manager → Integrations' })
+    .min(1, 'apiKey is required — create one in UniFi Site Manager → Integrations'),
   defaults: defaultsSchema,
   /** Keyed by Protect device id, NEVER by name, so renames preserve settings. */
   devices: z.record(z.string(), deviceSettingsSchema).default({}),
