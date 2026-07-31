@@ -278,6 +278,30 @@ describe('uniFiProtectPlatform', () => {
     }
   })
 
+  // N2, success path: the guard at the top of runDiscovery runs before the
+  // awaits, so a discovery that SUCCEEDS after shutdown fell straight through
+  // to reconcile() and startEvents(). Rejecting instead of resolving here is
+  // what let this survive two rounds of review.
+  it('does not register or restart the bus when a discovery succeeds after shutdown', async () => {
+    const { api, platform, bus } = makePlatform()
+    let resolveMeta = (_: { applicationVersion: string }): void => {}
+    const slow = makeClient([{ id: 'cam1', name: 'Doorbell', modelKey: 'camera' }])
+    slow.getMetaInfo = vi.fn(() => new Promise<{ applicationVersion: string }>((resolve) => {
+      resolveMeta = resolve
+    }))
+    platform.client = slow as never
+
+    const inFlight = platform.discover()
+    api.emit('shutdown')
+    resolveMeta({ applicationVersion: '7.1.87' })
+    await inFlight
+
+    expect(bus.stop).toHaveBeenCalled()
+    expect(bus.start).not.toHaveBeenCalled()
+    expect(api.registerPlatformAccessories).not.toHaveBeenCalled()
+    expect(platform.accessories.size).toBe(0)
+  })
+
   // N2: a discovery in flight at shutdown could fail afterwards, schedule a
   // retry past the clearTimeout, and bring the sockets back up.
   it('never discovers or restarts the bus after shutdown', async () => {

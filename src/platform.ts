@@ -49,6 +49,11 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
   private retryTimer?: ReturnType<typeof setTimeout>
   private retryDelayMs = RETRY_MIN_MS
   private retryDriven = false
+  /**
+   * One-way: Homebridge never restarts a platform in-process, so there is no
+   * path back. If that ever changes, clear it in `didFinishLaunching` — never
+   * at construction, which runs before the shutdown it would be undoing.
+   */
   private stopped = false
 
   constructor(
@@ -147,6 +152,13 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
       this.scheduleRetry()
       return
     }
+
+    // Re-checked, because the guard at the top of this method ran before the
+    // awaits above. A shutdown during a *successful* discovery would otherwise
+    // fall straight through and restart the sockets the handler just stopped.
+    // Anything resuming after an await must re-confirm the platform is alive.
+    if (this.stopped)
+      return
 
     if (!retryDriven)
       this.retryDelayMs = RETRY_MIN_MS
