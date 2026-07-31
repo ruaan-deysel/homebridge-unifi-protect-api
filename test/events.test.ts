@@ -11,6 +11,9 @@ class FakeSocket extends EventEmitter {
   onmessage: ((event: { data: unknown }) => void) | null = null
   onclose: ((event: { code: number }) => void) | null = null
   onerror: ((event: unknown) => void) | null = null
+  autoPong = true
+  pings = 0
+  terminated = false
 
   constructor(readonly url: string, readonly options?: unknown) {
     super()
@@ -33,6 +36,18 @@ class FakeSocket extends EventEmitter {
 
   close() {
     this.readyState = 3
+  }
+
+  /** A healthy peer answers pings. Set `autoPong = false` to simulate a half-open flow. */
+  ping() {
+    this.pings++
+    if (this.autoPong)
+      this.emit('pong')
+  }
+
+  terminate() {
+    this.terminated = true
+    this.fail(1006)
   }
 }
 
@@ -190,6 +205,58 @@ describe('protectEvents', () => {
     events.stop()
   })
 
+  /** Advances the clock a second at a time until a new socket appears. Returns the wait. */
+  async function waitForReconnect(previous: number) {
+    let waited = 0
+    while (FakeSocket.instances.length === previous && waited < 300_000) {
+      await vi.advanceTimersByTimeAsync(1000)
+      waited += 1000
+    }
+    return waited
+  }
+
+  it('keeps backing off when the console accepts then instantly drops the connection', async () => {
+    const events = makeEvents()
+    events.start()
+    const delays: number[] = []
+    let previous = FakeSocket.instances.length
+
+    // A console mid-reboot, or a proxy under load: the upgrade succeeds and the
+    // socket dies a moment later. Resetting the backoff on `open` would hammer
+    // it at the floor delay forever.
+    for (let i = 0; i < 4; i++) {
+      const socket = FakeSocket.instances.at(-1)!
+      socket.open()
+      socket.fail()
+      delays.push(await waitForReconnect(previous))
+      previous = FakeSocket.instances.length
+    }
+
+    expect(delays).toEqual([1000, 2000, 4000, 8000])
+    events.stop()
+  })
+
+  it('resets the backoff once a connection has held', async () => {
+    const events = makeEvents()
+    events.start()
+    let previous = FakeSocket.instances.length
+
+    FakeSocket.instances.at(-1)!.fail()
+    expect(await waitForReconnect(previous)).toBe(1000)
+    previous = FakeSocket.instances.length
+    FakeSocket.instances.at(-1)!.fail()
+    expect(await waitForReconnect(previous)).toBe(2000)
+    previous = FakeSocket.instances.length
+
+    // This one holds, so the next drop starts from the floor again.
+    FakeSocket.instances.at(-1)!.open()
+    await vi.advanceTimersByTimeAsync(35_000)
+    FakeSocket.instances.at(-1)!.fail()
+
+    expect(await waitForReconnect(previous)).toBe(1000)
+    events.stop()
+  })
+
   it('stops reconnecting after stop() and clears pending timers', async () => {
     const events = makeEvents()
     events.start()
@@ -230,6 +297,130 @@ describe('protectEvents', () => {
     await vi.advanceTimersByTimeAsync(60_000)
 
     expect(FakeSocket.instances.length).toBeGreaterThan(countAtFailure)
+    events.stop()
+  })
+
+  it('emits authFailed so the consumer can surface a rotated key', () => {
+    const events = makeEvents()
+    const failures: Error[] = []
+    events.on('authFailed', error => failures.push(error))
+    events.start()
+
+    FakeSocket.instances[0]!.emit('unexpected-response', {}, { statusCode: 401 })
+
+    expect(failures).toHaveLength(1)
+    expect(failures[0]!.name).toBe('ProtectAuthError')
+    events.stop()
+  })
+
+  it('resyncs each channel independently', async () => {
+    const events = makeEvents()
+    const resyncs: unknown[] = []
+    events.on('resyncRequired', channel => resyncs.push(channel))
+    events.start()
+    const [devices, eventStream] = [FakeSocket.instances[0]!, FakeSocket.instances[1]!]
+    devices.open()
+    eventStream.open()
+
+    devices.fail()
+    await vi.advanceTimersByTimeAsync(2000)
+    FakeSocket.instances.at(-1)!.open()
+    expect(resyncs).toEqual(['devices'])
+
+    // The events channel has never dropped, so it must not have resynced. When
+    // it does drop, it resyncs on its own without a second 'devices'.
+    eventStream.fail()
+    await vi.advanceTimersByTimeAsync(2000)
+    FakeSocket.instances.at(-1)!.open()
+    expect(resyncs).toEqual(['devices', 'events'])
+    events.stop()
+  })
+
+  it('terminates and reconnects a socket that stops answering pings', async () => {
+    const events = makeEvents()
+    events.start()
+    const devices = FakeSocket.instances[0]!
+    devices.autoPong = false
+    devices.open()
+    const countAtOpen = FakeSocket.instances.length
+
+    // First interval sends a ping, the second finds no pong and gives up.
+    await vi.advanceTimersByTimeAsync(70_000)
+
+    expect(devices.pings).toBeGreaterThan(0)
+    expect(devices.terminated).toBe(true) // terminate(), not close()
+    expect(FakeSocket.instances.length).toBeGreaterThan(countAtOpen)
+    events.stop()
+  })
+
+  it('leaves an idle but healthy socket alone', async () => {
+    const events = makeEvents()
+    const resyncs: unknown[] = []
+    events.on('resyncRequired', channel => resyncs.push(channel))
+    events.start()
+    for (const socket of FakeSocket.instances)
+      socket.open()
+    const countAtOpen = FakeSocket.instances.length
+
+    // Ten minutes of complete silence — normal for a quiet house.
+    await vi.advanceTimersByTimeAsync(600_000)
+
+    expect(FakeSocket.instances[0]!.pings).toBeGreaterThan(5)
+    expect(FakeSocket.instances[0]!.terminated).toBe(false)
+    expect(FakeSocket.instances).toHaveLength(countAtOpen)
+    expect(resyncs).toEqual([])
+    events.stop()
+  })
+
+  it('does not let a throwing listener escape into the socket', () => {
+    const events = makeEvents()
+    events.on('deviceUpdate', () => {
+      throw new Error('zod said no')
+    })
+    events.start()
+    const devices = FakeSocket.instances[0]!
+    devices.open()
+
+    expect(() => devices.send(JSON.stringify({ type: 'update' }))).not.toThrow()
+    expect(log.warn).toHaveBeenCalled()
+    expect(devices.readyState).toBe(1)
+    events.stop()
+  })
+
+  it('is idempotent across a repeated start()', async () => {
+    const events = makeEvents()
+    const seen: unknown[] = []
+    events.on('deviceUpdate', payload => seen.push(payload))
+    events.start()
+    const stale = FakeSocket.instances[0]!
+    events.start()
+
+    // The second start replaced both sockets. The stale one is detached, so its
+    // close must not spawn a third reconnect chain.
+    const live = FakeSocket.instances.at(-2)!
+    stale.fail()
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(FakeSocket.instances).toHaveLength(4)
+
+    live.open()
+    live.send(JSON.stringify({ id: 'cam1' }))
+    expect(seen).toEqual([{ id: 'cam1' }]) // emitted once, not twice
+    events.stop()
+  })
+
+  it('survives a stop() then start() without leaking the old sockets', async () => {
+    const events = makeEvents()
+    events.start()
+    const stale = FakeSocket.instances[0]!
+    stale.open()
+    events.stop()
+    events.start()
+
+    const countAtRestart = FakeSocket.instances.length
+    stale.fail() // a close delivered late, after the socket was discarded
+    await vi.advanceTimersByTimeAsync(120_000)
+
+    expect(FakeSocket.instances).toHaveLength(countAtRestart)
     events.stop()
   })
 })
