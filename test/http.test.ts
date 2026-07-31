@@ -16,23 +16,35 @@ let tls: { key: string, cert: string }
 
 beforeAll(() => {
   const dir = mkdtempSync(join(tmpdir(), 'protect-http-test-'))
-  execFileSync('openssl', [
-    'req',
-    '-x509',
-    '-newkey',
-    'rsa:2048',
-    '-keyout',
-    join(dir, 'key.pem'),
-    '-out',
-    join(dir, 'cert.pem'),
-    '-days',
-    '1',
-    '-nodes',
-    '-subj',
-    '/CN=localhost',
-  ], { stdio: 'ignore' })
-  tls = { key: readFileSync(join(dir, 'key.pem'), 'utf8'), cert: readFileSync(join(dir, 'cert.pem'), 'utf8') }
-  rmSync(dir, { recursive: true, force: true })
+  try {
+    execFileSync('openssl', [
+      'req',
+      '-x509',
+      '-newkey',
+      'rsa:2048',
+      '-keyout',
+      join(dir, 'key.pem'),
+      '-out',
+      join(dir, 'cert.pem'),
+      '-days',
+      '1',
+      '-nodes',
+      '-subj',
+      '/CN=localhost',
+    // stderr piped rather than ignored: openssl's progress dots stay out of the
+    // test output, but a genuine failure still reports why instead of a bare
+    // "Command failed". A missing binary already gives a clear ENOENT.
+    ], { stdio: ['ignore', 'ignore', 'pipe'] })
+    tls = { key: readFileSync(join(dir, 'key.pem'), 'utf8'), cert: readFileSync(join(dir, 'cert.pem'), 'utf8') }
+  }
+  catch (error) {
+    const stderr = (error as { stderr?: Buffer }).stderr?.toString() ?? ''
+    throw new Error(`openssl could not generate a test certificate. ${stderr}`, { cause: error })
+  }
+  finally {
+    // finally, so a throw cannot leave a temp dir holding a partial private key.
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 let server: Server | undefined

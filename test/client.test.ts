@@ -2,6 +2,7 @@ import type { ProtectLogger } from '../src/protect/client.js'
 import type { HttpRequestFn, HttpResponse } from '../src/protect/http.js'
 import { Buffer } from 'node:buffer'
 import { readFileSync } from 'node:fs'
+import { inspect } from 'node:util'
 import { describe, expect, it, vi } from 'vitest'
 import { ProtectClient } from '../src/protect/client.js'
 import {
@@ -69,6 +70,8 @@ describe('protectClient requests', () => {
     expect(url).toBe('https://192.168.1.1/proxy/protect/integration/v1/cameras/cam1/rtsps-stream')
     expect(options.method).toBe('POST')
     expect(options.headers['Content-Type']).toBe('application/json')
+    // Without this node falls back to Transfer-Encoding: chunked.
+    expect(options.headers['Content-Length']).toBe(String(Buffer.byteLength(options.body)))
     expect(JSON.parse(options.body)).toEqual({ qualities: ['high'] })
   })
 
@@ -152,15 +155,25 @@ describe('protectClient error mapping', () => {
     expect((error as ProtectRateLimitError).retryAfterMs).toBe(7000)
   })
 
-  it('ignores a non-numeric Retry-After rather than producing NaN', async () => {
-    const { client } = harness(async () => ({
-      status: 429,
-      headers: { 'retry-after': 'Wed, 21 Oct 2026 07:28:00 GMT' },
-      body: Buffer.alloc(0),
-    }))
+  it.each([['Wed, 21 Oct 2026 07:28:00 GMT'], [''], ['0']])(
+    'ignores a Retry-After of %o rather than producing NaN or a zero-delay retry storm',
+    async (value) => {
+      const { client } = harness(async () => ({
+        status: 429,
+        headers: { 'retry-after': value },
+        body: Buffer.alloc(0),
+      }))
+
+      const error = await client.getCameras().catch((e: unknown) => e)
+      expect((error as ProtectRateLimitError).retryAfterMs).toBeUndefined()
+    },
+  )
+
+  it('caps an absurd Retry-After so a queue slot is not parked for an hour', async () => {
+    const { client } = harness(async () => ({ status: 429, headers: { 'retry-after': '3600' }, body: Buffer.alloc(0) }))
 
     const error = await client.getCameras().catch((e: unknown) => e)
-    expect((error as ProtectRateLimitError).retryAfterMs).toBeUndefined()
+    expect((error as ProtectRateLimitError).retryAfterMs).toBe(60_000)
   })
 
   it('turns a transport rejection into ProtectUnavailableError', async () => {
@@ -177,13 +190,24 @@ describe('protectClient error mapping', () => {
       throw new Error(`request failed with X-API-KEY: ${API_KEY}`)
     })
 
+    // inspect(), not .message: `cause` is an own enumerable property, so
+    // util.inspect renders it — and util.inspect is what log.error(err),
+    // console.error(err) and node's unhandled-rejection printer all use.
+    // Asserting on .message alone missed a real leak through the cause.
     const error = await client.getCameras().catch((e: unknown) => e)
     expect((error as Error).message).not.toContain(API_KEY)
+    expect(inspect(error)).not.toContain(API_KEY)
 
     const { client: authClient, log: authLog } = harness(async () =>
       ({ status: 401, headers: {}, body: Buffer.from('nope') }))
     const authError = await authClient.getCameras().catch((e: unknown) => e)
-    expect((authError as Error).message).not.toContain(API_KEY)
+    expect(inspect(authError)).not.toContain(API_KEY)
+
+    // A console that echoes the key in a malformed error body must not leak either.
+    const { client: junkClient } = harness(async () =>
+      ({ status: 200, headers: {}, body: Buffer.from(`<html>${API_KEY}</html>`) }))
+    const junkError = await junkClient.getCameras().catch((e: unknown) => e)
+    expect(inspect(junkError)).not.toContain(API_KEY)
 
     for (const logger of [log, authLog]) {
       for (const level of ['debug', 'info', 'warn', 'error'] as const) {

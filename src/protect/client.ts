@@ -1,7 +1,9 @@
-import type { Buffer } from 'node:buffer'
 import type { HttpRequestFn } from './http.js'
 import type { RequestQueueOptions } from './queue.js'
+import type { ChannelQuality, SnapshotChannel } from './schemas.js'
+import { Buffer } from 'node:buffer'
 import { z } from 'zod'
+import { API_BASE_PATH } from '../settings.js'
 import {
   ProtectAuthError,
   ProtectError,
@@ -42,15 +44,12 @@ export interface ProtectClientOptions {
   timeoutMs?: number
 }
 
-/** Appended to `https://{host}` — the Protect Integration API lives behind the console proxy. */
-const API_BASE_PATH = '/proxy/protect/integration'
-
 const noopLog: ProtectLogger = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} }
 
 /** `/v1/meta/info` is the one endpoint the spec declares inline, so it has no generated schema. */
 const metaInfoSchema = z.looseObject({ applicationVersion: z.string() })
 
-export type ChannelQuality = 'high' | 'medium' | 'low' | 'package'
+export type { ChannelQuality, SnapshotChannel } from './schemas.js'
 
 export class ProtectClient {
   private readonly baseUrl: string
@@ -130,7 +129,7 @@ export class ProtectClient {
   }
 
   /** Raw `image/jpeg` bytes — never JSON-parsed. */
-  async getSnapshot(id: string, options: { highQuality?: boolean, channel?: string } = {}): Promise<Buffer> {
+  async getSnapshot(id: string, options: { highQuality?: boolean, channel?: SnapshotChannel } = {}): Promise<Buffer> {
     const query = new URLSearchParams()
     if (options.highQuality !== undefined)
       query.set('highQuality', String(options.highQuality))
@@ -187,7 +186,10 @@ export class ProtectClient {
       return JSON.parse(response.body.toString('utf8'))
     }
     catch (error) {
-      throw new ProtectUnavailableError(`${method} ${path} returned a malformed JSON body`, error)
+      throw new ProtectUnavailableError(
+        `${method} ${path} returned a malformed JSON body`,
+        this.redact(errorMessage(error)),
+      )
     }
   }
 
@@ -201,14 +203,23 @@ export class ProtectClient {
           headers: {
             'X-API-KEY': this.apiKey,
             'Accept': 'application/json',
-            ...(payload === undefined ? {} : { 'Content-Type': 'application/json' }),
+            ...(payload === undefined
+              ? {}
+              : { 'Content-Type': 'application/json', 'Content-Length': String(Buffer.byteLength(payload)) }),
           },
           body: payload,
           timeoutMs: this.timeoutMs,
         })
       }
       catch (error) {
-        throw new ProtectUnavailableError(this.redact(`${method} ${path} failed: ${errorMessage(error)}`), error)
+        // The cause is stored as a redacted string, never the raw error: `cause`
+        // is an own enumerable property, so util.inspect (which is what
+        // log.error(err) and node's unhandled-rejection printer use) renders it,
+        // bypassing the message-level redaction entirely.
+        throw new ProtectUnavailableError(
+          this.redact(`${method} ${path} failed: ${errorMessage(error)}`),
+          this.redact(errorMessage(error)),
+        )
       }
       if (response.status >= 200 && response.status < 300)
         return response
@@ -239,13 +250,24 @@ export class ProtectClient {
   }
 }
 
-/** `Retry-After` is in seconds. A non-numeric value (an HTTP-date) is ignored. */
+/**
+ * `Retry-After` is in seconds. A non-numeric value (an HTTP-date) is ignored, and
+ * so is zero — the queue treats any non-nullish delay as authoritative, so a `0`
+ * would turn the backoff off entirely and burn every retry instantly against a
+ * console that just said it was rate-limiting.
+ */
+// ponytail: capped at 60s so a `Retry-After: 3600` cannot park a queue slot for
+// an hour. Make the cap an option if a console ever legitimately asks for longer.
+const MAX_RETRY_AFTER_MS = 60_000
+
 function retryAfterMs(header: string | string[] | undefined): number | undefined {
   const raw = Array.isArray(header) ? header[0] : header
   if (raw === undefined)
     return undefined
   const seconds = Number(raw)
-  return Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : undefined
+  if (!Number.isFinite(seconds) || seconds <= 0)
+    return undefined
+  return Math.min(seconds * 1000, MAX_RETRY_AFTER_MS)
 }
 
 function errorMessage(error: unknown): string {
