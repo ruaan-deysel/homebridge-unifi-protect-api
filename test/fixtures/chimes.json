@@ -1,0 +1,19 @@
+[
+  {
+    "id": "e950f272855d156bc39c4893",
+    "modelKey": "chime",
+    "state": "CONNECTED",
+    "name": "Ding Dong",
+    "mac": "73DC0C4C6E71",
+    "cameraIds": [
+      "1caae4537220700882c792db"
+    ],
+    "ringSettings": [
+      {
+        "cameraId": "1caae4537220700882c792db",
+        "volume": 80,
+        "repeatTimes": 1
+      }
+    ]
+  }
+]

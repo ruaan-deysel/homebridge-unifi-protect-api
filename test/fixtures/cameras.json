@@ -1,0 +1,287 @@
+[
+  {
+    "id": "1caae4537220700882c792db",
+    "modelKey": "camera",
+    "state": "CONNECTED",
+    "name": "Doorbell",
+    "mac": "040B314EE618",
+    "isMicEnabled": true,
+    "osdSettings": {
+      "isNameEnabled": false,
+      "isDateEnabled": false,
+      "isLogoEnabled": false,
+      "isDebugEnabled": false,
+      "overlayLocation": "topLeft"
+    },
+    "ledSettings": {
+      "isEnabled": false,
+      "welcomeLed": true,
+      "floodLed": true
+    },
+    "lcdMessage": {},
+    "micVolume": 100,
+    "activePatrolSlot": null,
+    "videoMode": "default",
+    "hdrType": "auto",
+    "featureFlags": {
+      "supportFullHdSnapshot": true,
+      "hasHdr": true,
+      "smartDetectTypes": [
+        "person",
+        "vehicle",
+        "animal",
+        "package"
+      ],
+      "smartDetectAudioTypes": [
+        "alrmSmoke",
+        "alrmCmonx",
+        "alrmBabyCry",
+        "alrmSpeak"
+      ],
+      "videoModes": [
+        "default",
+        "sport",
+        "slowShutter"
+      ],
+      "hasMic": true,
+      "hasLedStatus": true,
+      "hasSpeaker": true
+    },
+    "smartDetectSettings": {
+      "objectTypes": [
+        "animal",
+        "vehicle",
+        "person",
+        "package"
+      ],
+      "audioTypes": []
+    },
+    "hasPackageCamera": true
+  },
+  {
+    "id": "2927ea3f7c509dfd9bfa425c",
+    "modelKey": "camera",
+    "state": "CONNECTED",
+    "name": "Backyard",
+    "mac": "307725C09E6B",
+    "isMicEnabled": true,
+    "osdSettings": {
+      "isNameEnabled": false,
+      "isDateEnabled": false,
+      "isLogoEnabled": false,
+      "isDebugEnabled": false,
+      "overlayLocation": "topLeft"
+    },
+    "ledSettings": {
+      "isEnabled": true,
+      "welcomeLed": true,
+      "floodLed": true
+    },
+    "lcdMessage": {},
+    "micVolume": 100,
+    "activePatrolSlot": null,
+    "videoMode": "lprNoneReflex",
+    "hdrType": "auto",
+    "featureFlags": {
+      "supportFullHdSnapshot": false,
+      "hasHdr": true,
+      "smartDetectTypes": [
+        "person",
+        "vehicle",
+        "animal"
+      ],
+      "smartDetectAudioTypes": [
+        "alrmSmoke",
+        "alrmCmonx",
+        "alrmBabyCry",
+        "alrmSpeak"
+      ],
+      "videoModes": [
+        "default",
+        "sport",
+        "slowShutter"
+      ],
+      "hasMic": true,
+      "hasLedStatus": true,
+      "hasSpeaker": false
+    },
+    "smartDetectSettings": {
+      "objectTypes": [
+        "person",
+        "animal"
+      ],
+      "audioTypes": []
+    },
+    "hasPackageCamera": false
+  },
+  {
+    "id": "3df76e6abedbeab796e616d9",
+    "modelKey": "camera",
+    "state": "CONNECTED",
+    "name": "Driveway",
+    "mac": "B14DD6E82915",
+    "isMicEnabled": true,
+    "osdSettings": {
+      "isNameEnabled": false,
+      "isDateEnabled": false,
+      "isLogoEnabled": false,
+      "isDebugEnabled": false,
+      "overlayLocation": "topLeft"
+    },
+    "ledSettings": {
+      "isEnabled": true,
+      "welcomeLed": true,
+      "floodLed": true
+    },
+    "lcdMessage": {},
+    "micVolume": 100,
+    "activePatrolSlot": null,
+    "videoMode": "lprNoneReflex",
+    "hdrType": "auto",
+    "featureFlags": {
+      "supportFullHdSnapshot": false,
+      "hasHdr": true,
+      "smartDetectTypes": [
+        "person",
+        "vehicle",
+        "animal"
+      ],
+      "smartDetectAudioTypes": [
+        "alrmSmoke",
+        "alrmCmonx",
+        "alrmBabyCry",
+        "alrmSpeak"
+      ],
+      "videoModes": [
+        "default",
+        "sport",
+        "slowShutter"
+      ],
+      "hasMic": true,
+      "hasLedStatus": true,
+      "hasSpeaker": false
+    },
+    "smartDetectSettings": {
+      "objectTypes": [
+        "person",
+        "vehicle",
+        "animal"
+      ],
+      "audioTypes": []
+    },
+    "hasPackageCamera": false
+  },
+  {
+    "id": "31bb9ef8d089b17563cb6a1b",
+    "modelKey": "camera",
+    "state": "CONNECTED",
+    "name": "Sidegate",
+    "mac": "559E80F097DC",
+    "isMicEnabled": true,
+    "osdSettings": {
+      "isNameEnabled": false,
+      "isDateEnabled": false,
+      "isLogoEnabled": false,
+      "isDebugEnabled": false,
+      "overlayLocation": "topLeft"
+    },
+    "ledSettings": {
+      "isEnabled": true,
+      "welcomeLed": true,
+      "floodLed": true
+    },
+    "lcdMessage": {},
+    "micVolume": 100,
+    "activePatrolSlot": null,
+    "videoMode": "lprNoneReflex",
+    "hdrType": "auto",
+    "featureFlags": {
+      "supportFullHdSnapshot": false,
+      "hasHdr": true,
+      "smartDetectTypes": [
+        "person",
+        "vehicle",
+        "animal"
+      ],
+      "smartDetectAudioTypes": [
+        "alrmSmoke",
+        "alrmCmonx",
+        "alrmBabyCry",
+        "alrmSpeak"
+      ],
+      "videoModes": [
+        "default",
+        "sport",
+        "slowShutter"
+      ],
+      "hasMic": true,
+      "hasLedStatus": false,
+      "hasSpeaker": false
+    },
+    "smartDetectSettings": {
+      "objectTypes": [
+        "person",
+        "animal"
+      ],
+      "audioTypes": []
+    },
+    "hasPackageCamera": false
+  },
+  {
+    "id": "11228f5cc0ee9e79c336bd95",
+    "modelKey": "camera",
+    "state": "CONNECTED",
+    "name": "Garage",
+    "mac": "3E554B184C7E",
+    "isMicEnabled": true,
+    "osdSettings": {
+      "isNameEnabled": false,
+      "isDateEnabled": false,
+      "isLogoEnabled": false,
+      "isDebugEnabled": false,
+      "overlayLocation": "topLeft"
+    },
+    "ledSettings": {
+      "isEnabled": false,
+      "welcomeLed": true,
+      "floodLed": true
+    },
+    "lcdMessage": {},
+    "micVolume": 100,
+    "activePatrolSlot": null,
+    "videoMode": "lprNoneReflex",
+    "hdrType": "auto",
+    "featureFlags": {
+      "supportFullHdSnapshot": false,
+      "hasHdr": true,
+      "smartDetectTypes": [
+        "person",
+        "vehicle",
+        "animal"
+      ],
+      "smartDetectAudioTypes": [
+        "alrmSmoke",
+        "alrmCmonx",
+        "alrmBabyCry",
+        "alrmSpeak"
+      ],
+      "videoModes": [
+        "default",
+        "sport",
+        "slowShutter"
+      ],
+      "hasMic": true,
+      "hasLedStatus": true,
+      "hasSpeaker": false
+    },
+    "smartDetectSettings": {
+      "objectTypes": [
+        "animal",
+        "person",
+        "vehicle"
+      ],
+      "audioTypes": []
+    },
+    "hasPackageCamera": false
+  }
+]

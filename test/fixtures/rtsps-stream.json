@@ -1,0 +1,6 @@
+{
+  "high": "rtsps://192.168.10.1:7441/xxxxxxxxxxxxxxxx?enableSrtp",
+  "medium": null,
+  "low": "rtsps://192.168.10.1:7441/yyyyyyyyyyyyyyyy?enableSrtp",
+  "package": null
+}

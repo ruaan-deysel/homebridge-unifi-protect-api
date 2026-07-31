@@ -1,0 +1,20 @@
+{
+  "id": "d83b333a065d1049e8e8e3df",
+  "modelKey": "nvr",
+  "name": "UDM-Pro",
+  "doorbellSettings": {
+    "defaultMessageText": "WELCOME",
+    "defaultMessageResetTimeoutMs": 60000,
+    "customMessages": [],
+    "customImages": []
+  },
+  "armMode": {
+    "status": "disabled",
+    "armedAt": null,
+    "willBeArmedAt": null,
+    "breachDetectedAt": null,
+    "breachEventCount": 0,
+    "breachTriggerEventId": null,
+    "breachEventId": null
+  }
+}
