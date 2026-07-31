@@ -34,3 +34,7 @@ docs/superpowers/
 
 # Remember plugin session scratch — never publish
 .remember/
+
+# Local agent/tool state — never publish
+.claude/
+.codegraph/
