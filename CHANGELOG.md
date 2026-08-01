@@ -35,6 +35,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stream on demand the first time a quality is requested. Protect reports no URL for a
   quality until one has been created that way, so this also prevents ffmpeg from being
   handed a stale, expired URL.
+- Live view now works end to end: HomeKit's stream request picks the substream, fetches the
+  RTSPS URL and transcodes it to H.264 for as long as the viewer is watching, and closing
+  the view kills the transcode.
+- Camera snapshots come straight from the console as JPEG — no ffmpeg is started for a
+  snapshot — and are cached for two seconds, so the Home app's frequent thumbnail polling
+  reaches the console once rather than once per tile. A failed snapshot is reported to
+  HomeKit with the reason only, never the underlying request details.
+- Concurrent live views are capped for the whole host rather than per camera: six with
+  hardware encoding, two with software. Five cameras therefore share one budget instead of
+  each getting its own, and a request past the cap is refused with a logged reason instead
+  of overloading the machine.
+- Audio in live view is off and not yet wired up; every stream is video-only for now.
 - ffmpeg processes for live view are now supervised: started, tracked, and killed on
   teardown so a dropped viewer can never leave a transcode running indefinitely. ffmpeg's
   own failure output is redacted before it is ever logged, since the command line it echoes
