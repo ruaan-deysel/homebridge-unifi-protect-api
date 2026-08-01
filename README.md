@@ -6,16 +6,20 @@ API key — this plugin never asks for, requests, or stores a UniFi username or 
 
 ## Status
 
-This is the **0.1.0 foundation release**. It discovers your Protect devices, validates
-connectivity over REST and both WebSocket channels, and reconciles the Homebridge accessory
-cache. **It does not yet expose any HomeKit accessory services** (no camera streaming, no
-sensors, no lights) — that arrives in a later release. See `CHANGELOG.md`.
+Unreleased, on top of the 0.1.0 foundation release. It discovers your Protect devices,
+validates connectivity over REST and both WebSocket channels, reconciles the Homebridge
+accessory cache, and exposes:
 
-> **What you will see in Home.app:** one accessory per Protect device, each of them
-> **empty** — no controls, no streams, no sensor readings. That is expected for 0.1.0,
-> not a misconfiguration. The accessories exist so that later releases can attach services
-> to them without you having to re-pair or re-assign rooms. If you would rather not have
-> empty tiles in Home.app yet, untick the devices in the plugin's settings screen.
+- **Live view and snapshots** for every camera. Snapshots come straight from the console as
+  JPEG; live view transcodes Protect's HEVC to the H.264 HomeKit requires, with optional
+  per-camera audio (off by default).
+- **Sensors** driven by the live event stream: motion, smart detection (person, vehicle,
+  animal, package), smoke and carbon monoxide, and a Doorbell service on cameras with a
+  speaker.
+- **A status-LED switch** on cameras that have one.
+
+Still to come: HomeKit Secure Video, two-way audio, and light accessories. See
+`CHANGELOG.md`.
 
 ## Requirements
 
@@ -33,6 +37,62 @@ sensors, no lights) — that arrives in a later release. See `CHANGELOG.md`.
 3. Paste the console address (IP or hostname) and the API key.
 4. Click **Test Connection** to confirm the plugin can reach your console and enumerate
    devices before saving.
+
+## Hardware transcoding
+
+Every Protect camera streams HEVC; HomeKit accepts only H.264. Every live view is therefore
+a transcode, and on this hardware the difference between doing it on the GPU and doing it on
+the CPU is not marginal. Measured on the reference host (i7-8700K, UHD 630) on 2026-08-01,
+**20 seconds of 2688×1512 costs 1.79 s of CPU via VAAPI and 49.1 s via libx264 — about 27×**.
+That is why the plugin defaults to six concurrent live views on hardware and only two on
+software: three software streams would saturate a 12-thread host on their own.
+
+At startup the plugin probes ffmpeg, prefers Intel Quick Sync (QSV) then VAAPI, and
+**verifies the encoder actually initialises** rather than trusting `-encoders` to list it.
+The log line says which one it chose:
+
+```
+Using ffmpeg at /usr/bin/ffmpeg with hardware encoding (h264_qsv).
+```
+
+A `warn` naming `libx264` instead means hardware acceleration is not reaching the process.
+The usual causes, in order:
+
+1. **The render device is not in the container.** Homebridge in Docker sees no GPU unless you
+   pass one in. Add `--device=/dev/dri` to `docker run`, or under Compose:
+
+   ```yaml
+   services:
+     homebridge:
+       devices:
+         - /dev/dri:/dev/dri
+   ```
+
+   Restart the container, then check `ls -l /dev/dri` inside it shows a `renderD128`.
+
+2. **The user cannot open it.** `/dev/dri/renderD128` is normally owned by the `render` (or
+   on older systems `video`) group. Either run the container with `group_add:` for that
+   group's numeric GID from the host, or confirm the Homebridge user is in it.
+
+3. **The driver is not installed.** On Debian/Ubuntu hosts and images:
+
+   ```sh
+   sudo apt install intel-media-va-driver-non-free vainfo   # Gen 8+ Intel, includes UHD 630
+   vainfo                                                    # must list VAEntrypointEncSlice for H264
+   ```
+
+   `intel-media-va-driver-non-free` is the one that carries the H.264 encode entrypoint; the
+   plain `intel-media-va-driver` package does not. On AMD use `mesa-va-drivers`.
+
+4. **The ffmpeg being used is the wrong one.** The Homebridge image ships more than one
+   build, and they do not have the same capabilities: `/usr/bin/ffmpeg` has QSV and VAAPI but
+   no `libfdk_aac`, while the bundled static build is the other way round. The plugin prefers
+   a hardware-capable binary automatically, but you can pin one with the **ffmpeg path**
+   setting in the plugin's settings screen.
+
+Software encoding is a supported configuration, not a broken one — it is simply expensive.
+If you are staying on it, lower **Maximum concurrent live views** in the plugin settings and
+pin the per-camera quality to `medium` or `low` rather than `auto`.
 
 ## Known limitations
 

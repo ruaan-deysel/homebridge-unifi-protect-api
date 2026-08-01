@@ -43,6 +43,21 @@ export function chooseEncoder(hwaccels: string, encoders: string): Omit<FfmpegCa
   return { encoder: 'libx264' }
 }
 
+/**
+ * A ~2-frame encode of a blank source. Being *listed* by `-encoders` says only
+ * that the build was compiled with the encoder — not that this container can
+ * open `/dev/dri`, that the driver is installed, or that the GPU is not already
+ * exhausted. Committing to VAAPI on a listing alone makes every live view fail
+ * at the moment a user presses play, with no fallback.
+ */
+export function viabilityArgs(caps: Omit<FfmpegCapabilities, 'path'>): string[] {
+  const source = ['-hide_banner', '-f', 'lavfi', '-i', 'nullsrc=s=64x64:d=0.1']
+  if (caps.hwaccel === 'vaapi') {
+    return [...source, '-vaapi_device', '/dev/dri/renderD128', '-vf', 'format=nv12,hwupload', '-c:v', 'h264_vaapi', '-f', 'null', '-']
+  }
+  return [...source, '-init_hw_device', 'qsv=hw', '-filter_hw_device', 'hw', '-vf', 'format=nv12,hwupload=extra_hw_frames=64', '-c:v', 'h264_qsv', '-f', 'null', '-']
+}
+
 interface ProbeOptions {
   log: { info: (m: string) => void, warn: (m: string) => void, debug: (m: string) => void }
   run?: RunFfmpeg
@@ -69,8 +84,18 @@ export async function probeFfmpeg(options: ProbeOptions): Promise<FfmpegCapabili
       continue
     }
     if (caps.encoder !== 'libx264') {
-      options.log.info(`Using ffmpeg at ${path} with hardware encoding (${caps.encoder}).`)
-      return { path, ...caps }
+      try {
+        await run(path, viabilityArgs(caps))
+        options.log.info(`Using ffmpeg at ${path} with hardware encoding (${caps.encoder}).`)
+        return { path, ...caps }
+      }
+      catch (error) {
+        // Listed but not usable — no /dev/dri passed into the container, no
+        // driver, or the GPU is busy. Demote rather than hand every viewer a
+        // stream that cannot start.
+        options.log.debug(`ffmpeg at ${path} lists ${caps.encoder} but cannot use it: ${errorMessage(error)}`)
+        caps = { encoder: 'libx264' }
+      }
     }
     // Keep looking: a later candidate may have hardware support. `/usr/local/bin`
     // precedes `/usr/bin` on PATH in the Homebridge image, and the binary it
@@ -101,6 +126,33 @@ export function redactStreamUrls(text: string): string {
   return text.replace(/rtsps?:\/\/\S+/gi, '<stream-url-redacted>')
 }
 
+/** How much redacted stderr is kept to explain a failure. */
+const STDERR_LIMIT = 4000
+/**
+ * A whitespace-free run longer than this is not diagnostics, and holding it
+ * unbounded waiting for a terminator would be the memory leak. Dropped rather
+ * than redacted-and-kept: dropping cannot leak, redacting a fragment can.
+ */
+const TOKEN_LIMIT = 4096
+
+/**
+ * Splits `text` into the part that is safe to redact now and the part that may
+ * still be growing. A stream URL is one whitespace-delimited token, and a `data`
+ * event can land anywhere inside it — including between `rtsps:` and the token —
+ * so redaction must never run on a trailing fragment. `\S*$` matches exactly the
+ * unterminated tail, and `search` returns where it starts.
+ *
+ * A tail past `tokenLimit` is DROPPED, not returned: holding it until a
+ * terminator that may never come is the unbounded buffer, and a whitespace-free
+ * run that long is not diagnostics anyway. Dropping cannot leak; redacting a
+ * fragment of it can.
+ */
+export function splitOnLastToken(text: string, tokenLimit = TOKEN_LIMIT): { complete: string, pending: string } {
+  const boundary = text.search(/\S*$/)
+  const pending = text.slice(boundary)
+  return { complete: text.slice(0, boundary), pending: pending.length > tokenLimit ? '' : pending }
+}
+
 export type SpawnFn = (command: string, args: string[]) => ChildProcess
 
 interface FfmpegProcessOptions {
@@ -122,7 +174,10 @@ export class FfmpegProcess {
   }
 
   private child?: ChildProcess
+  /** Already redacted, always. Nothing unredacted is ever appended here. */
   private stderr = ''
+  /** The unterminated trailing token, held back until it is complete. */
+  private pendingStderr = ''
   /** Set once a kill signal has actually been delivered; guards stop()'s re-entry. */
   private killed = false
   /** Set once the process has actually exited; guards the active count and onExit. */
@@ -143,16 +198,10 @@ export class FfmpegProcess {
     this.child = child
     FfmpegProcess.active++
 
-    child.stderr?.on('data', (chunk: Buffer) => {
-      // Redact BEFORE appending/truncating: truncating first can cut the
-      // `rtsps://` scheme off a token-bearing URL, and a schemeless remainder
-      // no longer matches redactStreamUrls, leaving the token to be logged.
-      // Bounded to 4000 chars: a failing ffmpeg can produce megabytes, and this
-      // is only ever used to explain a failure.
-      this.stderr = `${this.stderr}${redactStreamUrls(chunk.toString())}`.slice(-4000)
-    })
+    child.stderr?.on('data', (chunk: Buffer) => this.absorb(chunk.toString()))
 
     child.on('close', (code: number | null) => {
+      this.flushStderr()
       const message = (code !== null && code !== 0)
         ? `ffmpeg exited with code ${code}: ${this.stderr.trim().split('\n').slice(-3).join(' | ')}`
         : undefined
@@ -162,6 +211,29 @@ export class FfmpegProcess {
     child.on('error', (error: Error) => {
       this.finish(`ffmpeg could not start: ${redactStreamUrls(errorMessage(error))}`)
     })
+  }
+
+  /**
+   * The single place stderr enters this object, and the reason redaction is
+   * structural rather than per-chunk: it runs only on whole tokens, and the
+   * 4000-char bound is applied to text that is ALREADY redacted, so truncation
+   * can only ever cut a placeholder. Both of the earlier leaks on this path —
+   * truncate-then-redact, and redact-per-chunk — are shapes this cannot take.
+   */
+  private absorb(text: string): void {
+    const { complete, pending } = splitOnLastToken(this.pendingStderr + text)
+    this.pendingStderr = pending
+    if (complete !== '')
+      this.stderr = `${this.stderr}${redactStreamUrls(complete)}`.slice(-STDERR_LIMIT)
+  }
+
+  /** ffmpeg's last line often has no trailing newline; it is still one token. */
+  private flushStderr(): void {
+    if (this.pendingStderr === '')
+      return
+    const tail = this.pendingStderr
+    this.pendingStderr = ''
+    this.stderr = `${this.stderr}${redactStreamUrls(tail)}`.slice(-STDERR_LIMIT)
   }
 
   /**

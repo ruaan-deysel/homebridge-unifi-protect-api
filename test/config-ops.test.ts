@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { DEFAULTS, ensureConfig, QUALITY_OPTIONS, renderDeviceHeader, renderQualitySelect, setDeviceSetting } from '../homebridge-ui/public/config-ops.js'
+import { DEFAULTS, ensureConfig, MAX_STREAMS_RANGE, parseMaxStreams, QUALITY_OPTIONS, renderDeviceHeader, renderQualitySelect, setDeviceSetting, setGlobalSetting } from '../homebridge-ui/public/config-ops.js'
 import { parseConfig, settingsFor } from '../src/config.js'
 
 // Minimal fake DOM — just enough to prove renderDeviceHeader never turns
@@ -176,6 +176,68 @@ describe('the streaming settings the UI now writes', () => {
     // And a camera with no override resolves to audio off on both sides.
     expect(parsed.success && settingsFor(parsed.data, 'cam1').audio).toBe(false)
     expect(setDeviceSetting(ensureConfig({}), 'cam1', 'audio', false).devices.cam1).toBeUndefined()
+  })
+})
+
+describe('the global settings the UI now writes', () => {
+  const minimal = { platform: 'UniFiProtect', host: '10.0.0.1', apiKey: 'k' }
+
+  it('stores a stream cap the plugin schema accepts, at both ends of the range', () => {
+    for (const value of [MAX_STREAMS_RANGE.min, 4, MAX_STREAMS_RANGE.max]) {
+      const config = setGlobalSetting(ensureConfig({ ...minimal }), 'maxStreams', parseMaxStreams(String(value)))
+      expect(config.maxStreams).toBe(value)
+      const parsed = parseConfig(config)
+      expect(parsed.success, String(value)).toBe(true)
+      expect(parsed.success && parsed.data.maxStreams).toBe(value)
+    }
+  })
+
+  // The bounds the UI enforces must be the bounds the schema enforces. Wider
+  // here and the plugin refuses to load a config the settings page happily
+  // saved; narrower and a setting exists that the UI can never reach.
+  it('rejects exactly what the plugin schema rejects', () => {
+    for (const raw of ['', '0', '17', '2.5', 'abc', '-3']) {
+      expect(parseMaxStreams(raw), raw).toBeUndefined()
+      // ...and the schema agrees, for everything that is a number at all.
+      const numeric = Number(raw)
+      if (Number.isFinite(numeric) && raw !== '')
+        expect(parseConfig({ ...minimal, maxStreams: numeric }).success, raw).toBe(false)
+    }
+    expect(parseConfig({ ...minimal, maxStreams: MAX_STREAMS_RANGE.min - 1 }).success).toBe(false)
+    expect(parseConfig({ ...minimal, maxStreams: MAX_STREAMS_RANGE.max + 1 }).success).toBe(false)
+    expect(parseConfig({ ...minimal, maxStreams: MAX_STREAMS_RANGE.min }).success).toBe(true)
+    expect(parseConfig({ ...minimal, maxStreams: MAX_STREAMS_RANGE.max }).success).toBe(true)
+  })
+
+  // Both settings are OPTIONAL. Clearing the field has to REMOVE the key: an
+  // empty `ffmpegPath` would send probeFfmpeg after a binary at the empty path
+  // instead of letting it search, and the config would still parse — so nothing
+  // downstream would flag it.
+  it('removes the key when the field is cleared rather than storing a blank', () => {
+    const withValues = setGlobalSetting(
+      setGlobalSetting(ensureConfig({ ...minimal }), 'maxStreams', 3),
+      'ffmpegPath',
+      '/opt/ffmpeg',
+    )
+    expect(withValues.maxStreams).toBe(3)
+    expect(withValues.ffmpegPath).toBe('/opt/ffmpeg')
+
+    const cleared = setGlobalSetting(setGlobalSetting(withValues, 'maxStreams', undefined), 'ffmpegPath', '')
+    expect('maxStreams' in cleared).toBe(false)
+    expect('ffmpegPath' in cleared).toBe(false)
+    const parsed = parseConfig(cleared)
+    expect(parsed.success && parsed.data.maxStreams).toBeUndefined()
+    expect(parsed.success && parsed.data.ffmpegPath).toBeUndefined()
+  })
+
+  // `updatePluginConfig` replaces the whole platform block, so anything these
+  // helpers drop is deleted from config.json — including the child bridge's
+  // pairing credentials.
+  it('preserves every other key, including the child bridge block', () => {
+    const config = ensureConfig({ ...minimal, _bridge: { username: 'AA:BB', port: 1234 }, devices: { cam1: { audio: true } } })
+    const next = setGlobalSetting(config, 'ffmpegPath', '/opt/ffmpeg')
+    expect(next._bridge).toEqual({ username: 'AA:BB', port: 1234 })
+    expect(next.devices).toEqual({ cam1: { audio: true } })
   })
 })
 

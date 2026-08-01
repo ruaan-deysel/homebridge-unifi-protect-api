@@ -4,7 +4,7 @@ import { EventEmitter } from 'node:events'
 import { readFileSync } from 'node:fs'
 import { inspect } from 'node:util'
 import { describe, expect, it, vi } from 'vitest'
-import { chooseEncoder, FfmpegProcess, probeFfmpeg, redactStreamUrls } from '../src/protect/ffmpeg.js'
+import { chooseEncoder, FfmpegProcess, probeFfmpeg, redactStreamUrls, splitOnLastToken } from '../src/protect/ffmpeg.js'
 
 const fixture = (n: string) => JSON.parse(readFileSync(`test/fixtures/ffmpeg/${n}.json`, 'utf8'))
 
@@ -24,11 +24,14 @@ describe('chooseEncoder', () => {
     expect(chooseEncoder('vaapi\ndrm\n', encoders)).toEqual({ encoder: 'h264_vaapi', hwaccel: 'vaapi' })
   })
 
-  // The encoder list contains `hevc_qsv` and `mjpeg_qsv` too. A substring match
-  // on "qsv" would pass while selecting a codec HomeKit cannot decode.
-  it('does not mistake hevc_qsv for an H.264 encoder', () => {
-    expect(chooseEncoder('qsv\n', ' V..... hevc_qsv HEVC (Intel Quick Sync)\n V....D libx264 libx264 H.264\n'))
-      .toEqual({ encoder: 'libx264' })
+  // The fixture must be able to DEFEAT the mutation its comment names: a plain
+  // `encoders.includes('h264_qsv')` has to pass on this string while the real
+  // anchored match fails. So `h264_qsv` appears here in a description column,
+  // exactly as ffmpeg prints alternatives, and nowhere in an encoder column.
+  it('does not mistake an h264_qsv mentioned in a description for an h264_qsv encoder', () => {
+    const encoders = ' V..... hevc_qsv HEVC (Intel Quick Sync) (alternatives: h264_qsv)\n V....D libx264 libx264 H.264\n'
+    expect(encoders).toContain('h264_qsv')
+    expect(chooseEncoder('qsv\n', encoders)).toEqual({ encoder: 'libx264' })
   })
 
   // Synthetic: none of the real fixtures contain an encoder name that is a
@@ -74,6 +77,30 @@ describe('probeFfmpeg', () => {
     expect(caps).toEqual({ path: '/usr/local/bin/ffmpeg', encoder: 'libx264' })
   })
 
+  // Being LISTED by -encoders only means the build was compiled with it. Without
+  // /dev/dri in the container, or without the driver, every live view would fail
+  // at the moment the user presses play, with no fallback left to take.
+  it('demotes to software when the listed hardware encoder cannot actually initialise', async () => {
+    const hw = fixture('hardware')
+    const run = vi.fn(async (_path: string, args: string[]) => {
+      if (args.includes('-c:v'))
+        throw new Error('Device creation failed: -22')
+      return args.includes('-hwaccels') ? hw.hwaccels : hw.encoders
+    })
+    const caps = await probeFfmpeg({ log, run, candidates: ['/usr/bin/ffmpeg'] })
+    expect(caps).toEqual({ path: '/usr/bin/ffmpeg', encoder: 'libx264' })
+  })
+
+  it('keeps the hardware encoder when the trial encode succeeds', async () => {
+    const hw = fixture('hardware')
+    const run = vi.fn(async (_path: string, args: string[]) =>
+      args.includes('-hwaccels') ? hw.hwaccels : hw.encoders)
+    const caps = await probeFfmpeg({ log, run, candidates: ['/usr/bin/ffmpeg'] })
+    expect(caps.encoder).toBe('h264_qsv')
+    // The trial actually ran — otherwise the test above proves nothing.
+    expect(run.mock.calls.some(([, args]) => args.includes('-c:v') && args.includes('h264_qsv'))).toBe(true)
+  })
+
   it('throws when no candidate runs at all', async () => {
     const run = vi.fn(async () => {
       throw new Error('ENOENT')
@@ -110,6 +137,41 @@ describe('redactStreamUrls', () => {
 
   it('leaves text without urls untouched', () => {
     expect(redactStreamUrls('no url here')).toBe('no url here')
+  })
+})
+
+// The structural half of the redaction fix: redaction only ever runs on whole
+// whitespace-delimited tokens, so a URL cut anywhere by a chunk boundary is
+// still one token when it is matched. Asserted on VALUES, not on the log line —
+// the log-line tests below cannot tell a correct split from a lucky one.
+describe('splitOnLastToken', () => {
+  it('holds back the unterminated tail and releases everything before it', () => {
+    expect(splitOnLastToken('opening rtsps://host/a?token=abc')).toEqual({
+      complete: 'opening ',
+      pending: 'rtsps://host/a?token=abc',
+    })
+  })
+
+  it('holds nothing back once the token is terminated', () => {
+    expect(splitOnLastToken('opening rtsps://host/a?token=abc\n')).toEqual({
+      complete: 'opening rtsps://host/a?token=abc\n',
+      pending: '',
+    })
+  })
+
+  it('treats every kind of whitespace as a terminator', () => {
+    expect(splitOnLastToken('a\tb').pending).toBe('b')
+    expect(splitOnLastToken('a\r\nb').pending).toBe('b')
+    expect(splitOnLastToken('a b ').pending).toBe('')
+  })
+
+  // The tail is held until it completes, so it has to be bounded or it is an
+  // unbounded buffer on a process that can emit megabytes.
+  it('drops a tail past the limit instead of holding it forever', () => {
+    expect(splitOnLastToken('x'.repeat(4097), 4096).pending).toBe('')
+    expect(splitOnLastToken('x'.repeat(4096), 4096).pending).toHaveLength(4096)
+    // The default bound is the one FfmpegProcess actually runs with.
+    expect(splitOnLastToken('x'.repeat(100_000)).pending).toBe('')
   })
 })
 
@@ -151,6 +213,52 @@ describe('ffmpegProcess', () => {
     expect(log.warn).toHaveBeenCalledTimes(1)
     const logged = inspect(log.warn.mock.calls, { depth: 10 })
     expect(logged).not.toContain(SECRET)
+  })
+
+  // The third distinct shape of this leak on this branch. Per-chunk redaction
+  // fixed truncate-then-redact but could never match a URL whose `rtsps://`
+  // arrives in one `data` event and whose token arrives in the next — which is
+  // simply what a pipe does to a long line.
+  it('redacts a url whose scheme and token arrive in separate data events', () => {
+    log.warn.mockClear()
+    const { proc, spawn } = fakeSpawn()
+    const p = new FfmpegProcess({ path: '/usr/bin/ffmpeg', args: [], log, spawn })
+    p.start()
+
+    // Split inside the scheme AND inside the token: two boundaries, one URL.
+    proc.stderr.emit('data', Buffer.from('Error opening input rtsp'))
+    proc.stderr.emit('data', Buffer.from('s://192.0.2.1:7441/live?token=SENTINEL-'))
+    proc.stderr.emit('data', Buffer.from('TOKEN-DO-NOT-LOG failed\n'))
+    proc.emit('close', 1)
+
+    expect(log.warn).toHaveBeenCalledTimes(1)
+    const message = log.warn.mock.calls[0]?.[0] as string
+    // Positive first: prove the line carries the diagnostic before proving it
+    // carries no secret. An empty stderr would satisfy the negative alone.
+    expect(message).toContain('ffmpeg exited with code 1')
+    expect(message).toContain('Error opening input')
+    expect(message).not.toContain(SECRET)
+    expect(message).not.toContain('SENTINEL')
+  })
+
+  // ffmpeg's last line frequently has no trailing newline, so the token that
+  // ends the stream is never terminated by whitespace at all.
+  it('redacts a split url that the process never terminates with whitespace', () => {
+    log.warn.mockClear()
+    const { proc, spawn } = fakeSpawn()
+    const p = new FfmpegProcess({ path: '/usr/bin/ffmpeg', args: [], log, spawn })
+    p.start()
+
+    proc.stderr.emit('data', Buffer.from('opening rtsps://192.0.2.1:7441/live?token='))
+    proc.stderr.emit('data', Buffer.from(SECRET))
+    proc.emit('close', 1)
+
+    expect(log.warn).toHaveBeenCalledTimes(1)
+    const message = log.warn.mock.calls[0]?.[0] as string
+    // The placeholder, not just the absence of the secret: a held-back tail that
+    // is silently DROPPED at close would also contain no secret, while throwing
+    // away the line that explains the failure.
+    expect(message).toContain('opening <stream-url-redacted>')
   })
 
   it('tracks and releases an active slot', () => {

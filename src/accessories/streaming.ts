@@ -225,6 +225,16 @@ const SNAPSHOT_TTL_MS = 2_000
  */
 let reservedSlots = 0
 
+/**
+ * A synchronisation source, in the range HomeKit and ffmpeg's `-ssrc` actually
+ * accept: a POSITIVE SIGNED 32-bit integer. `random() * 0xFFFFFFFF + 1` reaches
+ * 0x100000000, so a fraction of streams got a malformed SSRC and simply never
+ * loaded — intermittent, and invisible to anything but the viewer.
+ */
+export function randomSsrc(): number {
+  return Math.floor(Math.random() * 0x7FFFFFFF) + 1
+}
+
 /** `type` is a string const enum; comparing it directly would need a value import of hap-nodejs. */
 function isStart(request: StreamingRequest): request is StartStreamRequest {
   return (request.type as string) === 'start'
@@ -237,11 +247,21 @@ function isStart(request: StreamingRequest): request is StartStreamRequest {
 async function reservePort(ipv6: boolean): Promise<number> {
   const socket = createSocket(ipv6 ? 'udp6' : 'udp4')
   try {
-    await new Promise<void>(resolve => socket.bind(0, resolve))
+    // `once('error')`, not just the bind callback: a failed bind never calls
+    // back, so without this the promise never settles — prepareStream hangs and
+    // takes its reserved slot with it. An unhandled dgram 'error' also throws.
+    await new Promise<void>((resolve, reject) => {
+      socket.once('error', reject)
+      socket.bind(0, resolve)
+    })
     return socket.address().port
   }
   finally {
-    socket.close()
+    // Closing a socket that never bound throws; the bind failure is the real error.
+    try {
+      socket.close()
+    }
+    catch {}
   }
 }
 
@@ -251,6 +271,8 @@ export class StreamingDelegate implements CameraStreamingDelegate {
   private snapshotCache?: { at: number, jpeg: Buffer }
   private audioCodec?: Promise<AudioCodec | undefined>
   private warnedAboutAudio = false
+  /** Latched by stopAll(). See the check in startSession. */
+  private shuttingDown = false
 
   constructor(private readonly options: DelegateOptions) {}
 
@@ -363,6 +385,14 @@ export class StreamingDelegate implements CameraStreamingDelegate {
         return false
       }
 
+      // Re-checked after every await above: stopAll() drains the session map,
+      // so a process spawned after it is in no map and nothing will ever kill
+      // it — it holds a 4 MP HEVC decode for as long as the host is up.
+      if (this.shuttingDown) {
+        this.options.log.debug(`Not starting a stream for "${this.options.label}": the plugin is shutting down.`)
+        return false
+      }
+
       // NOTHING may be logged between here and the spawn: `url` carries an auth
       // token. If an invocation ever needs logging, log redactStreamUrls(args.join(' ')).
       const args = buildFfmpegArgs(this.options.caps, {
@@ -387,9 +417,14 @@ export class StreamingDelegate implements CameraStreamingDelegate {
         return false
       }
       // Tracked only once it is genuinely running: a spawn that throws must not
-      // leave an entry behind for stopAll() to kill a corpse.
-      if (proc.running)
-        this.sessions.set(sessionId, proc)
+      // leave an entry behind for stopAll() to kill a corpse. A process that
+      // died between spawn and here is a FAILED start — reporting success would
+      // leave HomeKit waiting on a stream nobody is producing.
+      if (!proc.running) {
+        this.options.log.warn(`ffmpeg for "${this.options.label}" exited before the stream started.`)
+        return false
+      }
+      this.sessions.set(sessionId, proc)
       this.options.log.info(`Live view started for "${this.options.label}" (${quality} substream, ${audio ? 'with' : 'no'} audio).`)
       return true
     }
@@ -406,6 +441,9 @@ export class StreamingDelegate implements CameraStreamingDelegate {
   }
 
   stopAll(): void {
+    // Latched before the drain, so a startSession parked in an await cannot slip
+    // a spawn in behind it.
+    this.shuttingDown = true
     for (const id of [...this.sessions.keys()])
       this.stopSession(id)
   }
@@ -429,14 +467,13 @@ export class StreamingDelegate implements CameraStreamingDelegate {
           address: request.targetAddress,
           video: {
             port: request.video.port,
-            // Any 32-bit value: HomeKit only uses it to tell streams apart.
-            ssrc: Math.floor(Math.random() * 0xFFFFFFFF) + 1,
+            ssrc: randomSsrc(),
             key: Buffer.concat([request.video.srtp_key, request.video.srtp_salt]),
             localPort: videoLocalPort,
           },
           audio: {
             port: request.audio.port,
-            ssrc: Math.floor(Math.random() * 0xFFFFFFFF) + 1,
+            ssrc: randomSsrc(),
             key: Buffer.concat([request.audio.srtp_key, request.audio.srtp_salt]),
             localPort: audioLocalPort,
           },

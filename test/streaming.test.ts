@@ -5,7 +5,7 @@ import { Buffer } from 'node:buffer'
 import { EventEmitter } from 'node:events'
 import { inspect } from 'node:util'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { audioStreamingCodec, buildFfmpegArgs, chooseAudioCodec, defaultMaxStreams, StreamingDelegate } from '../src/accessories/streaming.js'
+import { audioStreamingCodec, buildFfmpegArgs, chooseAudioCodec, defaultMaxStreams, randomSsrc, StreamingDelegate } from '../src/accessories/streaming.js'
 import { FfmpegProcess } from '../src/protect/ffmpeg.js'
 
 const CAPS_HW = { path: '/usr/bin/ffmpeg', encoder: 'h264_vaapi' as const, hwaccel: 'vaapi' as const }
@@ -35,6 +35,35 @@ describe('defaultMaxStreams', () => {
   it('allows more concurrent streams on hardware than software', () => {
     expect(defaultMaxStreams(CAPS_HW)).toBe(6)
     expect(defaultMaxStreams(CAPS_SW)).toBe(2)
+  })
+})
+
+describe('randomSsrc', () => {
+  const INT32_MAX = 2_147_483_647
+
+  // HomeKit and ffmpeg's `-ssrc` both want a positive SIGNED 32-bit value.
+  // `random() * 0xFFFFFFFF + 1` overshoots it, so a fraction of streams got a
+  // malformed SSRC and simply never loaded — with nothing in any log.
+  it('stays inside positive signed 32-bit range at the top of Math.random', () => {
+    // The largest double below 1, which is what Math.random can actually return.
+    const spy = vi.spyOn(Math, 'random').mockReturnValue(0.9999999999999999)
+    expect(randomSsrc()).toBeLessThanOrEqual(INT32_MAX)
+    spy.mockRestore()
+  })
+
+  it('is never zero at the bottom of Math.random', () => {
+    const spy = vi.spyOn(Math, 'random').mockReturnValue(0)
+    expect(randomSsrc()).toBeGreaterThan(0)
+    spy.mockRestore()
+  })
+
+  it('produces values across the range, not one constant', () => {
+    const seen = new Set(Array.from({ length: 50 }, () => randomSsrc()))
+    expect(seen.size).toBeGreaterThan(40)
+    for (const ssrc of seen) {
+      expect(ssrc).toBeGreaterThan(0)
+      expect(ssrc).toBeLessThanOrEqual(INT32_MAX)
+    }
   })
 })
 
@@ -202,6 +231,7 @@ interface DelegateOverrides {
   run?: () => Promise<string>
   spawn?: () => ChildProcess
   quality?: 'auto' | 'low' | 'medium' | 'high'
+  maxStreams?: number
 }
 
 const jpeg = Buffer.from('jpeg-bytes')
@@ -223,6 +253,25 @@ function throwingSpawn(): ChildProcess {
   throw new Error('ENOENT')
 }
 
+/**
+ * A child that is already gone by the time FfmpegProcess finishes wiring it up:
+ * its `close` listener fires the moment it is registered. That is what a spawn
+ * which dies instantly (bad arguments, killed by the OOM killer) looks like from
+ * inside `start()`, and it is the only way `proc.running` is false there.
+ */
+function deadSpawn(): ChildProcess {
+  const child = fakeChild()
+  const on = child.on.bind(child)
+  const patched = (event: string, handler: (...args: never[]) => void) => {
+    const result = on(event as never, handler as never)
+    if (event === 'close')
+      (handler as (code: number) => void)(0)
+    return result
+  }
+  child.on = patched as unknown as ChildProcess['on']
+  return child
+}
+
 function makeDelegate(overrides: DelegateOverrides = {}) {
   const log = makeLog()
   const getSnapshot = vi.fn(overrides.getSnapshot ?? (async () => jpeg))
@@ -239,6 +288,7 @@ function makeDelegate(overrides: DelegateOverrides = {}) {
     settings: () => ({ quality: overrides.quality ?? 'auto', audio: overrides.audio ?? false }),
     spawn,
     run,
+    maxStreams: overrides.maxStreams,
   })
   return { delegate, getSnapshot, get, spawn, run, log }
 }
@@ -372,13 +422,55 @@ describe('streamingDelegate sessions', () => {
     delegate.stopAll()
   })
 
-  it('tracks no session when the spawn itself throws', async () => {
-    const { delegate, log } = makeDelegate({ spawn: throwingSpawn })
+  it('tracks no session, and releases the slot, when the spawn itself throws', async () => {
+    const { delegate, log } = makeDelegate({ spawn: throwingSpawn, caps: CAPS_SW, maxStreams: 1 })
     expect(await delegate.startSession('a', REQUEST, RTP)).toBe(false)
     // A dead entry would make stopAll() kill a corpse and inflate activeCount.
     expect(delegate.activeCount).toBe(0)
     expect(log.warn).toHaveBeenCalled()
+
+    // The second of the two failure paths out of startSession. The URL failure
+    // has its own test; without this one, releasing the slot only on that path
+    // stays green while leaking a host-wide slot per ENOENT spawn.
+    const good = makeDelegate({ caps: CAPS_SW, maxStreams: 1 })
+    expect(await good.delegate.startSession('b', REQUEST, RTP)).toBe(true)
+    good.delegate.stopAll()
     delegate.stopAll()
+  })
+
+  // `proc.running` is false when the child died between spawn and the check.
+  // Reporting success there leaves HomeKit waiting forever on a stream nobody
+  // is producing — and the old code logged "Live view started" while doing it.
+  it('reports failure when the process is already dead by the time it is tracked', async () => {
+    const { delegate, log } = makeDelegate({ spawn: deadSpawn })
+    expect(await delegate.startSession('a', REQUEST, RTP)).toBe(false)
+    expect(delegate.activeCount).toBe(0)
+    expect(log.info.mock.calls.join(' ')).not.toContain('Live view started')
+    expect(log.warn.mock.calls.join(' ')).toContain('exited before the stream started')
+    delegate.stopAll()
+  })
+
+  // Task 5 spawns; Task 6 shuts down. A request that passed the cap check as
+  // `shutdown` fired spawns ffmpeg after stopAll() drained the map, and nothing
+  // then exists that would ever kill it.
+  it('spawns nothing once stopAll has run, even for a request already in flight', async () => {
+    let release = (): void => {}
+    const { delegate, spawn } = makeDelegate({
+      url: async () => {
+        await new Promise<void>((resolve) => {
+          release = resolve
+        })
+        return URL
+      },
+    })
+
+    const started = delegate.startSession('a', REQUEST, RTP)
+    await new Promise(resolve => setImmediate(resolve))
+    delegate.stopAll()
+    release()
+
+    expect(await started).toBe(false)
+    expect(spawn).not.toHaveBeenCalled()
   })
 
   it('stops a session, killing the process and freeing the slot', async () => {
@@ -548,7 +640,11 @@ describe('streamingDelegate hap wiring', () => {
     const video = response.video as SourceResponse
     const audio = response.audio as SourceResponse
     expect(video.port).toBeGreaterThan(0)
+    // Positive SIGNED 32-bit, on both streams: HomeKit and ffmpeg reject more.
     expect(video.ssrc).toBeGreaterThan(0)
+    expect(video.ssrc).toBeLessThanOrEqual(2_147_483_647)
+    expect(audio.ssrc).toBeGreaterThan(0)
+    expect(audio.ssrc).toBeLessThanOrEqual(2_147_483_647)
     expect(video.srtp_key).toEqual(Buffer.alloc(16, 1))
     expect(video.srtp_salt).toEqual(Buffer.alloc(14, 2))
     // Audio has its OWN port, ssrc and key — not video's.
