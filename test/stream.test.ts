@@ -1,3 +1,4 @@
+import { inspect } from 'node:util'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { StreamUrls } from '../src/protect/stream.js'
 
@@ -54,12 +55,25 @@ describe('streamUrls', () => {
   })
 
   it('reports a quality the console never provides without leaking anything', async () => {
+    // The sentinel MUST enter the system (as the 'high' URL) so the negative
+    // assertion below means something. Requesting 'low' — which is genuinely
+    // unavailable — must never surface the 'high' URL sitting right next to
+    // it in the same response, whether via the message, `cause`, or any other
+    // enumerable property that `util.inspect` (what `log.error` uses) walks.
     const client = {
-      getRtspsStream: vi.fn(async () => ({})),
+      getRtspsStream: vi.fn(async () => ({ high: URL_HIGH })),
       createRtspsStream: vi.fn(async () => ({})),
     }
     const urls = new StreamUrls(client as never)
-    await expect(urls.get('cam1', 'low')).rejects.toThrow(/low/)
-    await expect(urls.get('cam1', 'low')).rejects.not.toThrow(/SENTINEL-TOKEN/)
+    let error: unknown
+    try {
+      await urls.get('cam1', 'low')
+    }
+    catch (err) {
+      error = err
+    }
+    expect(error).toBeInstanceOf(Error)
+    expect((error as Error).message).toMatch(/low/)
+    expect(inspect(error, { depth: 10 })).not.toContain('SENTINEL-TOKEN')
   })
 })
