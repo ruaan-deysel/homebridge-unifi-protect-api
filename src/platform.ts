@@ -10,7 +10,13 @@ import { parseConfig, settingsFor } from './config.js'
 import { ProtectClient } from './protect/client.js'
 import { errorMessage, ProtectAuthError } from './protect/errors.js'
 import { ProtectEvents } from './protect/events.js'
-import { cameraSchema, chimeSchema, lightSchema, sensorSchema, viewerSchema } from './protect/schemas.js'
+import {
+  cameraPartialWithReferenceSchema,
+  chimePartialWithReferenceSchema,
+  lightPartialWithReferenceSchema,
+  sensorPartialWithReferenceSchema,
+  viewerPartialWithReferenceSchema,
+} from './protect/schemas.js'
 import { PLATFORM_NAME, PLUGIN_NAME } from './settings.js'
 
 /** The fields reconciliation needs. `name` is nullable on the wire. */
@@ -21,16 +27,20 @@ export interface DiscoveredDevice {
 }
 
 /**
- * Selects the schema for a `deviceUpdate` frame by its `modelKey`. Partial,
- * because an update frame carries only the fields that changed — the full
- * device schema would reject every real frame.
+ * Selects the schema for a `deviceUpdate` frame by its `modelKey`. Each
+ * `...PartialWithReferenceSchema` requires only `id` and `modelKey` and marks
+ * every other field optional — generated from the spec for exactly this kind
+ * of delta, so it is used as-is rather than hand-rolling `.partial()` over the
+ * full device schema. A real frame observed off the live console carries just
+ * three keys (`id`, `modelKey`, `ledSettings`); the full device schema would
+ * reject every one of them.
  */
 const deviceSchemas = new Map<string, z.ZodType>([
-  ['camera', cameraSchema.partial()],
-  ['light', lightSchema.partial()],
-  ['sensor', sensorSchema.partial()],
-  ['chime', chimeSchema.partial()],
-  ['viewer', viewerSchema.partial()],
+  ['camera', cameraPartialWithReferenceSchema],
+  ['light', lightPartialWithReferenceSchema],
+  ['sensor', sensorPartialWithReferenceSchema],
+  ['chime', chimePartialWithReferenceSchema],
+  ['viewer', viewerPartialWithReferenceSchema],
 ])
 
 /** Floor and ceiling for the discovery retry backoff. */

@@ -1,0 +1,18 @@
+[
+  {
+    "type": "update",
+    "item": {
+      "id": "11228f5cc0ee9e79c336bd95",
+      "modelKey": "camera",
+      "ledSettings": { "isEnabled": true, "welcomeLed": true, "floodLed": true }
+    }
+  },
+  {
+    "type": "update",
+    "item": {
+      "id": "11228f5cc0ee9e79c336bd95",
+      "modelKey": "camera",
+      "ledSettings": { "isEnabled": false, "welcomeLed": true, "floodLed": true }
+    }
+  }
+]
