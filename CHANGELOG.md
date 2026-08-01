@@ -60,12 +60,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The settings UI now offers both new per-camera controls, so neither needs `config.json` to
   be edited by hand: a live-view quality selector labelled with the real substream
   resolutions (auto, 2688×1512, 1280×720, 640×360) and an audio toggle, offered only for a
-  camera that reports a microphone. Both take effect on the next stream request.
+  camera that reports a microphone. The audio toggle says so in its own label: **turning
+  audio on takes effect after a restart**, the one Homebridge already prompts for when
+  settings are saved. HomeKit is told which audio codecs a camera offers when that camera is
+  published, and HAP provides no way to change that afterwards. Turning audio back off
+  applies to the next live view immediately.
 - New settings: `maxStreams` caps concurrent live views for the whole host (default six on
   hardware encoding, two on software), `ffmpegPath` points at a specific ffmpeg binary, and
   each camera takes `quality` (`auto`, `high`, `medium`, `low`; `auto` by default) and
-  `audio` (off by default). A quality or audio change takes effect on the next stream
-  request rather than needing a Homebridge restart.
+  `audio` (off by default).
+- A camera configured for audio on an ffmpeg that can encode neither codec HomeKit accepts
+  now says so in the log at startup, naming the binary, instead of streaming silently
+  without audio.
 - ffmpeg is probed once at startup rather than per camera. If no usable ffmpeg is found the
   plugin says so and carries on: sensors, the LED switch and the doorbell all keep working
   without live view instead of the whole platform failing to load.

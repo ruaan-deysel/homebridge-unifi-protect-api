@@ -101,6 +101,7 @@ declare module '*/homebridge-ui/public/config-ops.js' {
     device: { name?: string, type?: string },
   ): (MinimalDomElement | string)[]
 
+  export const AUDIO_LABEL: string
   export const QUALITY_OPTIONS: [string, string][]
   export function renderQualitySelect(
     doc: MinimalDocument,

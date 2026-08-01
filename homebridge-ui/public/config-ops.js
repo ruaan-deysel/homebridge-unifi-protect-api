@@ -82,6 +82,16 @@ export const QUALITY_OPTIONS = [
 ]
 
 /**
+ * The audio toggle's label. It names the restart deliberately: HAP tells HomeKit
+ * which audio codecs a camera offers when the controller is attached at startup
+ * and gives no way to change it afterwards, so switching audio ON only reaches
+ * HomeKit after a restart — the one Homebridge already prompts for on save.
+ * Switching it OFF applies to the next live view immediately. A toggle that
+ * silently did nothing until a restart would look broken.
+ */
+export const AUDIO_LABEL = 'Live view audio (restart to enable)'
+
+/**
  * Builds the per-camera quality selector with DOM APIs only — never
  * `innerHTML`. `device.id` is console-supplied and therefore
  * attacker-controlled, exactly like the name in `renderDeviceHeader`, and it is
