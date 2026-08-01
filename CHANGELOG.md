@@ -31,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   HEVC and HomeKit only accepts H.264. Hardware encoding cuts CPU cost roughly 27× on
   supported hosts; the chosen ffmpeg path and encoder are logged so a silent fallback to
   software is visible rather than just running expensive.
+- RTSPS stream URLs are now cached per camera and quality for 5 minutes, creating a
+  stream on demand the first time a quality is requested. Protect reports no URL for a
+  quality until one has been created that way, so this also prevents ffmpeg from being
+  handed a stale, expired URL.
 
 ### Fixed
 - Service removal is floored on an understood device payload. The client returns the raw
