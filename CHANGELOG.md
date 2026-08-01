@@ -35,6 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stream on demand the first time a quality is requested. Protect reports no URL for a
   quality until one has been created that way, so this also prevents ffmpeg from being
   handed a stale, expired URL.
+- ffmpeg processes for live view are now supervised: started, tracked, and killed on
+  teardown so a dropped viewer can never leave a transcode running indefinitely. ffmpeg's
+  own failure output is redacted before it is ever logged, since the command line it echoes
+  on error contains the RTSPS stream's auth token.
 
 ### Fixed
 - Service removal is floored on an understood device payload. The client returns the raw

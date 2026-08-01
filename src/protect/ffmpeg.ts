@@ -1,4 +1,6 @@
-import { execFile } from 'node:child_process'
+import type { Buffer } from 'node:buffer'
+import type { ChildProcess } from 'node:child_process'
+import { execFile, spawn as nodeSpawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import { errorMessage } from './errors.js'
 
@@ -81,4 +83,89 @@ export async function probeFfmpeg(options: ProbeOptions): Promise<FfmpegCapabili
 
   options.log.info(`Using ffmpeg at ${fallback.path} with software encoding (libx264). Live view will be CPU-expensive; see the README on enabling hardware transcoding.`)
   return fallback
+}
+
+/**
+ * ffmpeg echoes its full command line on failure, and our command line contains
+ * an RTSPS URL carrying an auth token. Redaction happens BEFORE anything is
+ * logged — filtering afterwards means the secret has already been formatted into
+ * a string somebody may hold a reference to.
+ */
+export function redactStreamUrls(text: string): string {
+  return text.replace(/rtsps?:\/\/\S+/gi, '<stream-url-redacted>')
+}
+
+export type SpawnFn = (command: string, args: string[]) => ChildProcess
+
+interface FfmpegProcessOptions {
+  path: string
+  args: string[]
+  log: { warn: (m: string) => void, debug: (m: string) => void }
+  spawn?: SpawnFn
+  /** Called once when the process ends, however it ends. */
+  onExit?: () => void
+}
+
+/** Spawns, tracks and kills a single ffmpeg process. */
+export class FfmpegProcess {
+  private static active = 0
+
+  /** Number of ffmpeg processes currently running, across all instances. */
+  static get activeCount(): number {
+    return FfmpegProcess.active
+  }
+
+  private child?: ChildProcess
+  private stderr = ''
+  private stopped = false
+  private ended = false
+
+  constructor(private readonly options: FfmpegProcessOptions) {}
+
+  get running(): boolean {
+    return this.child !== undefined && !this.stopped
+  }
+
+  start(): void {
+    const spawn = this.options.spawn ?? (nodeSpawn as SpawnFn)
+    const child = spawn(this.options.path, this.options.args)
+    this.child = child
+    FfmpegProcess.active++
+
+    child.stderr?.on('data', (chunk: Buffer) => {
+      // Bounded: a failing ffmpeg can produce megabytes, and this is only ever
+      // used to explain a failure.
+      this.stderr = `${this.stderr}${chunk.toString()}`.slice(-4000)
+    })
+
+    child.on('close', (code: number | null) => {
+      this.stopped = true
+      this.release()
+      if (code !== null && code !== 0)
+        this.options.log.warn(`ffmpeg exited with code ${code}: ${redactStreamUrls(this.stderr).trim().split('\n').slice(-3).join(' | ')}`)
+      this.options.onExit?.()
+    })
+
+    child.on('error', (error: Error) => {
+      this.stopped = true
+      this.release()
+      this.options.log.warn(`ffmpeg could not start: ${redactStreamUrls(errorMessage(error))}`)
+      this.options.onExit?.()
+    })
+  }
+
+  /** Decrements the active count exactly once, however the process ended. */
+  private release(): void {
+    if (this.ended)
+      return
+    this.ended = true
+    FfmpegProcess.active--
+  }
+
+  stop(): void {
+    if (this.stopped || !this.child)
+      return
+    this.stopped = true
+    this.child.kill('SIGKILL')
+  }
 }
