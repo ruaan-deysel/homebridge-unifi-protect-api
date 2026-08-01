@@ -10,7 +10,9 @@
     "properties": {
       "name": { "title": "Platform Name", "type": "string", "default": "UniFi Protect", "required": true },
       "host": { "title": "Console IP or hostname", "type": "string", "required": true },
-      "apiKey": { "title": "API Key", "type": "string", "required": true }
+      "apiKey": { "title": "API Key", "type": "string", "required": true },
+      "maxStreams": { "title": "Maximum concurrent live views", "description": "For the whole host, not per camera. Leave unset to pick from the encoder found: 6 with hardware encoding, 2 with software.", "type": "integer", "minimum": 1, "maximum": 16 },
+      "ffmpegPath": { "title": "ffmpeg path", "description": "Leave unset to search /usr/bin, /usr/local/bin, then PATH.", "type": "string" }
     }
   }
 }

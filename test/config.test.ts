@@ -38,7 +38,11 @@ describe('parseConfig', () => {
     expect(result.success && result.data.consoleCert).toBe('PEM')
   })
 
-  it('applies defaults when none are supplied', () => {
+  // Omitting `defaults` hits the OUTER `.default({...})` literal on the object,
+  // which is a SEPARATE source of truth from the per-field `.default()`s. This
+  // test therefore pins the literal, and the one below pins the fields — asserting
+  // only this one is how three earlier defects here stayed green.
+  it('applies the whole defaults block when it is absent', () => {
     const result = parseConfig(minimal)
     expect(result.success).toBe(true)
     expect(result.success && result.data.defaults).toEqual({
@@ -48,6 +52,44 @@ describe('parseConfig', () => {
       quality: 'auto',
       hksv: false,
     })
+  })
+
+  // A PARTIAL defaults block — what anyone who has ever changed one setting has
+  // — falls through to the per-field defaults instead. `exposeNewDevices:
+  // z.boolean().default(false)` would hide every camera from HomeKit for those
+  // users, and nothing above would have noticed.
+  it('applies each field default individually inside a partial defaults block', () => {
+    const byQuality = parseConfig({ ...minimal, defaults: { quality: 'low' } })
+    expect(byQuality.success && byQuality.data.defaults).toEqual({
+      exposeNewDevices: true,
+      quality: 'low',
+      hksv: false,
+    })
+
+    const byExpose = parseConfig({ ...minimal, defaults: { exposeNewDevices: false } })
+    expect(byExpose.success && byExpose.data.defaults).toEqual({
+      exposeNewDevices: false,
+      quality: 'auto',
+      hksv: false,
+    })
+
+    const byHksv = parseConfig({ ...minimal, defaults: { hksv: true } })
+    expect(byHksv.success && byHksv.data.defaults).toEqual({
+      exposeNewDevices: true,
+      quality: 'auto',
+      hksv: true,
+    })
+  })
+
+  // The remaining `.default()`s in the schema. Each is a value the plugin runs
+  // on, and each is invisible to every test that supplies the field explicitly.
+  it('applies the top-level defaults for name and devices', () => {
+    const result = parseConfig({ platform: 'UniFiProtect', host: '10.0.0.1', apiKey: 'k' })
+    expect(result.success && result.data.name).toBe('UniFi Protect')
+    expect(result.success && result.data.devices).toEqual({})
+    // ...and an explicit value is still taken, not overwritten by the default.
+    const named = parseConfig({ ...minimal, name: 'Garage Console' })
+    expect(named.success && named.data.name).toBe('Garage Console')
   })
 
   it('accepts a per-camera quality override', () => {

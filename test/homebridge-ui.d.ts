@@ -88,6 +88,10 @@ declare module '*/homebridge-ui/public/config-ops.js' {
     value: unknown,
   ): ConfigShape
 
+  export const MAX_STREAMS_RANGE: { min: number, max: number }
+  export function parseMaxStreams(raw: unknown): number | undefined
+  export function setGlobalSetting(config: ConfigShape, key: string, value: unknown): ConfigShape
+
   export interface MinimalDomElement {
     tagName: string
     textContent: string

@@ -26,6 +26,44 @@ export function ensureConfig(raw) {
   }
 }
 
+/**
+ * The host-wide stream cap's accepted range. MUST match `maxStreams` in
+ * src/config.ts: a value only this file allows would be written to config.json
+ * on save and then refuse to load, leaving the plugin dead with a validation
+ * error the user never saw while typing it. There is a test pinning these
+ * against the real schema.
+ */
+export const MAX_STREAMS_RANGE = { min: 1, max: 16 }
+
+/**
+ * The stream cap as the schema wants it, or `undefined` for "let the plugin
+ * decide". Anything out of range — including the empty field, which is how a
+ * user clears it — becomes `undefined` rather than being stored: `maxStreams`
+ * is optional, and an empty string or a NaN written into config.json would fail
+ * `parseConfig` on the next start.
+ */
+export function parseMaxStreams(raw) {
+  const value = Number(String(raw).trim())
+  if (!Number.isInteger(value) || value < MAX_STREAMS_RANGE.min || value > MAX_STREAMS_RANGE.max)
+    return undefined
+  return value
+}
+
+/**
+ * Writes a top-level optional setting, or removes it when the value is absent.
+ * Removing matters: both `maxStreams` and `ffmpegPath` are optional, and storing
+ * `""` for the path would send `probeFfmpeg` after a binary at the empty path
+ * instead of letting it search.
+ */
+export function setGlobalSetting(config, key, value) {
+  const next = { ...config }
+  if (value === undefined || value === '')
+    delete next[key]
+  else
+    next[key] = value
+  return next
+}
+
 /** Per-device defaults, derived from the global defaults. */
 function defaultFor(config, key) {
   if (key === 'expose')

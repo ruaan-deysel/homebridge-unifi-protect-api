@@ -17,10 +17,30 @@
 
 <div class="up-row up-muted" id="status" aria-live="polite"></div>
 <div id="trust" aria-live="polite"></div>
+
+<!--
+  Host-wide settings, as opposed to the per-camera ones on each device card
+  below. Static markup only: every value here is typed by the user or read back
+  from their own config, never supplied by the console.
+-->
+<div class="up-card">
+  <div><strong>Live view</strong> <span class="up-muted">applies to the whole host</span></div>
+  <div class="up-row">
+    <label for="maxStreams">Maximum concurrent live views</label>
+    <input class="form-control" id="maxStreams" type="number" min="1" max="16" step="1" placeholder="auto" style="max-width: 6rem">
+    <span class="up-muted">Blank picks from the encoder found: 6 with hardware, 2 with software.</span>
+  </div>
+  <div class="up-row">
+    <label for="ffmpegPath">ffmpeg path</label>
+    <input class="form-control" id="ffmpegPath" placeholder="auto-detect" style="max-width: 20rem">
+    <span class="up-muted">Blank searches /usr/bin, /usr/local/bin, then PATH.</span>
+  </div>
+</div>
+
 <div id="devices"></div>
 
 <script type="module">
-  import { AUDIO_LABEL, ensureConfig, renderDeviceHeader, renderQualitySelect, setDeviceSetting } from './config-ops.js'
+  import { AUDIO_LABEL, ensureConfig, parseMaxStreams, renderDeviceHeader, renderQualitySelect, setDeviceSetting, setGlobalSetting } from './config-ops.js'
 
   const statusEl = document.getElementById('status')
   const trustEl = document.getElementById('trust')
@@ -38,6 +58,29 @@
   }
 
   const settingOf = (id, key, fallback) => config.devices[id]?.[key] ?? fallback
+
+  // Host-wide settings. Populated from the saved config and written straight
+  // back, so neither of them needs config.json to be edited by hand.
+  const maxStreamsEl = document.getElementById('maxStreams')
+  const ffmpegPathEl = document.getElementById('ffmpegPath')
+  maxStreamsEl.value = config.maxStreams ?? ''
+  ffmpegPathEl.value = config.ffmpegPath ?? ''
+
+  maxStreamsEl.addEventListener('change', async () => {
+    const value = parseMaxStreams(maxStreamsEl.value)
+    // Echo back what was actually stored: an out-of-range entry is dropped, and
+    // leaving the rejected number sitting in the box would claim otherwise.
+    maxStreamsEl.value = value ?? ''
+    config = setGlobalSetting(config, 'maxStreams', value)
+    await save()
+  })
+
+  ffmpegPathEl.addEventListener('change', async () => {
+    const value = ffmpegPathEl.value.trim()
+    ffmpegPathEl.value = value
+    config = setGlobalSetting(config, 'ffmpegPath', value)
+    await save()
+  })
 
   function render(devices) {
     devicesEl.replaceChildren()

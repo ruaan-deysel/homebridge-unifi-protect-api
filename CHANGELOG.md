@@ -69,6 +69,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hardware encoding, two on software), `ffmpegPath` points at a specific ffmpeg binary, and
   each camera takes `quality` (`auto`, `high`, `medium`, `low`; `auto` by default) and
   `audio` (off by default).
+- The settings UI now also offers the two host-wide settings — the maximum number of
+  concurrent live views and the ffmpeg path — so nothing this plugin supports needs
+  `config.json` to be edited by hand. Clearing either field hands the decision back to the
+  plugin rather than storing a blank.
+- The README documents how to get hardware transcoding working: passing `/dev/dri` into the
+  container, the render-group permission, which VA-API driver package carries the H.264
+  encode entrypoint, and the measured cost of not having it (20 s of 2688×1512 costs 1.79 s
+  of CPU via VAAPI against 49.1 s via libx264, about 27×).
 - A camera configured for audio on an ffmpeg that can encode neither codec HomeKit accepts
   now says so in the log at startup, naming the binary, instead of streaming silently
   without audio.
@@ -83,6 +91,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on error contains the RTSPS stream's auth token.
 
 ### Fixed
+- Live view SSRCs are now positive signed 32-bit values. The previous range reached
+  0x100000000, which HomeKit and ffmpeg both reject, so a fraction of streams simply never
+  loaded — intermittently, and with nothing in the log to explain it.
+- A hardware encoder is now trial-encoded before the plugin commits to it. Being listed by
+  `ffmpeg -encoders` only means the build was compiled with it, not that the container can
+  open `/dev/dri`; a listed-but-unusable encoder made every live view fail at the moment the
+  user pressed play, with no software fallback left to take.
+- A live view requested while Homebridge was shutting down can no longer start an ffmpeg
+  after the shutdown handler has already run. Such a process was in no map and nothing would
+  ever have killed it.
+- A shutdown now stops every remaining live view, the event bus and the failsafe timers even
+  if stopping one camera throws.
+- An ffmpeg that dies between being spawned and being tracked is reported to HomeKit as a
+  failed start instead of being logged as "Live view started".
+- A live view whose local RTP port cannot be reserved now fails instead of leaving HomeKit
+  waiting on a request that never gets an answer.
+- Concurrent live views of the same camera and quality now share a single request to the
+  console instead of each creating their own RTSPS stream.
+- Discovery no longer restarts the WebSocket subscriptions when Homebridge shuts down while
+  accessories are being reconciled.
+
 - Service removal is floored on an understood device payload. The client returns the raw
   payload when schema validation fails, so a single firmware field rename could otherwise
   have stripped every smart-detect sensor, the doorbell and the LED switch from every
@@ -97,6 +126,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   by default because the 50 GB tier allows a single camera.
 
 ### Security
+- ffmpeg's error output is redacted a whole token at a time, so a stream URL split across
+  two reads of the pipe — its `rtsps://` scheme arriving separately from its auth token —
+  is still redacted. Redaction had been applied per read, which cannot match a URL that
+  spans two of them.
+- A failure fetching a stream URL is reported as a fresh error carrying the message only.
+  Re-throwing the client's own error handed `util.inspect` a request context, which is the
+  path that has leaked the API key out of this codebase before.
 - The console's certificate is now pinned instead of TLS verification being disabled.
   On the first connection the plugin reads the certificate, stores it in `config.json`
   as `consoleCert` and logs its SHA-256 fingerprint; every later REST request and both

@@ -268,8 +268,17 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
       clearTimeout(this.retryTimer)
       // Before anything else: an ffmpeg left running holds a 4 MP HEVC decode
       // open for as long as the host is up, and nothing else will ever kill it.
-      for (const delegate of this.delegates.values())
-        delegate.stopAll()
+      // Guarded per delegate: one throwing stopAll() would otherwise abandon
+      // every later delegate, the event bus and the failsafe timers — the exact
+      // leaks this handler exists to prevent.
+      for (const delegate of this.delegates.values()) {
+        try {
+          delegate.stopAll()
+        }
+        catch (error) {
+          this.log.warn(`Could not stop a live view cleanly during shutdown: ${errorMessage(error)}`)
+        }
+      }
       this.events?.stop()
       // Every active event holds a failsafe timer. Leaked, they keep the Node
       // process alive and Homebridge never finishes shutting down.
@@ -378,6 +387,11 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
     if (!retryDriven)
       this.retryDelayMs = RETRY_MIN_MS
     await this.reconcile(devices)
+    // Re-checked again: reconcile() attaches accessories and awaits an ffmpeg
+    // probe per camera, which is easily long enough for shutdown to land. Bring
+    // the sockets up after that and Homebridge never finishes shutting down.
+    if (this.stopped)
+      return
     this.startEvents()
   }
 
@@ -552,22 +566,25 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
     // build a second controller for the same accessory.
     this.delegates.set(accessory.UUID, delegate)
 
-    // The delegate's own, never hand-built here: it advertises a codec only when
-    // the camera opted in AND this ffmpeg can actually encode it, so the
-    // advertisement cannot drift from the arguments sent.
-    const audio = await delegate.audioStreamingOptions()
-    // Silence otherwise. HAP encodes SupportedAudioStreamConfiguration into the
-    // stream management services (and creates the Microphone service) when the
-    // controller is configured, and `CameraController.streamingOptions` is
-    // private and read-only — there is no supported way to re-advertise codecs
-    // afterwards. So this advertisement is fixed for the life of the process:
-    // turning audio OFF takes effect on the next stream request, turning it ON
-    // needs the restart Homebridge already prompts for when settings are saved.
-    if (!audio && settingsFor(this.config!, deviceId).audio) {
-      this.log.warn(`Audio is enabled for "${label}" but no codec HomeKit accepts could be advertised, so live view will be video-only. The ffmpeg at ${this.caps.path} can encode neither libopus nor libfdk_aac.`)
-    }
-
+    // Inside the try, together with configureController: the probe execs
+    // ffmpeg, and a failure there must degrade this camera to video-only —
+    // never abort the whole discovery pass and take every other device with it.
     try {
+      // The delegate's own, never hand-built here: it advertises a codec only
+      // when the camera opted in AND this ffmpeg can actually encode it, so the
+      // advertisement cannot drift from the arguments sent.
+      const audio = await delegate.audioStreamingOptions()
+      // Silence otherwise. HAP encodes SupportedAudioStreamConfiguration into the
+      // stream management services (and creates the Microphone service) when the
+      // controller is configured, and `CameraController.streamingOptions` is
+      // private and read-only — there is no supported way to re-advertise codecs
+      // afterwards. So this advertisement is fixed for the life of the process:
+      // turning audio OFF takes effect on the next stream request, turning it ON
+      // needs the restart Homebridge already prompts for when settings are saved.
+      if (!audio && settingsFor(this.config!, deviceId).audio) {
+        this.log.warn(`Audio is enabled for "${label}" but no codec HomeKit accepts could be advertised, so live view will be video-only. The ffmpeg at ${this.caps.path} can encode neither libopus nor libfdk_aac.`)
+      }
+
       accessory.configureController(new this.api.hap.CameraController({
         cameraStreamCount: delegate.maxStreams,
         delegate,

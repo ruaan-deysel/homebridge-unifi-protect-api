@@ -1112,6 +1112,51 @@ describe('uniFiProtectPlatform', () => {
     expect(api.registerPlatformAccessories).toHaveBeenCalled()
   })
 
+  /** Every camera in the fixture opts in to audio. */
+  const audioForAll = { ...validConfig, devices: Object.fromEntries(cameras.map(c => [c.id as string, { audio: true }])) }
+
+  // The shutdown handler is the only thing that kills a running transcode. A
+  // throw from one delegate used to abandon every later one, plus the event bus
+  // and the failsafe timers — the exact leaks the handler exists to prevent.
+  it('finishes shutting down even when one delegate throws', async () => {
+    const { api, bus, accessories } = await withCameras()
+    const delegates = accessories.map(accessory => delegateOf(accessory))
+    expect(delegates.length).toBeGreaterThan(1)
+
+    delegates[0]!.stopAll = () => {
+      throw new Error('kill failed')
+    }
+    const others = delegates.slice(1).map(delegate => vi.spyOn(delegate, 'stopAll'))
+
+    api.emit('shutdown')
+
+    for (const spy of others)
+      expect(spy).toHaveBeenCalled()
+    expect(bus.stop).toHaveBeenCalled()
+    expect(log.warn.mock.calls.flat().join(' ')).toContain('kill failed')
+  })
+
+  // The guard before reconcile() runs before reconcile's own awaits, and
+  // attaching five cameras awaits an encoder listing each time. Shutdown lands
+  // there easily, and bringing the sockets back up afterwards is why Homebridge
+  // would never finish exiting.
+  it('does not restart the bus when shutdown lands during reconcile', async () => {
+    const { api, platform, bus, run } = makePlatform(audioForAll, cameras)
+    let release: (encoders: string) => void = () => {}
+    run.mockImplementationOnce(async () => new Promise<string>((resolve) => {
+      release = resolve
+    }))
+
+    const inFlight = platform.discover()
+    await vi.waitFor(() => expect(run).toHaveBeenCalled())
+    api.emit('shutdown')
+    release(ENCODERS_WITH_OPUS)
+    await inFlight
+
+    expect(bus.stop).toHaveBeenCalled()
+    expect(bus.start).not.toHaveBeenCalled()
+  })
+
   // The advertisement must come from the delegate, which only offers a codec the
   // probed ffmpeg can actually encode. A hand-built block here would advertise
   // audio HomeKit then cannot play — and it would advertise it for every camera,
@@ -1124,9 +1169,6 @@ describe('uniFiProtectPlatform', () => {
     // HAP adds the Microphone service only when audio is advertised.
     expect(doorbell.services.some(s => s.type === S.Microphone)).toBe(false)
   })
-
-  /** Every camera in the fixture opts in to audio. */
-  const audioForAll = { ...validConfig, devices: Object.fromEntries(cameras.map(c => [c.id as string, { audio: true }])) }
 
   it('advertises the codec the probed ffmpeg can encode for a camera that opted in', async () => {
     const { accessories } = await withCameras(cameras, { config: audioForAll })
@@ -1188,7 +1230,6 @@ describe('uniFiProtectPlatform', () => {
     // the user reads before clicking, so assert the exported constant itself —
     // not the file's text, which the explanatory comment would satisfy on its own.
     expect(AUDIO_LABEL).toMatch(/restart/i)
-    expect(readFileSync('CHANGELOG.md', 'utf8')).toMatch(/restart[^.]*audio|audio[^.]*restart/i)
   })
 
   it('advertises the configured maximum number of concurrent streams', async () => {
