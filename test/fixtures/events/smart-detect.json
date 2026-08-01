@@ -1,0 +1,352 @@
+[
+  {
+    "channel": "events",
+    "at": 1785563288621,
+    "payload": {
+      "type": "add",
+      "item": {
+        "id": "eeeeeeee-eeee-eeee-eeee-000000000001",
+        "modelKey": "event",
+        "type": "smartDetectZone",
+        "start": 1785563286381,
+        "device": "3df76e6abedbeab796e616d9",
+        "smartDetectTypes": [
+          "person"
+        ]
+      }
+    }
+  },
+  {
+    "channel": "events",
+    "at": 1785563288930,
+    "payload": {
+      "type": "update",
+      "item": {
+        "id": "eeeeeeee-eeee-eeee-eeee-000000000001",
+        "modelKey": "event",
+        "type": "smartDetectZone",
+        "start": 1785563286381,
+        "device": "3df76e6abedbeab796e616d9",
+        "smartDetectTypes": [
+          "person"
+        ]
+      }
+    }
+  },
+  {
+    "channel": "events",
+    "at": 1785563289251,
+    "payload": {
+      "type": "add",
+      "item": {
+        "id": "eeeeeeee-eeee-eeee-eeee-000000000002",
+        "modelKey": "event",
+        "type": "smartDetectZone",
+        "start": 1785563286856,
+        "device": "1caae4537220700882c792db",
+        "smartDetectTypes": [
+          "person"
+        ]
+      }
+    }
+  },
+  {
+    "channel": "events",
+    "at": 1785563289758,
+    "payload": {
+      "type": "update",
+      "item": {
+        "id": "eeeeeeee-eeee-eeee-eeee-000000000002",
+        "modelKey": "event",
+        "type": "smartDetectZone",
+        "start": 1785563286856,
+        "device": "1caae4537220700882c792db",
+        "smartDetectTypes": [
+          "person"
+        ]
+      }
+    }
+  },
+  {
+    "channel": "events",
+    "at": 1785563307453,
+    "payload": {
+      "type": "update",
+      "item": {
+        "id": "eeeeeeee-eeee-eeee-eeee-000000000002",
+        "modelKey": "event",
+        "type": "smartDetectZone",
+        "start": 1785563286856,
+        "end": 1785563300954,
+        "device": "1caae4537220700882c792db",
+        "smartDetectTypes": [
+          "person"
+        ]
+      }
+    }
+  },
+  {
+    "channel": "events",
+    "at": 1785563307454,
+    "payload": {
+      "type": "update",
+      "item": {
+        "id": "eeeeeeee-eeee-eeee-eeee-000000000002",
+        "modelKey": "event",
+        "type": "smartDetectZone",
+        "start": 1785563286856,
+        "end": 1785563300954,
+        "device": "1caae4537220700882c792db",
+        "smartDetectTypes": [
+          "person"
+        ]
+      }
+    }
+  },
+  {
+    "channel": "events",
+    "at": 1785563307641,
+    "payload": {
+      "type": "update",
+      "item": {
+        "id": "eeeeeeee-eeee-eeee-eeee-000000000002",
+        "modelKey": "event",
+        "type": "smartDetectZone",
+        "start": 1785563286856,
+        "end": 1785563300954,
+        "device": "1caae4537220700882c792db",
+        "smartDetectTypes": [
+          "person"
+        ]
+      }
+    }
+  },
+  {
+    "channel": "events",
+    "at": 1785563339551,
+    "payload": {
+      "type": "update",
+      "item": {
+        "id": "eeeeeeee-eeee-eeee-eeee-000000000001",
+        "modelKey": "event",
+        "type": "smartDetectZone",
+        "start": 1785563286381,
+        "device": "3df76e6abedbeab796e616d9",
+        "smartDetectTypes": [
+          "person"
+        ]
+      }
+    }
+  },
+  {
+    "channel": "events",
+    "at": 1785563339557,
+    "payload": {
+      "type": "update",
+      "item": {
+        "id": "eeeeeeee-eeee-eeee-eeee-000000000001",
+        "modelKey": "event",
+        "type": "smartDetectZone",
+        "start": 1785563286381,
+        "end": 1785563333112,
+        "device": "3df76e6abedbeab796e616d9",
+        "smartDetectTypes": [
+          "person"
+        ]
+      }
+    }
+  },
+  {
+    "channel": "events",
+    "at": 1785563340272,
+    "payload": {
+      "type": "update",
+      "item": {
+        "id": "eeeeeeee-eeee-eeee-eeee-000000000001",
+        "modelKey": "event",
+        "type": "smartDetectZone",
+        "start": 1785563286381,
+        "end": 1785563333112,
+        "device": "3df76e6abedbeab796e616d9",
+        "smartDetectTypes": [
+          "person"
+        ]
+      }
+    }
+  },
+  {
+    "channel": "events",
+    "at": 1785563587476,
+    "payload": {
+      "type": "add",
+      "item": {
+        "id": "eeeeeeee-eeee-eeee-eeee-000000000005",
+        "modelKey": "event",
+        "type": "smartDetectZone",
+        "start": 1785563585253,
+        "device": "3df76e6abedbeab796e616d9",
+        "smartDetectTypes": [
+          "person"
+        ]
+      }
+    }
+  },
+  {
+    "channel": "events",
+    "at": 1785563587810,
+    "payload": {
+      "type": "update",
+      "item": {
+        "id": "eeeeeeee-eeee-eeee-eeee-000000000005",
+        "modelKey": "event",
+        "type": "smartDetectZone",
+        "start": 1785563585253,
+        "device": "3df76e6abedbeab796e616d9",
+        "smartDetectTypes": [
+          "person"
+        ]
+      }
+    }
+  },
+  {
+    "channel": "events",
+    "at": 1785563588044,
+    "payload": {
+      "type": "add",
+      "item": {
+        "id": "eeeeeeee-eeee-eeee-eeee-000000000006",
+        "modelKey": "event",
+        "type": "smartDetectZone",
+        "start": 1785563585468,
+        "device": "1caae4537220700882c792db",
+        "smartDetectTypes": [
+          "person"
+        ]
+      }
+    }
+  },
+  {
+    "channel": "events",
+    "at": 1785563588792,
+    "payload": {
+      "type": "update",
+      "item": {
+        "id": "eeeeeeee-eeee-eeee-eeee-000000000006",
+        "modelKey": "event",
+        "type": "smartDetectZone",
+        "start": 1785563585468,
+        "device": "1caae4537220700882c792db",
+        "smartDetectTypes": [
+          "person"
+        ]
+      }
+    }
+  },
+  {
+    "channel": "events",
+    "at": 1785563650591,
+    "payload": {
+      "type": "update",
+      "item": {
+        "id": "eeeeeeee-eeee-eeee-eeee-000000000006",
+        "modelKey": "event",
+        "type": "smartDetectZone",
+        "start": 1785563585468,
+        "end": 1785563644161,
+        "device": "1caae4537220700882c792db",
+        "smartDetectTypes": [
+          "person"
+        ]
+      }
+    }
+  },
+  {
+    "channel": "events",
+    "at": 1785563650598,
+    "payload": {
+      "type": "update",
+      "item": {
+        "id": "eeeeeeee-eeee-eeee-eeee-000000000006",
+        "modelKey": "event",
+        "type": "smartDetectZone",
+        "start": 1785563585468,
+        "end": 1785563644161,
+        "device": "1caae4537220700882c792db",
+        "smartDetectTypes": [
+          "person"
+        ]
+      }
+    }
+  },
+  {
+    "channel": "events",
+    "at": 1785563650740,
+    "payload": {
+      "type": "update",
+      "item": {
+        "id": "eeeeeeee-eeee-eeee-eeee-000000000006",
+        "modelKey": "event",
+        "type": "smartDetectZone",
+        "start": 1785563585468,
+        "end": 1785563644161,
+        "device": "1caae4537220700882c792db",
+        "smartDetectTypes": [
+          "person"
+        ]
+      }
+    }
+  },
+  {
+    "channel": "events",
+    "at": 1785563664237,
+    "payload": {
+      "type": "update",
+      "item": {
+        "id": "eeeeeeee-eeee-eeee-eeee-000000000005",
+        "modelKey": "event",
+        "type": "smartDetectZone",
+        "start": 1785563585253,
+        "device": "3df76e6abedbeab796e616d9",
+        "smartDetectTypes": [
+          "person"
+        ]
+      }
+    }
+  },
+  {
+    "channel": "events",
+    "at": 1785563664296,
+    "payload": {
+      "type": "update",
+      "item": {
+        "id": "eeeeeeee-eeee-eeee-eeee-000000000005",
+        "modelKey": "event",
+        "type": "smartDetectZone",
+        "start": 1785563585253,
+        "end": 1785563657604,
+        "device": "3df76e6abedbeab796e616d9",
+        "smartDetectTypes": [
+          "person"
+        ]
+      }
+    }
+  },
+  {
+    "channel": "events",
+    "at": 1785563664986,
+    "payload": {
+      "type": "update",
+      "item": {
+        "id": "eeeeeeee-eeee-eeee-eeee-000000000005",
+        "modelKey": "event",
+        "type": "smartDetectZone",
+        "start": 1785563585253,
+        "end": 1785563657604,
+        "device": "3df76e6abedbeab796e616d9",
+        "smartDetectTypes": [
+          "person"
+        ]
+      }
+    }
+  }
+]

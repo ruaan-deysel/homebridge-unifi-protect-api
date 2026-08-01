@@ -37,3 +37,7 @@ coverage/
 # Local agent/tool state — never publish
 .claude/
 .codegraph/
+
+# Raw event capture: intermediate artefact for building test/fixtures/events/*,
+# never redacted, may contain real device ids and stream tokens — never commit
+test/fixtures/events/raw-capture.json
