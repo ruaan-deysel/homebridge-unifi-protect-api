@@ -9,7 +9,7 @@ updates:
     schedule:
       interval: weekly
       day: monday
-      time: "09:00"
+      time: '09:00'
       timezone: Australia/Brisbane
     open-pull-requests-limit: 10
     labels:
@@ -45,7 +45,7 @@ updates:
     schedule:
       interval: weekly
       day: monday
-      time: "09:00"
+      time: '09:00'
       timezone: Australia/Brisbane
     labels:
       - dependencies
@@ -55,4 +55,4 @@ updates:
     groups:
       github-actions:
         patterns:
-          - "*"
+          - '*'
