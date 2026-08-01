@@ -44,7 +44,7 @@ export function chooseEncoder(hwaccels: string, encoders: string): Omit<FfmpegCa
 }
 
 interface ProbeOptions {
-  log: { info: (m: string) => void, debug: (m: string) => void }
+  log: { info: (m: string) => void, warn: (m: string) => void, debug: (m: string) => void }
   run?: RunFfmpeg
   candidates?: string[]
   configuredPath?: string
@@ -78,10 +78,16 @@ export async function probeFfmpeg(options: ProbeOptions): Promise<FfmpegCapabili
     fallback ??= { path, ...caps }
   }
 
-  if (!fallback)
-    throw new Error('Found no usable ffmpeg. Set ffmpegPath in the plugin settings.')
+  if (!fallback) {
+    throw new Error(options.configuredPath
+      ? `Configured ffmpeg path "${options.configuredPath}" is not usable. Check the ffmpegPath plugin setting.`
+      : 'Found no usable ffmpeg. Set ffmpegPath in the plugin settings.')
+  }
 
-  options.log.info(`Using ffmpeg at ${fallback.path} with software encoding (libx264). Live view will be CPU-expensive; see the README on enabling hardware transcoding.`)
+  // warn, not info: a silent fallback to software costs roughly 27x the CPU, and
+  // this line is the user's only signal that hardware acceleration isn't reaching
+  // the container.
+  options.log.warn(`Using ffmpeg at ${fallback.path} with software encoding (libx264). Live view will be CPU-expensive; see the README on enabling hardware transcoding.`)
   return fallback
 }
 
@@ -100,7 +106,7 @@ export type SpawnFn = (command: string, args: string[]) => ChildProcess
 interface FfmpegProcessOptions {
   path: string
   args: string[]
-  log: { warn: (m: string) => void, debug: (m: string) => void }
+  log: { warn: (m: string) => void }
   spawn?: SpawnFn
   /** Called once when the process ends, however it ends. */
   onExit?: () => void
@@ -117,55 +123,70 @@ export class FfmpegProcess {
 
   private child?: ChildProcess
   private stderr = ''
-  private stopped = false
+  /** Set once a kill signal has actually been delivered; guards stop()'s re-entry. */
+  private killed = false
+  /** Set once the process has actually exited; guards the active count and onExit. */
   private ended = false
 
   constructor(private readonly options: FfmpegProcessOptions) {}
 
   get running(): boolean {
-    return this.child !== undefined && !this.stopped
+    return this.child !== undefined && !this.ended
   }
 
   start(): void {
+    if (this.child)
+      throw new Error('FfmpegProcess.start() called twice on the same instance')
+
     const spawn = this.options.spawn ?? (nodeSpawn as SpawnFn)
     const child = spawn(this.options.path, this.options.args)
     this.child = child
     FfmpegProcess.active++
 
     child.stderr?.on('data', (chunk: Buffer) => {
-      // Bounded: a failing ffmpeg can produce megabytes, and this is only ever
-      // used to explain a failure.
-      this.stderr = `${this.stderr}${chunk.toString()}`.slice(-4000)
+      // Redact BEFORE appending/truncating: truncating first can cut the
+      // `rtsps://` scheme off a token-bearing URL, and a schemeless remainder
+      // no longer matches redactStreamUrls, leaving the token to be logged.
+      // Bounded to 4000 chars: a failing ffmpeg can produce megabytes, and this
+      // is only ever used to explain a failure.
+      this.stderr = `${this.stderr}${redactStreamUrls(chunk.toString())}`.slice(-4000)
     })
 
     child.on('close', (code: number | null) => {
-      this.stopped = true
-      this.release()
-      if (code !== null && code !== 0)
-        this.options.log.warn(`ffmpeg exited with code ${code}: ${redactStreamUrls(this.stderr).trim().split('\n').slice(-3).join(' | ')}`)
-      this.options.onExit?.()
+      const message = (code !== null && code !== 0)
+        ? `ffmpeg exited with code ${code}: ${this.stderr.trim().split('\n').slice(-3).join(' | ')}`
+        : undefined
+      this.finish(message)
     })
 
     child.on('error', (error: Error) => {
-      this.stopped = true
-      this.release()
-      this.options.log.warn(`ffmpeg could not start: ${redactStreamUrls(errorMessage(error))}`)
-      this.options.onExit?.()
+      this.finish(`ffmpeg could not start: ${redactStreamUrls(errorMessage(error))}`)
     })
   }
 
-  /** Decrements the active count exactly once, however the process ended. */
-  private release(): void {
+  /**
+   * Runs exactly once however the process ends (close or error, never both):
+   * releases the active slot and notifies the caller. A failed spawn emits
+   * `error` and then `close`, and onExit's contract is exactly-once, same as
+   * the active count.
+   */
+  private finish(message: string | undefined): void {
     if (this.ended)
       return
     this.ended = true
     FfmpegProcess.active--
+    if (message !== undefined)
+      this.options.log.warn(message)
+    this.options.onExit?.()
   }
 
   stop(): void {
-    if (this.stopped || !this.child)
+    if (this.killed || !this.child)
       return
-    this.stopped = true
-    this.child.kill('SIGKILL')
+    // Only treat the process as stopped once the signal was actually
+    // delivered — a failed kill() must not make `running` lie, and must not
+    // stop a future stop() call from retrying.
+    if (this.child.kill('SIGKILL'))
+      this.killed = true
   }
 }
