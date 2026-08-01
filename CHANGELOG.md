@@ -6,6 +6,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Motion sensors for every camera, driven by the live event stream rather than polling.
+  `GET /v1/events` does not exist in the Integration API, so a lost end-frame can never be
+  reconciled by a query — each active event carries a failsafe timer that clears it.
+- Smart-detection sensors per camera, one per detection type enabled in Protect: person,
+  vehicle, animal and package. A type that is supported but switched off produces no
+  sensor, and switching it off later removes exactly that sensor.
+- Smoke and carbon-monoxide sensors for cameras with audio detection enabled, mapped from
+  Protect's `smartAudioDetect` alarms.
+- A Doorbell service on cameras with a speaker, firing on a real `ring` event.
+- A status-LED switch on cameras that have one, reflecting `ledSettings.isEnabled` and
+  writing changes back to Protect. Changing the LED in the Protect app updates HomeKit,
+  and a failed write restores the switch rather than leaving it showing a state the
+  console rejected.
+- Sensor state is reference-counted, so overlapping events cannot switch a sensor off
+  early. The console redelivers end-frames — observed up to three times with an identical
+  value — and duplicates are ignored.
+
+### Fixed
+- Service removal is floored on an understood device payload. The client returns the raw
+  payload when schema validation fails, so a single firmware field rename could otherwise
+  have stripped every smart-detect sensor, the doorbell and the LED switch from every
+  camera. A payload that cannot be understood now removes nothing.
+- Services created by other modules are left alone during reconciliation instead of being
+  torn down as unrecognised.
+- `ConfiguredName` is written once at service creation, so a rename in the Home app
+  survives later discovery cycles.
+- Documented iCloud limits for HomeKit Secure Video were wrong. Apple caps by camera
+  count, not storage: 50 GB supports one camera, 200 GB supports five, and 2 TB and above
+  are unlimited. Footage does not count against the iCloud storage quota. HKSV remains off
+  by default because the 50 GB tier allows a single camera.
+
 ### Security
 - The console's certificate is now pinned instead of TLS verification being disabled.
   On the first connection the plugin reads the certificate, stores it in `config.json`

@@ -10,6 +10,10 @@
 
 **Global Constraints:**
 
+- **Every task updates `CHANGELOG.md` in the same commit as its code.** Sub-project 2a
+  shipped to `main` with no changelog entry at all, because the only task that mentioned
+  the changelog was the final gate — which never closed. A user-visible change with no
+  entry is an incomplete task, not a tidy-up for later.
 - **The RTSPS URL is a credential.** It carries an auth token. It must never reach a log line, an error message, a thrown `Error`, or a crash report — including via `util.inspect`, which is what Homebridge's `log.error(err)` uses. **ffmpeg echoes its full command line on failure by default**, so stderr must be redacted *before* logging, not filtered after.
 - **The API key is a credential** under the same rules. `errorMessage()` in `src/protect/errors.ts` is the only sanctioned way to turn an error into a loggable string.
 - **All cameras stay under ONE bridge**: `registerPlatformAccessories` only, never `publishExternalAccessories`.
