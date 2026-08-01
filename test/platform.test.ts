@@ -868,4 +868,79 @@ describe('uniFiProtectPlatform', () => {
 
     expect(platform.client.patchCamera).toHaveBeenCalledWith(DOORBELL, { ledSettings: { isEnabled: true } })
   })
+
+  // Fix round 2: the previous "partial nested delta" test never actually
+  // reached `Object.assign` — the schema rejected it first. This one gets a
+  // schema-valid frame PAST the schema and into the merge, and proves
+  // `isUnderstood()` itself floors removal there: a real production path is a
+  // camera whose earlier discovery already came back degraded (a Ubiquiti
+  // field rename), so its cached device permanently lacks
+  // `smartDetectSettings`/`featureFlags` — every later deviceUpdate frame
+  // merges onto that same degraded cache, however innocuous.
+  it('floors removal via isUnderstood() when a schema-valid update merges onto an already-degraded cache', async () => {
+    const { platform, bus } = await withCameras()
+    const doorbell = platform.accessories.get(`uuid-${DOORBELL}`) as unknown as FakePlatformAccessory
+    const before = [...doorbell.services]
+    expect(before.map(s => s.subtype).filter(Boolean)).toContain('detect-vehicle')
+
+    // Simulate the cache already being degraded from an earlier discovery.
+    // A fresh object, never mutate in place: `context.device` here is the
+    // very object the `cameras` fixture array holds, shared by every test in
+    // this file — deleting a field on it would corrupt every test that runs
+    // afterwards.
+    doorbell.context.device = { ...(doorbell.context.device as Record<string, unknown>), smartDetectSettings: undefined, featureFlags: undefined }
+
+    // This frame is entirely schema-valid — a plain ledSettings change — so it
+    // passes `schema.safeParse` and reaches `Object.assign`.
+    bus.emit('deviceUpdate', { type: 'update', item: { id: DOORBELL, modelKey: 'camera', ledSettings: { isEnabled: true, welcomeLed: true, floodLed: true } } })
+
+    expect(doorbell.services).toEqual(before)
+    expect(JSON.stringify(log.warn.mock.calls)).toContain('keeping its existing sensors')
+  })
+
+  // Fix round 2: `setLed` must not leave the cache stale, or an unrelated
+  // deviceUpdate frame arriving after a successful write rebuilds the switch
+  // from the old cached value and visibly flips it back in Home.app — exactly
+  // what the user is about to test by hand.
+  it('keeps the LED switch on its new value after an unrelated deviceUpdate frame following a successful write', async () => {
+    const { platform, bus } = await withCameras()
+    const doorbell = platform.accessories.get(`uuid-${DOORBELL}`) as unknown as FakeAccessory
+    const on = doorbell.getServiceById(S.Switch, 'led')!.getCharacteristic(C.On)
+    expect(on.value).toBe(false)
+
+    await Promise.all(on.listeners('set').map(h => h(true)))
+    // Real HAP commits the requested value itself once a `set` handler
+    // resolves without throwing — the fake harness does not, so this mirrors
+    // that commit before exercising what happens next.
+    on.value = true
+
+    // Unrelated: a rename frame that carries no ledSettings at all. If the
+    // cache were still stale, re-diffing here would read the old
+    // ledSettings.isEnabled: false and flip the switch back.
+    bus.emit('deviceUpdate', { type: 'update', item: { id: DOORBELL, modelKey: 'camera', name: 'Front Door' } })
+
+    expect(on.value).toBe(true)
+  })
+
+  // Fix round 2: `applyDeviceUpdate`'s own docblock promises nothing in here
+  // throws back into the bare socket listener. `buildCameraServices` calls
+  // straight into HAP (`addService`/`removeService`/`updateCharacteristic`),
+  // any of which can throw on a HAP-level problem.
+  it('does not throw out of applyDeviceUpdate when buildCameraServices throws', async () => {
+    const { platform, bus } = await withCameras()
+    const doorbell = platform.accessories.get(`uuid-${DOORBELL}`) as unknown as FakeAccessory
+    const boom = Object.assign(new Error('HAP exploded'), { cause: { apiKey: 'sk-live-DO-NOT-LOG' } })
+    doorbell.getServiceById = () => {
+      throw boom
+    }
+
+    expect(() => bus.emit('deviceUpdate', { type: 'update', item: { id: DOORBELL, modelKey: 'camera', ledSettings: { isEnabled: true, welcomeLed: true, floodLed: true } } })).not.toThrow()
+
+    for (const call of log.warn.mock.calls) {
+      for (const arg of call)
+        expect(typeof arg).toBe('string')
+      expect(call.join(' ')).not.toContain('sk-live-DO-NOT-LOG')
+    }
+    expect(JSON.stringify(log.warn.mock.calls)).toContain('HAP exploded')
+  })
 })

@@ -124,6 +124,18 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
   private readonly cameraCallbacks: CameraCallbacks = {
     setLed: async (deviceId, on) => {
       await this.client.patchCamera(deviceId, { ledSettings: { isEnabled: on } })
+      // Optimistic cache update. Without this, an unrelated deviceUpdate frame
+      // landing between this write and the console echoing the change back
+      // rebuilds the switch from the stale cached ledSettings and flips it
+      // right back in front of the user — a failed write still reverts via
+      // the HapStatusError thrown in camera.ts; this only covers the success
+      // path's cache.
+      const accessory = this.accessories.get(this.api.hap.uuid.generate(deviceId))
+      if (accessory) {
+        const device = accessory.context.device as Record<string, unknown>
+        const ledSettings = { ...(device.ledSettings as Record<string, unknown> | undefined), isEnabled: on }
+        accessory.context.device = { ...device, ledSettings }
+      }
     },
   }
 
@@ -499,7 +511,20 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
     // reaches the switch: buildCameraServices is idempotent and re-applies its
     // own understood/degraded floor, so this never removes a service the merge
     // did not genuinely justify removing.
-    if (modelKey === 'camera')
-      buildCameraServices(this.api, this.log, accessory, device as unknown as Record<string, unknown>, this.cameraCallbacks)
+    //
+    // Guarded like `applyChanges` above: `addService`/`removeService`/
+    // `updateCharacteristic` are HAP calls and this method's own docblock
+    // promises nothing in here throws back into the bare socket listener.
+    if (modelKey === 'camera') {
+      try {
+        buildCameraServices(this.api, this.log, accessory, device as unknown as Record<string, unknown>, this.cameraCallbacks)
+      }
+      catch (error) {
+        // errorMessage, and the STRING: Homebridge's log.error(err) runs
+        // util.inspect over the object, which has leaked the API key out of an
+        // error's request context in this repo before.
+        this.log.warn(`Could not rebuild services for "${label}": ${errorMessage(error)}`)
+      }
+    }
   }
 }
