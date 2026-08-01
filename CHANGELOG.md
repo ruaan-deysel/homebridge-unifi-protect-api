@@ -23,6 +23,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Sensor state is reference-counted, so overlapping events cannot switch a sensor off
   early. The console redelivers end-frames — observed up to three times with an identical
   value — and duplicates are ignored.
+- Live streaming video quality is automatically selected based on HomeKit's resolution
+  request: 640×360 and below uses the low substream, 1280×720 uses medium, and anything
+  larger uses high. Per-camera quality override allows manual selection or disables
+  automatic scaling.
+- Live view transcoding now probes ffmpeg at startup and prefers Intel Quick Sync (QSV) or
+  VAAPI hardware encoding over the bundled software encoder, since every Protect stream is
+  HEVC and HomeKit only accepts H.264. Hardware encoding cuts CPU cost roughly 27× on
+  supported hosts; the chosen ffmpeg path and encoder are logged so a silent fallback to
+  software is visible rather than just running expensive.
 
 ### Fixed
 - Service removal is floored on an understood device payload. The client returns the raw
