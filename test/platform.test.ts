@@ -780,13 +780,20 @@ describe('uniFiProtectPlatform', () => {
       const { api, bus, detected } = await withCameras()
       bus.emit('protectEvent', frames('motion')[0])
       expect(detected(DOORBELL, 'motion')).toBe(true)
+      // A timer must actually exist before shutdown, or "0 after" below could
+      // pass against a tracker that never armed a failsafe at all.
+      expect(vi.getTimerCount()).toBeGreaterThan(0)
 
       api.emit('shutdown')
+      // Assert the cancellation immediately, before any advance: advancing
+      // first would let a merely-leaked (not cancelled) timer fire and drain
+      // itself from the pending queue, so getTimerCount() would read 0 either
+      // way and the assertion would prove nothing.
+      expect(vi.getTimerCount()).toBe(0)
       await vi.advanceTimersByTimeAsync(600_000)
 
       // Untouched: the timer was cancelled, not merely late.
       expect(detected(DOORBELL, 'motion')).toBe(true)
-      expect(vi.getTimerCount()).toBe(0)
     }
     finally {
       vi.useRealTimers()
