@@ -5,22 +5,27 @@ import { Buffer } from 'node:buffer'
 import { EventEmitter } from 'node:events'
 import { inspect } from 'node:util'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { AAC_ELD_ENCODER, buildFfmpegArgs, defaultMaxStreams, StreamingDelegate } from '../src/accessories/streaming.js'
+import { audioStreamingCodec, buildFfmpegArgs, chooseAudioCodec, defaultMaxStreams, StreamingDelegate } from '../src/accessories/streaming.js'
 import { FfmpegProcess } from '../src/protect/ffmpeg.js'
 
 const CAPS_HW = { path: '/usr/bin/ffmpeg', encoder: 'h264_vaapi' as const, hwaccel: 'vaapi' as const }
 const CAPS_SW = { path: '/usr/local/bin/ffmpeg', encoder: 'libx264' as const }
 const URL = 'rtsps://192.0.2.1:7441/live?token=SENTINEL'
 
-/** An `-encoders` listing shaped like the real one, with libfdk_aac present or not. */
-function encoderList(withAacEld: boolean): string {
+/**
+ * An `-encoders` listing shaped like the real one. The two builds in the target
+ * container are mutually exclusive: /usr/bin/ffmpeg has libopus and hardware
+ * video but no libfdk_aac; the bundled static build is the other way round.
+ */
+function encoderList(has: { opus?: boolean, aacEld?: boolean } = {}): string {
   return [
     ' V..... h264_vaapi           H.264/AVC (VAAPI)',
     ' V..... libx264              libx264 H.264 / AVC',
-    // The name appears in a DESCRIPTION here, not in the encoder column. A bare
+    // Both names appear in a DESCRIPTION here, not in the encoder column. A bare
     // substring test would call this a hit and hand ffmpeg an encoder it lacks.
-    ' A..... aac                  AAC (Advanced Audio Coding) (alternative: libfdk_aac)',
-    withAacEld ? ' A..... libfdk_aac           Fraunhofer FDK AAC' : ' A..... libopus              libopus Opus',
+    ' A..... aac                  AAC (Advanced Audio Coding) (alternatives: libfdk_aac libopus)',
+    ...(has.aacEld ? [' A..... libfdk_aac           Fraunhofer FDK AAC'] : []),
+    ...(has.opus ? [' A..... libopus              libopus Opus'] : []),
   ].join('\n')
 }
 
@@ -40,10 +45,9 @@ describe('buildFfmpegArgs', () => {
     address: '192.0.2.9',
     video: { port: 5000, ssrc: 1, key: Buffer.alloc(30), payloadType: 99, localPort: 5001 },
   }
-  const withAudio: StreamArgs = {
-    ...base,
-    audio: { port: 5002, ssrc: 2, key: Buffer.alloc(30, 7), payloadType: 110, sampleRate: 16, bitrate: 24, localPort: 5003 },
-  }
+  const audioTarget = { port: 5002, ssrc: 2, key: Buffer.alloc(30, 7), payloadType: 110, sampleRate: 24, bitrate: 24, localPort: 5003 }
+  const withAudio: StreamArgs = { ...base, audio: { ...audioTarget, codec: 'opus' } }
+  const withAacEld: StreamArgs = { ...base, audio: { ...audioTarget, codec: 'aac-eld' } }
 
   it('uses hardware flags when the probe found hardware', () => {
     const args = buildFfmpegArgs(CAPS_HW, base)
@@ -84,7 +88,7 @@ describe('buildFfmpegArgs', () => {
       expect(args).toContain('-an')
       expect(args.filter(a => a === '-f')).toHaveLength(1)
       expect(args.filter(a => a.startsWith('srtp://'))).toHaveLength(1)
-      expect(args).not.toContain(AAC_ELD_ENCODER)
+      expect(args).not.toContain('-c:a')
     })
   })
 
@@ -102,11 +106,17 @@ describe('buildFfmpegArgs', () => {
       ])
     })
 
-    it('encodes aac-eld at the rate homekit asked for and never mutes the input', () => {
-      expect(joined).toContain(`-c:a ${AAC_ELD_ENCODER} -profile:a aac_eld`)
-      expect(joined).toContain('-ar 16k')
+    it('encodes opus low-delay at the rate homekit asked for and never mutes the input', () => {
+      expect(joined).toContain('-c:a libopus -application lowdelay -frame_duration 20')
+      expect(joined).toContain('-ar 24k')
       expect(joined).toContain('-b:a 24k')
       expect(args).not.toContain('-an')
+    })
+
+    it('encodes aac-eld when that is the chosen codec', () => {
+      const aac = buildFfmpegArgs(CAPS_HW, withAacEld).join(' ')
+      expect(aac).toContain('-c:a libfdk_aac -profile:a aac_eld')
+      expect(aac).not.toContain('libopus')
     })
 
     it('gives each output its own ssrc and srtp key', () => {
@@ -120,6 +130,52 @@ describe('buildFfmpegArgs', () => {
       expect(joined).toContain('-map 0:a:0?')
       expect(joined).toContain('-map 0:v:0')
     })
+  })
+})
+
+describe('chooseAudioCodec', () => {
+  // Measured 2026-08-01: /usr/bin/ffmpeg (the only build with VAAPI/QSV) has
+  // libopus and no libfdk_aac. Preferring AAC-ELD would force a choice between
+  // hardware video and any audio at all.
+  it('prefers opus, so the hardware build can still carry audio', () => {
+    expect(chooseAudioCodec(encoderList({ opus: true }))).toBe('opus')
+    expect(chooseAudioCodec(encoderList({ opus: true, aacEld: true }))).toBe('opus')
+  })
+
+  it('falls back to aac-eld when that is all the build has', () => {
+    expect(chooseAudioCodec(encoderList({ aacEld: true }))).toBe('aac-eld')
+  })
+
+  it('chooses nothing when neither encoder is present', () => {
+    expect(chooseAudioCodec(encoderList())).toBeUndefined()
+  })
+})
+
+describe('the advertised codec and the produced codec', () => {
+  // Advertising one codec and sending another fails on the iPhone, where no unit
+  // test is watching. The pairing is asserted here against a literal table.
+  const expected = {
+    'opus': { hapType: 'OPUS', flag: '-c:a libopus' },
+    'aac-eld': { hapType: 'AAC-eld', flag: '-c:a libfdk_aac' },
+  } as const
+
+  for (const codec of ['opus', 'aac-eld'] as const) {
+    it(`agree for ${codec}`, () => {
+      expect(audioStreamingCodec(codec).type).toBe(expected[codec].hapType)
+      const args = buildFfmpegArgs(CAPS_HW, {
+        url: URL,
+        bitrate: 3000,
+        address: '192.0.2.9',
+        video: { port: 5000, ssrc: 1, key: Buffer.alloc(30), payloadType: 99 },
+        audio: { port: 5002, ssrc: 2, key: Buffer.alloc(30), payloadType: 110, sampleRate: 24, bitrate: 24, codec },
+      })
+      expect(args.join(' ')).toContain(expected[codec].flag)
+    })
+  }
+
+  it('offers homekit the sample rates it actually asks for', () => {
+    expect(audioStreamingCodec('opus').samplerate).toEqual([16, 24])
+    expect(audioStreamingCodec('opus').audioChannels).toBe(1)
   })
 })
 
@@ -142,8 +198,9 @@ interface DelegateOverrides {
   getSnapshot?: () => Promise<Buffer>
   url?: () => Promise<string>
   audio?: boolean
-  aacEld?: boolean
+  encoders?: { opus?: boolean, aacEld?: boolean }
   run?: () => Promise<string>
+  spawn?: () => ChildProcess
   quality?: 'auto' | 'low' | 'medium' | 'high'
 }
 
@@ -162,12 +219,16 @@ async function failingProbe(): Promise<string> {
   throw new Error('ffmpeg is gone')
 }
 
+function throwingSpawn(): ChildProcess {
+  throw new Error('ENOENT')
+}
+
 function makeDelegate(overrides: DelegateOverrides = {}) {
   const log = makeLog()
   const getSnapshot = vi.fn(overrides.getSnapshot ?? (async () => jpeg))
   const get = vi.fn(overrides.url ?? (async () => URL))
-  const spawn = vi.fn(() => fakeChild())
-  const run = vi.fn(overrides.run ?? (async () => encoderList(overrides.aacEld ?? true)))
+  const spawn = vi.fn(overrides.spawn ?? (() => fakeChild()))
+  const run = vi.fn(overrides.run ?? (async () => encoderList(overrides.encoders ?? { opus: true })))
   const delegate = new StreamingDelegate({
     deviceId: 'cam1',
     label: 'Driveway',
@@ -282,6 +343,44 @@ describe('streamingDelegate sessions', () => {
     expect(log.warn).toHaveBeenCalled()
   })
 
+  it('gives the reserved slot back when a start fails', async () => {
+    // The reservation is module-level and lives for the whole process: a leak on
+    // an error path would permanently shrink the budget for every camera.
+    let fail = true
+    const log = makeLog()
+    const spawn = vi.fn(() => fakeChild())
+    const delegate = new StreamingDelegate({
+      deviceId: 'cam1',
+      label: 'Driveway',
+      log,
+      client: {} as never,
+      urls: { get: async () => {
+        if (fail)
+          throw new Error('console said no')
+        return URL
+      } } as never,
+      caps: CAPS_SW,
+      settings: () => ({ quality: 'auto', audio: false }),
+      spawn,
+      maxStreams: 1,
+    })
+
+    expect(await delegate.startSession('a', REQUEST, RTP)).toBe(false)
+    fail = false
+    // Only possible if the failed attempt released its slot.
+    expect(await delegate.startSession('b', REQUEST, RTP)).toBe(true)
+    delegate.stopAll()
+  })
+
+  it('tracks no session when the spawn itself throws', async () => {
+    const { delegate, log } = makeDelegate({ spawn: throwingSpawn })
+    expect(await delegate.startSession('a', REQUEST, RTP)).toBe(false)
+    // A dead entry would make stopAll() kill a corpse and inflate activeCount.
+    expect(delegate.activeCount).toBe(0)
+    expect(log.warn).toHaveBeenCalled()
+    delegate.stopAll()
+  })
+
   it('stops a session, killing the process and freeing the slot', async () => {
     const { delegate } = makeDelegate()
     await delegate.startSession('a', REQUEST, RTP)
@@ -370,15 +469,37 @@ describe('streamingDelegate sessions', () => {
     delegate.stopAll()
   })
 
-  it('falls back to video-only, with a warning, when ffmpeg cannot encode aac-eld', async () => {
-    const { delegate, spawn, log } = makeDelegate({ audio: true, aacEld: false })
+  it('encodes with the codec the probe found, and advertises that same one', async () => {
+    const opus = makeDelegate({ audio: true, encoders: { opus: true } })
+    await opus.delegate.startSession('a', REQUEST, RTP)
+    expect(argvOf(opus.spawn).join(' ')).toContain('-c:a libopus')
+    expect((await opus.delegate.audioStreamingOptions())?.codecs[0]?.type).toBe('OPUS')
+    opus.delegate.stopAll()
+
+    // The bundled static build: AAC-ELD only.
+    const aac = makeDelegate({ audio: true, encoders: { aacEld: true } })
+    await aac.delegate.startSession('a', REQUEST, RTP)
+    expect(argvOf(aac.spawn).join(' ')).toContain('-c:a libfdk_aac')
+    expect((await aac.delegate.audioStreamingOptions())?.codecs[0]?.type).toBe('AAC-eld')
+    aac.delegate.stopAll()
+  })
+
+  it('advertises nothing when the camera has audio switched off', async () => {
+    const { delegate } = makeDelegate({ encoders: { opus: true } })
+    expect(await delegate.audioStreamingOptions()).toBeUndefined()
+  })
+
+  it('falls back to video-only, with a warning, when ffmpeg has neither audio encoder', async () => {
+    const { delegate, spawn, log } = makeDelegate({ audio: true, encoders: {} })
     expect(await delegate.startSession('a', REQUEST, RTP)).toBe(true)
     const args = argvOf(spawn)
     // A broken command would be worse than no audio.
-    expect(args).not.toContain(AAC_ELD_ENCODER)
+    expect(args).not.toContain('-c:a')
     expect(args).toContain('-an')
     expect(args.filter(a => a.startsWith('srtp://'))).toHaveLength(1)
-    expect(log.warn.mock.calls.join(' ')).toContain('AAC-ELD')
+    expect(log.warn.mock.calls.join(' ')).toContain('libopus or libfdk_aac')
+    // Nothing may be advertised that cannot be produced.
+    expect(await delegate.audioStreamingOptions()).toBeUndefined()
     delegate.stopAll()
   })
 

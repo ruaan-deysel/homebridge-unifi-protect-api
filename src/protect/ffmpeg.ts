@@ -27,7 +27,7 @@ export const runFfmpeg: RunFfmpeg = async (path, args) => {
  * a word boundary matters: the same list contains `hevc_qsv` and `mjpeg_qsv`,
  * and a substring match on "qsv" would select a codec HomeKit cannot decode.
  */
-function hasEncoder(encoders: string, name: string): boolean {
+export function hasEncoder(encoders: string, name: string): boolean {
   return new RegExp(`^\\s*\\S+\\s+${name}\\b`, 'm').test(encoders)
 }
 

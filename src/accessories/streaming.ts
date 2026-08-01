@@ -1,4 +1,7 @@
 import type {
+  AudioStreamingCodec,
+  AudioStreamingOptions,
+  AudioStreamingSamplerate,
   CameraStreamingDelegate,
   PrepareStreamCallback,
   PrepareStreamRequest,
@@ -15,7 +18,7 @@ import type { QualityPreference } from './quality.js'
 import { Buffer } from 'node:buffer'
 import { createSocket } from 'node:dgram'
 import { errorMessage } from '../protect/errors.js'
-import { FfmpegProcess, runFfmpeg } from '../protect/ffmpeg.js'
+import { FfmpegProcess, hasEncoder, runFfmpeg } from '../protect/ffmpeg.js'
 import { selectQuality } from './quality.js'
 
 /**
@@ -40,7 +43,49 @@ export interface RtpTarget {
   localPort?: number
 }
 
+export type AudioCodec = 'aac-eld' | 'opus'
+
+/**
+ * The two codecs HomeKit accepts that this plugin can produce, each with the
+ * ffmpeg encoder that makes it and the name HomeKit knows it by. Advertising one
+ * and sending the other fails on the client, so these must never drift apart —
+ * hence one table, used by both the advertisement and the argument builder.
+ */
+export const AUDIO_CODECS = {
+  'opus': { encoder: 'libopus', hapType: 'OPUS' },
+  'aac-eld': { encoder: 'libfdk_aac', hapType: 'AAC-eld' },
+} as const satisfies Record<AudioCodec, { encoder: string, hapType: string }>
+
+/**
+ * Opus first, and it matters on the real target: the container's two ffmpeg
+ * builds have mutually exclusive capabilities — `/usr/bin/ffmpeg` has VAAPI and
+ * QSV but no libfdk_aac, the bundled static build has libfdk_aac but no hardware.
+ * Preferring AAC-ELD would mean choosing between hardware video and any audio at
+ * all. libopus is in the hardware build, and the Protect source already carries
+ * an opus 48 kHz track alongside its AAC one.
+ */
+export const AUDIO_CODEC_PREFERENCE: AudioCodec[] = ['opus', 'aac-eld']
+
+/** The best codec this ffmpeg can produce, or undefined for video-only. */
+export function chooseAudioCodec(encoders: string): AudioCodec | undefined {
+  return AUDIO_CODEC_PREFERENCE.find(codec => hasEncoder(encoders, AUDIO_CODECS[codec].encoder))
+}
+
+/**
+ * What to put in `streamingOptions.audio.codecs`. HomeKit picks a sample rate
+ * from this list and echoes it back in the start request; 16 and 24 kHz are what
+ * controllers actually ask for.
+ */
+export function audioStreamingCodec(codec: AudioCodec): AudioStreamingCodec {
+  return {
+    type: AUDIO_CODECS[codec].hapType,
+    audioChannels: 1,
+    samplerate: [16, 24] as AudioStreamingSamplerate[],
+  }
+}
+
 export interface AudioStreamArgs extends RtpTarget {
+  codec: AudioCodec
   /** kHz, straight from HomeKit's AudioInfo (8, 16 or 24). */
   sampleRate: number
   /** kbit/s. */
@@ -52,12 +97,9 @@ export interface StreamArgs {
   bitrate: number
   address: string
   video: RtpTarget
-  /** Absent means video-only: either the camera opted out or AAC-ELD is unavailable. */
+  /** Absent means video-only: either the camera opted out or no codec is available. */
   audio?: AudioStreamArgs
 }
-
-/** HomeKit only ever accepts AAC-ELD, and only libfdk_aac encodes it. */
-export const AAC_ELD_ENCODER = 'libfdk_aac'
 
 const SRTP_SUITE = 'AES_CM_128_HMAC_SHA1_80'
 
@@ -102,15 +144,17 @@ export function buildFfmpegArgs(caps: FfmpegCapabilities, s: StreamArgs): string
   if (!s.audio)
     return [...input, ...video]
 
+  // Opus wants low-delay framing; AAC-ELD wants its profile named.
+  const codec = s.audio.codec === 'opus'
+    ? ['-c:a', AUDIO_CODECS.opus.encoder, '-application', 'lowdelay', '-frame_duration', '20']
+    : ['-c:a', AUDIO_CODECS['aac-eld'].encoder, '-profile:a', 'aac_eld']
+
   const audio = [
     // `0:a:0?` — the `?` matters: a Protect camera with no microphone has no
     // audio track at all, and a hard mapping would make ffmpeg refuse to start.
     '-map',
     '0:a:0?',
-    '-c:a',
-    AAC_ELD_ENCODER,
-    '-profile:a',
-    'aac_eld',
+    ...codec,
     '-ac',
     '1',
     '-ar',
@@ -205,7 +249,7 @@ export class StreamingDelegate implements CameraStreamingDelegate {
   private readonly sessions = new Map<string, FfmpegProcess>()
   private readonly prepared = new Map<string, SessionRtp>()
   private snapshotCache?: { at: number, jpeg: Buffer }
-  private audioEncoder?: Promise<string | undefined>
+  private audioCodec?: Promise<AudioCodec | undefined>
   private warnedAboutAudio = false
 
   constructor(private readonly options: DelegateOptions) {}
@@ -248,33 +292,46 @@ export class StreamingDelegate implements CameraStreamingDelegate {
   }
 
   /**
-   * Resolves to the AAC-ELD encoder if this ffmpeg has it. HomeKit accepts no
-   * other audio codec, and plenty of ffmpeg builds — including some Homebridge
-   * container images — ship without libfdk_aac because of its licence.
+   * The audio codec this ffmpeg can produce, or undefined for video-only.
    *
    * ponytail: probed once per delegate and cached, failures included, so a
    * transient probe failure means video-only until restart. Key it by path with
    * a retry if that ever bites.
    */
-  private probeAudioEncoder(): Promise<string | undefined> {
-    this.audioEncoder ??= (this.options.run ?? runFfmpeg)(this.options.caps.path, ['-hide_banner', '-encoders'])
-      .then(encoders => new RegExp(`^\\s*\\S+\\s+${AAC_ELD_ENCODER}\\b`, 'm').test(encoders) ? AAC_ELD_ENCODER : undefined)
+  private probeAudioCodec(): Promise<AudioCodec | undefined> {
+    this.audioCodec ??= (this.options.run ?? runFfmpeg)(this.options.caps.path, ['-hide_banner', '-encoders'])
+      .then(chooseAudioCodec)
       .catch((error) => {
         this.options.log.debug(`Could not list ffmpeg audio encoders: ${errorMessage(error)}`)
         return undefined
       })
-    return this.audioEncoder
+    return this.audioCodec
+  }
+
+  /**
+   * What to advertise in `CameraControllerOptions.streamingOptions.audio`, or
+   * undefined when this camera streams video only. It MUST name the codec the
+   * ffmpeg arguments actually produce: advertising one and sending another fails
+   * on the client, where no unit test is watching.
+   */
+  async audioStreamingOptions(): Promise<AudioStreamingOptions | undefined> {
+    if (!this.options.settings().audio)
+      return undefined
+    const codec = await this.probeAudioCodec()
+    return codec ? { codecs: [audioStreamingCodec(codec)] } : undefined
   }
 
   /** Audio for this session, or undefined when it is off or cannot be encoded. */
   private async audioFor(request: SessionRequest, rtp: SessionRtp, wanted: boolean): Promise<AudioStreamArgs | undefined> {
     if (!wanted || !request.audio)
       return undefined
-    if (await this.probeAudioEncoder())
-      return { ...rtp.audio, ...request.audio }
+    const codec = await this.probeAudioCodec()
+    if (codec)
+      return { ...rtp.audio, ...request.audio, codec }
     if (!this.warnedAboutAudio) {
       this.warnedAboutAudio = true
-      this.options.log.warn(`Audio is enabled for "${this.options.label}" but this ffmpeg cannot encode AAC-ELD (${AAC_ELD_ENCODER} is missing), which is the only codec HomeKit accepts. Streaming video only.`)
+      const encoders = AUDIO_CODEC_PREFERENCE.map(c => AUDIO_CODECS[c].encoder).join(' or ')
+      this.options.log.warn(`Audio is enabled for "${this.options.label}" but this ffmpeg can encode neither of the codecs HomeKit accepts here (${encoders} is missing). Streaming video only.`)
     }
     return undefined
   }
@@ -322,8 +379,17 @@ export class StreamingDelegate implements CameraStreamingDelegate {
         spawn: this.options.spawn,
         onExit: () => this.sessions.delete(sessionId),
       })
-      this.sessions.set(sessionId, proc)
-      proc.start()
+      try {
+        proc.start()
+      }
+      catch (error) {
+        this.options.log.warn(`Could not start ffmpeg for "${this.options.label}": ${errorMessage(error)}`)
+        return false
+      }
+      // Tracked only once it is genuinely running: a spawn that throws must not
+      // leave an entry behind for stopAll() to kill a corpse.
+      if (proc.running)
+        this.sessions.set(sessionId, proc)
       this.options.log.info(`Live view started for "${this.options.label}" (${quality} substream, ${audio ? 'with' : 'no'} audio).`)
       return true
     }
