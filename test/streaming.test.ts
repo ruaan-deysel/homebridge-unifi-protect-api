@@ -17,7 +17,9 @@ function encoderList(withAacEld: boolean): string {
   return [
     ' V..... h264_vaapi           H.264/AVC (VAAPI)',
     ' V..... libx264              libx264 H.264 / AVC',
-    ' A..... aac                  AAC (Advanced Audio Coding)',
+    // The name appears in a DESCRIPTION here, not in the encoder column. A bare
+    // substring test would call this a hit and hand ffmpeg an encoder it lacks.
+    ' A..... aac                  AAC (Advanced Audio Coding) (alternative: libfdk_aac)',
     withAacEld ? ' A..... libfdk_aac           Fraunhofer FDK AAC' : ' A..... libopus              libopus Opus',
   ].join('\n')
 }
