@@ -1,3 +1,5 @@
+import type { StreamingDelegate } from '../src/accessories/streaming.js'
+import type { ProtectPluginConfig } from '../src/config.js'
 import { EventEmitter } from 'node:events'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -6,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { UniFiProtectPlatform } from '../src/platform.js'
 import { fingerprintOf } from '../src/protect/cert.js'
 import { ProtectAuthError, ProtectUnavailableError } from '../src/protect/errors.js'
-import { C, FakeAccessory, hap, S } from './fake-hap.js'
+import { C, FakeAccessory, FakeDoorbellController, hap, S } from './fake-hap.js'
 import { makeSelfSigned } from './support/tls.js'
 
 const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(), success: vi.fn() }
@@ -81,16 +83,23 @@ const CERT_B = makeSelfSigned('console-b').cert
 const FP_A = fingerprintOf(CERT_A)
 const FP_B = fingerprintOf(CERT_B)
 
+/** What the reference host's `/usr/bin/ffmpeg` actually reports. */
+const FFMPEG_CAPS = { path: '/usr/bin/ffmpeg', encoder: 'h264_vaapi' as const, hwaccel: 'vaapi' as const }
+
 function makePlatform(config: unknown = validConfig, cameras: unknown[] = [], presented = CERT_A) {
   const api = makeApi()
   const platform = new UniFiProtectPlatform(log as never, config as never, api as never)
   const bus = events()
   platform.client = makeClient(cameras) as never
   platform.events = bus as never
+  // Stubbed everywhere, for the same reason as the certificate reader: no test
+  // in this suite may exec a binary off the machine it happens to run on.
+  const probe = vi.fn(async () => FFMPEG_CAPS)
+  platform.probeFfmpeg = probe as never
   // Stubbed everywhere: nothing in this suite may open a TLS socket to the
   // fictional 10.0.0.1, and a real attempt hangs the run until it times out.
   platform.readConsoleCert = vi.fn(async () => ({ pem: presented, fingerprint: fingerprintOf(presented) }))
-  return { api, platform, bus }
+  return { api, platform, bus, probe }
 }
 
 describe('uniFiProtectPlatform', () => {
@@ -573,25 +582,42 @@ describe('uniFiProtectPlatform', () => {
   const GARAGE = camera('Garage').id as string
 
   /** Discovers the five real cameras and hands back the wired platform. */
-  async function withCameras(devices: unknown[] = cameras) {
-    const ctx = makePlatform(validConfig, devices)
+  async function withCameras(
+    devices: unknown[] = cameras,
+    options: { config?: unknown, probeFfmpeg?: () => Promise<unknown> } = {},
+  ) {
+    const ctx = makePlatform(options.config ?? validConfig, devices)
+    if (options.probeFfmpeg)
+      ctx.platform.probeFfmpeg = options.probeFfmpeg as never
     await ctx.platform.discover()
     const sensor = (id: string, subtype: string) =>
       (ctx.platform.accessories.get(`uuid-${id}`) as unknown as FakeAccessory).getServiceById(S.MotionSensor, subtype)
     const detected = (id: string, subtype: string) => sensor(id, subtype)?.valueOf_(C.MotionDetected)
-    return { ...ctx, sensor, detected }
+    const accessories = [...ctx.platform.accessories.values()] as unknown as FakePlatformAccessory[]
+    return { ...ctx, sensor, detected, accessories, log }
   }
+
+  /** The accessory the 2a `ring` Doorbell service belongs to. */
+  const doorbellOf = (accessories: FakePlatformAccessory[]) => accessories.find(a => a.UUID === `uuid-${DOORBELL}`)!
+
+  /**
+   * The sensor subtypes `camera.ts` owns. The numeric ones belong to the
+   * CameraController's RTP stream managements, which HAP creates and names by
+   * index — they are nothing to do with the sensor builder.
+   */
+  const sensorSubtypes = (accessory: FakeAccessory) =>
+    accessory.services.map(s => s.subtype).filter(s => s && !/^\d+$/.test(s)).sort()
 
   it('builds the sensor services for every exposed camera during discovery', async () => {
     const { platform } = await withCameras()
 
     const doorbell = platform.accessories.get(`uuid-${DOORBELL}`) as unknown as FakeAccessory
-    expect(doorbell.services.map(s => s.subtype).filter(Boolean).sort()).toEqual(
+    expect(sensorSubtypes(doorbell)).toEqual(
       ['detect-animal', 'detect-package', 'detect-person', 'detect-vehicle', 'led', 'motion', 'ring'],
     )
     // Sidegate reports hasLedStatus: false and no speaker.
     const sidegate = platform.accessories.get(`uuid-${camera('Sidegate').id}`) as unknown as FakeAccessory
-    expect(sidegate.services.map(s => s.subtype).filter(Boolean).sort()).toEqual(['detect-animal', 'detect-person', 'motion'])
+    expect(sensorSubtypes(sidegate)).toEqual(['detect-animal', 'detect-person', 'motion'])
   })
 
   it('rebuilds services on a later discovery when a detection type is disabled in protect', async () => {
@@ -1024,6 +1050,163 @@ describe('uniFiProtectPlatform', () => {
       expect(call.join(' ')).not.toContain('sk-live-DO-NOT-LOG')
     }
     expect(JSON.stringify(log.warn.mock.calls)).toContain('HAP exploded')
+  })
+
+  // -------------------------------------------------------------------------
+  // Live streaming: the CameraController wiring.
+  // -------------------------------------------------------------------------
+
+  const controllerOf = (accessory: FakePlatformAccessory) => accessory.controllers[0]!
+  const delegateOf = (accessory: FakePlatformAccessory) =>
+    controllerOf(accessory).options.delegate as StreamingDelegate
+
+  // Two execs per probe. Per camera that is ten on a five-camera console, and
+  // it repeats on every resync — while the answer is a property of the host.
+  it('probes ffmpeg once, not once per camera and not once per discovery', async () => {
+    const probe = vi.fn(async () => FFMPEG_CAPS)
+    const { platform, accessories } = await withCameras(cameras, { probeFfmpeg: probe })
+
+    expect(accessories.length).toBeGreaterThan(1)
+    expect(probe).toHaveBeenCalledTimes(1)
+
+    await platform.discover()
+
+    expect(probe).toHaveBeenCalledTimes(1)
+  })
+
+  it('gives every camera exactly one bridged CameraController, and never a second one', async () => {
+    const { api, platform, accessories } = await withCameras()
+
+    expect(accessories).toHaveLength(5)
+    for (const accessory of accessories) {
+      expect(accessory.controllers, accessory.displayName).toHaveLength(1)
+      // The host-wide default for the hardware encoder the probe reported.
+      expect(controllerOf(accessory).options.cameraStreamCount).toBe(6)
+    }
+
+    // A rediscovery must not configure a second controller: that would duplicate
+    // every stream management service on the accessory.
+    await platform.discover()
+
+    for (const accessory of accessories)
+      expect(accessory.controllers, accessory.displayName).toHaveLength(1)
+    // Every camera under the one child bridge. An external accessory is a
+    // separate pairing the user would have to add by hand.
+    expect(api.publishExternalAccessories).not.toHaveBeenCalled()
+    expect(api.registerPlatformAccessories).toHaveBeenCalled()
+  })
+
+  // The advertisement must come from the delegate, which only offers a codec the
+  // probed ffmpeg can actually encode. A hand-built block here would advertise
+  // audio HomeKit then cannot play — and it would advertise it for every camera,
+  // including the ones whose owner deliberately left audio off.
+  it('advertises no audio for a camera that did not opt in', async () => {
+    const { accessories } = await withCameras()
+    const doorbell = doorbellOf(accessories)
+
+    expect((controllerOf(doorbell).options.streamingOptions as { audio?: unknown }).audio).toBeUndefined()
+    // HAP adds the Microphone service only when audio is advertised.
+    expect(doorbell.services.some(s => s.type === S.Microphone)).toBe(false)
+  })
+
+  it('advertises the configured maximum number of concurrent streams', async () => {
+    const { accessories } = await withCameras(cameras, { config: { ...validConfig, maxStreams: 3 } })
+
+    for (const accessory of accessories)
+      expect(controllerOf(accessory).options.cameraStreamCount).toBe(3)
+  })
+
+  // Sub-project 2a already created the subtyped `ring` Doorbell and drives it
+  // off the event pipeline. A DoorbellController brings its own, and the user
+  // sees the doorbell twice in Home.app.
+  it('adds no second doorbell service when the camera controller is attached', async () => {
+    const { accessories } = await withCameras()
+    const doorbell = doorbellOf(accessories)
+
+    expect(doorbell.services.filter(s => s.type === S.Doorbell)).toHaveLength(1)
+    expect(doorbell.getServiceById(S.Doorbell, 'ring')).toBeDefined()
+    expect(controllerOf(doorbell)).not.toBeInstanceOf(FakeDoorbellController)
+  })
+
+  // The controller's own services carry a numeric subtype ("0", "1", ...), and
+  // they are protected from `camera.ts`'s removal loop precisely by NOT being in
+  // its OWNED_SUBTYPES allow-list. Adding them there would delete live view on
+  // the second discovery.
+  it('keeps the controller\'s stream management services across a discovery cycle', async () => {
+    const { platform, accessories } = await withCameras()
+    const doorbell = doorbellOf(accessories)
+    const streaming = doorbell.services.filter(s => s.type === S.CameraRTPStreamManagement)
+    expect(streaming).toHaveLength(6)
+
+    await platform.discover()
+
+    expect(doorbell.services.filter(s => s.type === S.CameraRTPStreamManagement)).toEqual(streaming)
+  })
+
+  it('gives a non-camera device no camera controller at all', async () => {
+    const { platform } = makePlatform(validConfig, [{ id: 'light1', name: 'Porch', modelKey: 'light' }])
+
+    await platform.discover()
+
+    const light = platform.accessories.get('uuid-light1') as unknown as FakePlatformAccessory
+    expect(light).toBeDefined()
+    expect(light.controllers).toEqual([])
+    expect(light.services).toEqual([])
+  })
+
+  // A stranded ffmpeg holds a 4 MP HEVC decode open for as long as the host is
+  // up, and nothing else in the process will ever kill it.
+  it('stops every camera\'s active streams on shutdown', async () => {
+    const { api, accessories } = await withCameras()
+    const stops = accessories.map(accessory => vi.spyOn(delegateOf(accessory), 'stopAll'))
+    expect(stops).toHaveLength(5)
+
+    api.emit('shutdown')
+
+    for (const stop of stops)
+      expect(stop).toHaveBeenCalledTimes(1)
+  })
+
+  // Sensors, switches and the doorbell are useful without live view — a host
+  // with no usable ffmpeg must not lose them too.
+  it('keeps sensors working when the ffmpeg probe fails', async () => {
+    const boom = Object.assign(new Error('no usable ffmpeg'), { cause: { apiKey: 'sk-live-DO-NOT-LOG' } })
+    const probe = vi.fn(async () => {
+      throw boom
+    })
+    const { accessories } = await withCameras(cameras, { probeFfmpeg: probe })
+    const doorbell = doorbellOf(accessories)
+
+    expect(doorbell.services.some(s => s.subtype === 'motion')).toBe(true)
+    expect(doorbell.getServiceById(S.Doorbell, 'ring')).toBeDefined()
+    // No half-wired controller either.
+    expect(doorbell.controllers).toEqual([])
+    expect(log.warn.mock.calls.flat().join(' ')).toMatch(/ffmpeg/i)
+    // Every logged argument a string, and the credential on `cause` nowhere near
+    // the log — log.error(err) runs util.inspect, which walks it.
+    for (const call of log.warn.mock.calls) {
+      for (const arg of call)
+        expect(typeof arg).toBe('string')
+      expect(call.join(' ')).not.toContain('sk-live-DO-NOT-LOG')
+    }
+  })
+
+  // Snapshotting the settings at construction would mean a quality or audio
+  // change only took effect after a Homebridge restart.
+  it('reads quality and audio from the live config on every stream request', async () => {
+    const config = { ...validConfig, devices: { [DOORBELL]: { quality: 'low' } } }
+    const { platform, accessories } = await withCameras(cameras, { config })
+    const settings = () => (delegateOf(doorbellOf(accessories)) as unknown as {
+      options: { settings: () => { quality: string, audio: boolean } }
+    }).options.settings()
+
+    expect(settings()).toEqual({ quality: 'low', audio: false })
+
+    // What saving the settings page does: rewrite the config block in place.
+    const live = (platform as unknown as { config: ProtectPluginConfig }).config
+    live.devices[DOORBELL] = { quality: 'high', audio: true }
+
+    expect(settings()).toEqual({ quality: 'high', audio: true })
   })
 })
 

@@ -2,11 +2,20 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { z } from 'zod'
 import { PLATFORM_NAME } from './settings.js'
 
-export const qualitySchema = z.enum(['high', 'medium', 'low'])
+/**
+ * `auto` picks the substream from HomeKit's own resolution request (see
+ * `selectQuality`), which is right for almost everyone — the named values pin a
+ * substream instead.
+ */
+export const qualitySchema = z.enum(['auto', 'high', 'medium', 'low'])
 
 const deviceSettingsSchema = z.object({
   expose: z.boolean().optional(),
   quality: qualitySchema.optional(),
+  // Off unless asked for. Australian surveillance-devices law treats audio far
+  // more strictly than video and varies by state; outdoor cameras capture people
+  // who have not consented. Same reasoning as hksv defaulting off.
+  audio: z.boolean().optional(),
   hksv: z.boolean().optional(),
   smartDetect: z.array(z.string()).optional(),
   talkback: z.boolean().optional(),
@@ -14,12 +23,12 @@ const deviceSettingsSchema = z.object({
 
 const defaultsSchema = z.object({
   exposeNewDevices: z.boolean().default(true),
-  quality: qualitySchema.default('high'),
+  quality: qualitySchema.default('auto'),
   // Apple caps HKSV by camera COUNT, not storage: 50GB=1, 200GB=5, 2TB+=unlimited.
   // Footage does not count against the iCloud quota. Defaulting this
   // to true makes HomeKit silently refuse to record every camera after the first.
   hksv: z.boolean().default(false),
-}).default({ exposeNewDevices: true, quality: 'high', hksv: false })
+}).default({ exposeNewDevices: true, quality: 'auto', hksv: false })
 
 export const configSchema = z.object({
   platform: z.string(),
@@ -36,6 +45,13 @@ export const configSchema = z.object({
    * regenerates it — a bundled PEM would rot and lock everyone out.
    */
   consoleCert: z.string().optional(),
+  /**
+   * Concurrent live views for the WHOLE host, not per camera. Left unset the
+   * plugin picks from the encoder it found: six on hardware, two on software.
+   */
+  maxStreams: z.number().int().min(1).max(16).optional(),
+  /** Overrides the ffmpeg search when the usable binary is somewhere unusual. */
+  ffmpegPath: z.string().optional(),
   /** Keyed by Protect device id, NEVER by name, so renames preserve settings. */
   devices: z.record(z.string(), deviceSettingsSchema).default({}),
 })
@@ -46,6 +62,7 @@ export type DeviceSettings = z.infer<typeof deviceSettingsSchema>
 export interface ResolvedDeviceSettings {
   expose: boolean
   quality: z.infer<typeof qualitySchema>
+  audio: boolean
   hksv: boolean
   smartDetect: string[]
   talkback: boolean
@@ -84,6 +101,10 @@ export function settingsFor(config: ProtectPluginConfig, deviceId: string): Reso
   return {
     expose: override?.expose ?? config.defaults.exposeNewDevices,
     quality: override?.quality ?? config.defaults.quality,
+    // No global default: audio is opt-in per camera, deliberately. See the
+    // schema comment — one console-wide switch is exactly the wrong shape for a
+    // setting whose legality depends on where the individual camera points.
+    audio: override?.audio ?? false,
     hksv: override?.hksv ?? config.defaults.hksv,
     smartDetect: override?.smartDetect ?? [],
     talkback: override?.talkback ?? false,

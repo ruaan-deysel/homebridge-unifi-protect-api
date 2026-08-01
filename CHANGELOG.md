@@ -53,6 +53,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   places, and an outdoor camera hears passers-by who have not consented. If ffmpeg has
   neither encoder the plugin says so once and streams video only, rather than producing a
   stream HomeKit cannot play.
+- Every camera now appears in the Home app as a camera: live view and snapshots are wired
+  to HomeKit, bridged like every other accessory so a child bridge still holds the whole
+  console under one pairing. The doorbell keeps the single Doorbell service the event
+  pipeline drives — attaching live view does not add a second one.
+- New settings: `maxStreams` caps concurrent live views for the whole host (default six on
+  hardware encoding, two on software), `ffmpegPath` points at a specific ffmpeg binary, and
+  each camera takes `quality` (`auto`, `high`, `medium`, `low`; `auto` by default) and
+  `audio` (off by default). A quality or audio change takes effect on the next stream
+  request rather than needing a Homebridge restart.
+- ffmpeg is probed once at startup rather than per camera. If no usable ffmpeg is found the
+  plugin says so and carries on: sensors, the LED switch and the doorbell all keep working
+  without live view instead of the whole platform failing to load.
+- Shutting Homebridge down stops every running transcode. A stranded ffmpeg would otherwise
+  hold a 4 MP HEVC decode open for as long as the host stayed up.
 - ffmpeg processes for live view are now supervised: started, tracked, and killed on
   teardown so a dropped viewer can never leave a transcode running indefinitely. ffmpeg's
   own failure output is redacted before it is ever logged, since the command line it echoes
