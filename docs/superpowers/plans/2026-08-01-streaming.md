@@ -35,6 +35,7 @@
 - "go with A" — talkback is **out of scope**, deferred to sub-project 2c. Only the Doorbell has a speaker.
 - "go with A" — nearest-substream selection, overridable per camera.
 - "go with b" — audio **off by default**, opt-in per camera (Australian surveillance-devices law is stricter for audio than video).
+- "Build audio properly now" (2026-08-01, after Task 5 revealed the gap) — the spec assumed one ffmpeg output, but HomeKit needs a SECOND RTP output with its own port, SSRC and SRTP key, plus an AAC-ELD transcode. Rather than defer audio to 2c, the user chose to build it in 2b. Default stays off.
 - Architecture, lifecycle and testing sections of the spec approved verbatim.
 
 **Measured on the live host (2026-08-01), and the basis for the concurrency caps:** 20 s of real 2688×1512 HEVC → H.264 costs **1.79 s CPU via VAAPI** versus **49.1 s via libx264** — about 27×.
