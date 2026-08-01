@@ -8,13 +8,16 @@ import type { RoutedEvent } from './router.js'
 const FAILSAFE_MS = 120_000
 
 /**
- * What the tracker hands to a subscriber on every transition. `camera.ts`
- * (Task 3) reads only `subtype` and `active`, and its tests construct
- * `SensorChange` literals directly without a `deviceId` — so it stays
- * optional here even though the tracker itself always populates it.
+ * What the tracker hands to a subscriber on every transition.
+ *
+ * `deviceId` is required: the failsafe callback hands the platform a batch of
+ * changes with no surrounding frame to read a device from, so it is the only
+ * thing that can route a change to the right accessory. The tracker has always
+ * populated it — making it optional would only buy a branch in the platform
+ * that can never be taken.
  */
 export interface SensorChange {
-  deviceId?: string
+  deviceId: string
   subtype: string
   active: boolean
 }

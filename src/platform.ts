@@ -1,9 +1,14 @@
 import type { API, DynamicPlatformPlugin, Logging, PlatformAccessory, PlatformConfig } from 'homebridge'
 import type { z } from 'zod'
+import type { CameraCallbacks } from './accessories/camera.js'
+import type { SensorChange } from './accessories/tracker.js'
 import type { ProtectPluginConfig } from './config.js'
+import { applyChange, buildCameraServices } from './accessories/camera.js'
+import { routeEvent } from './accessories/router.js'
+import { EventTracker } from './accessories/tracker.js'
 import { parseConfig, settingsFor } from './config.js'
 import { ProtectClient } from './protect/client.js'
-import { ProtectAuthError } from './protect/errors.js'
+import { errorMessage, ProtectAuthError } from './protect/errors.js'
 import { ProtectEvents } from './protect/events.js'
 import { cameraSchema, chimeSchema, lightSchema, sensorSchema, viewerSchema } from './protect/schemas.js'
 import { PLATFORM_NAME, PLUGIN_NAME } from './settings.js'
@@ -95,6 +100,22 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
    * at construction, which runs before the shutdown it would be undoing.
    */
   private stopped = false
+  /**
+   * A field initialiser, not constructor body: an invalid config returns early
+   * from the constructor, and the shutdown handler must still find a tracker to
+   * stop rather than an `undefined`.
+   */
+  private readonly tracker = new EventTracker()
+  /**
+   * Supplied to `buildCameraServices` so `camera.ts` never needs the client.
+   * A rejection is handled there — it becomes a HapStatusError so HomeKit puts
+   * the switch back rather than showing a state Protect refused.
+   */
+  private readonly cameraCallbacks: CameraCallbacks = {
+    setLed: async (deviceId, on) => {
+      await this.client.patchCamera(deviceId, { ledSettings: { isEnabled: on } })
+    },
+  }
 
   constructor(
     private readonly log: Logging,
@@ -109,6 +130,10 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
     }
     this.config = parsed.data
 
+    // A failsafe expiry carries no frame, so `deviceId` on the change is the
+    // only thing that can route it back to an accessory.
+    this.tracker.onFailsafe = changes => this.applyChanges(changes)
+
     this.client = new ProtectClient({ host: this.config.host, apiKey: this.config.apiKey, log: this.log })
     this.events = new ProtectEvents({ host: this.config.host, apiKey: this.config.apiKey, log: this.log })
 
@@ -120,6 +145,9 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
       this.stopped = true
       clearTimeout(this.retryTimer)
       this.events?.stop()
+      // Every active event holds a failsafe timer. Leaked, they keep the Node
+      // process alive and Homebridge never finishes shutting down.
+      this.tracker.stop()
     })
   }
 
@@ -270,28 +298,34 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
 
     for (const [uuid, device] of wanted) {
       const label = labelFor(device)
-      const existing = this.accessories.get(uuid)
-      if (existing) {
+      let accessory = this.accessories.get(uuid)
+      if (accessory) {
         // Config is keyed by device id, so a rename only touches the label.
-        existing.context.device = device
-        if (existing.displayName !== label) {
+        accessory.context.device = device
+        if (accessory.displayName !== label) {
           // Only persists to the accessory cache — it does NOT rename anything
           // in HomeKit. Sub-project 2 must drive Name/ConfiguredName for that.
-          existing.displayName = label
-          this.api.updatePlatformAccessories([existing])
+          accessory.displayName = label
+          this.api.updatePlatformAccessories([accessory])
           this.log.info(`Renamed ${device.id} to "${label}".`)
         }
-        continue
       }
-      // eslint-disable-next-line new-cap -- Homebridge exposes the constructor lowercased.
-      const accessory = new this.api.platformAccessory(label, uuid)
-      // Sub-project 2 diffs capability flags off this; services live there, not here.
-      accessory.context.device = device
-      // Bridged, always — never published as an external accessory. A child
-      // bridge must hold every camera under one pairing.
-      this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory])
-      this.accessories.set(uuid, accessory)
-      this.log.info(`Added ${device.modelKey} "${label}".`)
+      else {
+        // eslint-disable-next-line new-cap -- Homebridge exposes the constructor lowercased.
+        accessory = new this.api.platformAccessory(label, uuid)
+        accessory.context.device = device
+        // Bridged, always — never published as an external accessory. A child
+        // bridge must hold every camera under one pairing.
+        this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory])
+        this.accessories.set(uuid, accessory)
+        this.log.info(`Added ${device.modelKey} "${label}".`)
+      }
+      // Existing accessories too, not only new ones: a detection type toggled
+      // in Protect only reaches HomeKit if the surviving accessory is re-diffed.
+      // `buildCameraServices` is idempotent and applies its own floor against a
+      // degraded payload, so it removes nothing it did not understand.
+      if (device.modelKey === 'camera')
+        buildCameraServices(this.api, this.log, accessory, device as unknown as Record<string, unknown>, this.cameraCallbacks)
     }
 
     // Belt to the client's braces. An inventory that is empty while the cache is
@@ -344,8 +378,15 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
       this.busWired = true
       // Frames missed while a socket was down are never replayed, so a reconnect
       // must be followed by a full REST discovery pass.
-      this.events.on('resyncRequired', () => this.discoverSafely())
+      this.events.on('resyncRequired', () => {
+        // There is no `GET /v1/events` on this API, so an event left open across
+        // a dropped socket can never be reconciled by polling — only assumed
+        // over. Clearing early beats a sensor stuck on until the failsafe.
+        this.applyChanges(this.tracker.clearAll())
+        this.discoverSafely()
+      })
       this.events.on('deviceUpdate', (frame: unknown) => this.applyDeviceUpdate(frame))
+      this.events.on('protectEvent', (frame: unknown) => this.applyProtectEvent(frame))
       // The bus latches internally on a 401 and stops retrying. Without this the
       // subscriptions die while REST still works, and HomeKit goes stale
       // forever — there is no polling fallback anywhere in this plugin.
@@ -356,6 +397,38 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
       })
     }
     this.events.start()
+  }
+
+  /** Frames arrive unvalidated. Nothing in here may throw back into the socket. */
+  private applyProtectEvent(frame: unknown): void {
+    try {
+      const routed = routeEvent(frame)
+      if (!routed)
+        return
+      // Silently. A chime, an unadopted device, or a camera the user set
+      // `expose: false` on emits these constantly, and this runs per frame —
+      // logging would drown the log in noise nobody can act on.
+      //
+      // Gated before `apply`, so an unexposed camera never accumulates tracker
+      // entries or failsafe timers for sensors that do not exist.
+      if (!this.accessories.has(this.api.hap.uuid.generate(routed.deviceId)))
+        return
+      this.applyChanges(this.tracker.apply(routed))
+    }
+    catch (error) {
+      // errorMessage, and the STRING: Homebridge's log.error(err) runs
+      // util.inspect over the object, which has leaked the API key out of an
+      // error's request context in this repo before.
+      this.log.warn(`Discarding an event frame that could not be handled: ${errorMessage(error)}`)
+    }
+  }
+
+  private applyChanges(changes: SensorChange[]): void {
+    for (const change of changes) {
+      const accessory = this.accessories.get(this.api.hap.uuid.generate(change.deviceId))
+      if (accessory)
+        applyChange(this.api, accessory, change)
+    }
   }
 
   /** Frames arrive unvalidated. Nothing in here may throw back into the socket. */
