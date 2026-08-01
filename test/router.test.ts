@@ -61,6 +61,9 @@ describe('routeEvent', () => {
     }
   })
 
+  // SYNTHESIZED: only `smartDetectZone` with `person` was ever observed on real
+  // hardware during Task 0 capture. The Line and LoiterZone channels, and the
+  // `vehicle` type, are constructed here from the captured Zone item's shape.
   it('maps every smart-detect channel to per-type subtypes', () => {
     for (const type of ['smartDetectZone', 'smartDetectLine', 'smartDetectLoiterZone']) {
       const routed = routeEvent({

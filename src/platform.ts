@@ -101,9 +101,9 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
    */
   private stopped = false
   /**
-   * A field initialiser, not constructor body: an invalid config returns early
-   * from the constructor, and the shutdown handler must still find a tracker to
-   * stop rather than an `undefined`.
+   * A field initialiser because it depends on nothing: no config, no client.
+   * (It is never reached on the invalid-config path either — that returns
+   * before any handler is registered, so nothing runs against it.)
    */
   private readonly tracker = new EventTracker()
   /**
@@ -423,11 +423,26 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
     }
   }
 
+  /**
+   * Guarded here rather than at each call site so every caller is covered. Two
+   * of them cannot survive a throw: `onFailsafe` runs inside a `setTimeout`,
+   * where a throw is an uncaught exception and a process exit — Homebridge
+   * dies, not just the sensor — and the `resyncRequired` listener would skip
+   * the `discoverSafely()` that resync exists to trigger.
+   */
   private applyChanges(changes: SensorChange[]): void {
-    for (const change of changes) {
-      const accessory = this.accessories.get(this.api.hap.uuid.generate(change.deviceId))
-      if (accessory)
-        applyChange(this.api, accessory, change)
+    try {
+      for (const change of changes) {
+        const accessory = this.accessories.get(this.api.hap.uuid.generate(change.deviceId))
+        if (accessory)
+          applyChange(this.api, accessory, change)
+      }
+    }
+    catch (error) {
+      // errorMessage, and the STRING: Homebridge's log.error(err) runs
+      // util.inspect over the object, which has leaked the API key out of an
+      // error's request context in this repo before.
+      this.log.warn(`Could not apply a sensor change: ${errorMessage(error)}`)
     }
   }
 

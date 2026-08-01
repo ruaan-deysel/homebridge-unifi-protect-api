@@ -50,6 +50,26 @@ describe('eventTracker', () => {
     ])
   })
 
+  // The Critical: a momentary that bypassed reference counting switched the
+  // sensor OFF while a longer event was still holding it on.
+  it('a momentary arriving while another event holds the subtype changes nothing', () => {
+    const t = new EventTracker()
+    expect(t.apply(ev('e1', ['motion']))).toEqual([{ deviceId: 'cam1', subtype: 'motion', active: true }])
+    // No transitions in either direction — the sensor is already on and e1 is
+    // still running, so it must stay on.
+    expect(t.apply(ev('e2', ['motion'], 'momentary'))).toEqual([])
+    // And e1's own end still clears it: the momentary must not have left a
+    // stray holder behind either.
+    expect(t.apply(ev('e1', ['motion'], 'end'))).toEqual([{ deviceId: 'cam1', subtype: 'motion', active: false }])
+    expect(t.activeCount).toBe(0)
+  })
+
+  it('a momentary leaves no failsafe timer behind', () => {
+    const t = new EventTracker({ failsafeMs: 1000 })
+    t.apply(ev('e1', ['motion'], 'momentary'))
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
   it('treats a stateless event as a single trigger and stores nothing', () => {
     const t = new EventTracker()
     const routed: RoutedEvent = { eventId: 'r1', deviceId: 'cam1', subtypes: ['ring'], phase: 'start', stateless: true }
@@ -66,6 +86,15 @@ describe('eventTracker', () => {
     const end: RoutedEvent = { eventId: 'r1', deviceId: 'cam1', subtypes: ['ring'], phase: 'end', stateless: true }
     expect(t.apply(start)).toEqual([{ deviceId: 'cam1', subtype: 'ring', active: true }])
     expect(t.apply(end)).toEqual([])
+  })
+
+  it('fires a stateless ring that arrives already carrying an end', () => {
+    // An `add` frame with a numeric `end` routes as `momentary`, not `start`.
+    // A gate of `phase === 'start'` dropped that press on the floor.
+    const t = new EventTracker()
+    const routed: RoutedEvent = { eventId: 'r2', deviceId: 'cam1', subtypes: ['ring'], phase: 'momentary', stateless: true }
+    expect(t.apply(routed)).toEqual([{ deviceId: 'cam1', subtype: 'ring', active: true }])
+    expect(t.activeCount).toBe(0)
   })
 
   it('clears an event whose end frame never arrives', () => {
@@ -101,6 +130,21 @@ describe('eventTracker', () => {
     expect(vi.getTimerCount()).toBe(0)
     vi.advanceTimersByTime(5000)
     expect(changes).toEqual([])
+  })
+
+  // The fixture below replays duplicate ends in contiguous, non-overlapping
+  // runs, so a dedup keyed on "the id that ended most recently" would pass it.
+  // Interleave a second event between an end and its redelivery to kill that.
+  it('deduplicates a redelivered end per event id, not per most-recent id', () => {
+    const t = new EventTracker()
+    t.apply(ev('e1', ['motion']))
+    expect(t.apply(ev('e1', ['motion'], 'end'))).toEqual([{ deviceId: 'cam1', subtype: 'motion', active: false }])
+    expect(t.apply(ev('e2', ['motion']))).toEqual([{ deviceId: 'cam1', subtype: 'motion', active: true }])
+    // e1's end, redelivered after e2 took the subtype over. It must not touch
+    // e2's holder — motion is genuinely active.
+    expect(t.apply(ev('e1', ['motion'], 'end'))).toEqual([])
+    expect(t.apply(ev('e1', ['motion'], 'end'))).toEqual([])
+    expect(t.apply(ev('e2', ['motion'], 'end'))).toEqual([{ deviceId: 'cam1', subtype: 'motion', active: false }])
   })
 
   describe('driven from real captured hardware frames (test/fixtures/events/end-frames.json)', () => {
