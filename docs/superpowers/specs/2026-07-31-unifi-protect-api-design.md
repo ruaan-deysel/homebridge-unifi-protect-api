@@ -213,7 +213,7 @@ touched contributes nothing to `config.json`, which keeps the file small and mak
 a default actually affect every untouched device.
 
 `hksv` defaults to `false` everywhere, including in `defaults`. The reason is **Apple's
-iCloud limits, not local resource cost**: the 200 GB plan supports exactly one HKSV camera,
+iCloud limits, not local resource cost**: the 50 GB plan supports one HKSV camera, the 200 GB plan up to five,
 and only the 2 TB plan supports an unlimited number. Defaulting to on would cause HomeKit to
 silently refuse to record every camera after the first for anyone below the 2 TB tier, which
 presents as a plugin bug. The local cost is secondary and modest, since prebuffering is a

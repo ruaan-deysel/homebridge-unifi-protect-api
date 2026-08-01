@@ -67,7 +67,7 @@ describe('settingsFor', () => {
     })
   })
 
-  it('leaves hksv off by default — the 200GB iCloud plan supports only one camera', () => {
+  it('leaves hksv off by default — the 50GB iCloud plan supports only one camera', () => {
     expect(settingsFor(data, 'unseen').hksv).toBe(false)
   })
 })

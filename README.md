@@ -47,11 +47,12 @@ API currently has these gaps:
 
 HomeKit Secure Video (HKSV) support is planned for a later sub-project and is **not
 implemented in this release**. When it ships, it will be off by default and enabled per
-camera, because of an iCloud storage constraint that has nothing to do with this plugin:
-Apple's 200 GB iCloud plan supports exactly **one** HKSV camera, and only the 2 TB plan (or
-higher) supports an unlimited number of HKSV cameras. Enabling HKSV for more cameras than
-your iCloud plan supports will cause Apple to silently stop recording some of them, so
-per-camera opt-in is deliberate.
+camera, because of an iCloud plan constraint that has nothing to do with this plugin.
+Apple's camera limits are: the 50 GB plan supports **one** camera, the 200 GB plan supports
+up to **five**, and the 2 TB plan and above support an **unlimited** number. HKSV footage
+does *not* count against your iCloud storage quota — the limit is on camera count, not
+gigabytes. Enabling HKSV for more cameras than your plan supports will cause Apple to
+silently stop recording some of them, so per-camera opt-in is deliberate.
 
 ## Bridging
 
