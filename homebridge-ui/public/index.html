@@ -20,7 +20,7 @@
 <div id="devices"></div>
 
 <script type="module">
-  import { ensureConfig, renderDeviceHeader, renderQualitySelect, setDeviceSetting } from './config-ops.js'
+  import { AUDIO_LABEL, ensureConfig, renderDeviceHeader, renderQualitySelect, setDeviceSetting } from './config-ops.js'
 
   const statusEl = document.getElementById('status')
   const trustEl = document.getElementById('trust')
@@ -97,7 +97,7 @@
         })
         grid.append(wrap)
         if (device.hasMic)
-          toggle('audio', 'Live view audio', false)
+          toggle('audio', AUDIO_LABEL, false)
         toggle('hksv', 'HomeKit Secure Video', config.defaults.hksv, true)
         if (device.hasSpeaker)
           toggle('talkback', 'Two-way audio', false, true)

@@ -5,6 +5,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { AUDIO_LABEL } from '../homebridge-ui/public/config-ops.js'
 import { UniFiProtectPlatform } from '../src/platform.js'
 import { fingerprintOf } from '../src/protect/cert.js'
 import { ProtectAuthError, ProtectUnavailableError } from '../src/protect/errors.js'
@@ -86,6 +87,17 @@ const FP_B = fingerprintOf(CERT_B)
 /** What the reference host's `/usr/bin/ffmpeg` actually reports. */
 const FFMPEG_CAPS = { path: '/usr/bin/ffmpeg', encoder: 'h264_vaapi' as const, hwaccel: 'vaapi' as const }
 
+/**
+ * An `-encoders` listing shaped like the real one. The hardware build in the
+ * target container carries libopus but not libfdk_aac.
+ */
+const ENCODERS_WITH_OPUS = [
+  ' V..... h264_vaapi           H.264/AVC (VAAPI)',
+  ' A..... libopus              libopus Opus',
+].join('\n')
+
+const ENCODERS_VIDEO_ONLY = ' V..... h264_vaapi           H.264/AVC (VAAPI)'
+
 function makePlatform(config: unknown = validConfig, cameras: unknown[] = [], presented = CERT_A) {
   const api = makeApi()
   const platform = new UniFiProtectPlatform(log as never, config as never, api as never)
@@ -96,10 +108,12 @@ function makePlatform(config: unknown = validConfig, cameras: unknown[] = [], pr
   // in this suite may exec a binary off the machine it happens to run on.
   const probe = vi.fn(async () => FFMPEG_CAPS)
   platform.probeFfmpeg = probe as never
+  const run = vi.fn(async (_path: string, _args: string[]) => ENCODERS_WITH_OPUS)
+  platform.runFfmpeg = run
   // Stubbed everywhere: nothing in this suite may open a TLS socket to the
   // fictional 10.0.0.1, and a real attempt hangs the run until it times out.
   platform.readConsoleCert = vi.fn(async () => ({ pem: presented, fingerprint: fingerprintOf(presented) }))
-  return { api, platform, bus, probe }
+  return { api, platform, bus, probe, run }
 }
 
 describe('uniFiProtectPlatform', () => {
@@ -584,11 +598,13 @@ describe('uniFiProtectPlatform', () => {
   /** Discovers the five real cameras and hands back the wired platform. */
   async function withCameras(
     devices: unknown[] = cameras,
-    options: { config?: unknown, probeFfmpeg?: () => Promise<unknown> } = {},
+    options: { config?: unknown, probeFfmpeg?: () => Promise<unknown>, encoders?: string } = {},
   ) {
     const ctx = makePlatform(options.config ?? validConfig, devices)
     if (options.probeFfmpeg)
       ctx.platform.probeFfmpeg = options.probeFfmpeg as never
+    if (options.encoders !== undefined)
+      ctx.run.mockResolvedValue(options.encoders)
     await ctx.platform.discover()
     const sensor = (id: string, subtype: string) =>
       (ctx.platform.accessories.get(`uuid-${id}`) as unknown as FakeAccessory).getServiceById(S.MotionSensor, subtype)
@@ -1107,6 +1123,72 @@ describe('uniFiProtectPlatform', () => {
     expect((controllerOf(doorbell).options.streamingOptions as { audio?: unknown }).audio).toBeUndefined()
     // HAP adds the Microphone service only when audio is advertised.
     expect(doorbell.services.some(s => s.type === S.Microphone)).toBe(false)
+  })
+
+  /** Every camera in the fixture opts in to audio. */
+  const audioForAll = { ...validConfig, devices: Object.fromEntries(cameras.map(c => [c.id as string, { audio: true }])) }
+
+  it('advertises the codec the probed ffmpeg can encode for a camera that opted in', async () => {
+    const { accessories } = await withCameras(cameras, { config: audioForAll })
+    const doorbell = doorbellOf(accessories)
+    const advertised = (controllerOf(doorbell).options.streamingOptions as { audio?: { codecs: { type: string }[] } }).audio
+
+    // OPUS, because the encoder list has libopus and not libfdk_aac — the
+    // advertisement must name what the ffmpeg arguments will actually produce.
+    expect(advertised?.codecs.map(c => c.type)).toEqual(['OPUS'])
+    expect(doorbell.services.some(s => s.type === S.Microphone)).toBe(true)
+  })
+
+  // `ffmpeg -encoders` answers for the binary, not for a camera. Five cameras
+  // meant five blocking execs, serially, on every discovery pass.
+  it('lists the ffmpeg encoders once for the whole platform, not once per camera', async () => {
+    const { platform, run } = await withCameras(cameras, { config: audioForAll })
+
+    expect(run).toHaveBeenCalledTimes(1)
+    expect(run.mock.calls[0]?.[1]).toContain('-encoders')
+
+    await platform.discover()
+
+    expect(run).toHaveBeenCalledTimes(1)
+  })
+
+  // The silent failure this exists to explain: audio on in the config, an ffmpeg
+  // that cannot encode either codec HomeKit accepts, and a user hearing nothing.
+  it('says so in the log when audio is on but no codec can be advertised', async () => {
+    const { accessories } = await withCameras(cameras, { config: audioForAll, encoders: ENCODERS_VIDEO_ONLY })
+    const doorbell = doorbellOf(accessories)
+
+    expect((controllerOf(doorbell).options.streamingOptions as { audio?: unknown }).audio).toBeUndefined()
+    const warned = log.warn.mock.calls.flat().join(' ')
+    expect(warned).toContain('Audio is enabled')
+    expect(warned).toContain('libopus')
+  })
+
+  // HAP builds the audio TLVs and the Microphone service when the controller is
+  // configured, and `CameraController.streamingOptions` is private and readonly,
+  // so the advertisement cannot change afterwards. The documentation must say
+  // "restart to enable audio" for exactly as long as that is true — this test is
+  // what fails if someone makes it live without updating the docs, or writes
+  // docs claiming it is live when it is not.
+  it('cannot re-advertise audio for a camera switched on after the controller was attached', async () => {
+    const { platform, accessories } = await withCameras()
+    const doorbell = doorbellOf(accessories)
+    expect((controllerOf(doorbell).options.streamingOptions as { audio?: unknown }).audio).toBeUndefined()
+
+    const live = (platform as unknown as { config: ProtectPluginConfig }).config
+    live.devices[DOORBELL] = { audio: true }
+    await platform.discover()
+
+    // Still video-only, and still exactly one controller — nothing re-attached.
+    expect(controllerOf(doorbell).options.streamingOptions).toEqual(
+      expect.objectContaining({ audio: undefined }),
+    )
+    expect(doorbell.controllers).toHaveLength(1)
+    // The documentation must match the behaviour. The toggle's own label is what
+    // the user reads before clicking, so assert the exported constant itself —
+    // not the file's text, which the explanatory comment would satisfy on its own.
+    expect(AUDIO_LABEL).toMatch(/restart/i)
+    expect(readFileSync('CHANGELOG.md', 'utf8')).toMatch(/restart[^.]*audio|audio[^.]*restart/i)
   })
 
   it('advertises the configured maximum number of concurrent streams', async () => {

@@ -3,7 +3,7 @@ import type { z } from 'zod'
 import type { CameraCallbacks } from './accessories/camera.js'
 import type { SensorChange } from './accessories/tracker.js'
 import type { ProtectPluginConfig } from './config.js'
-import type { FfmpegCapabilities } from './protect/ffmpeg.js'
+import type { FfmpegCapabilities, RunFfmpeg } from './protect/ffmpeg.js'
 import { applyChange, buildCameraServices } from './accessories/camera.js'
 import { routeEvent } from './accessories/router.js'
 import { StreamingDelegate } from './accessories/streaming.js'
@@ -13,7 +13,7 @@ import { certMismatchMessage, fetchConsoleCert, fingerprintOf } from './protect/
 import { ProtectClient } from './protect/client.js'
 import { errorMessage, ProtectAuthError } from './protect/errors.js'
 import { ProtectEvents } from './protect/events.js'
-import { probeFfmpeg } from './protect/ffmpeg.js'
+import { probeFfmpeg, runFfmpeg } from './protect/ffmpeg.js'
 import {
   cameraPartialWithReferenceSchema,
   chimePartialWithReferenceSchema,
@@ -114,6 +114,29 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
   readConsoleCert = fetchConsoleCert
   /** Injected in tests, so the suite never execs a real ffmpeg. */
   probeFfmpeg = probeFfmpeg
+  /** Injected in tests, for the same reason. Wrapped by `sharedRun` below. */
+  runFfmpeg: RunFfmpeg = runFfmpeg
+  /**
+   * `ffmpeg -encoders` answers for the BINARY, not for a camera, so every
+   * delegate shares one memoised run: five cameras with audio on would otherwise
+   * mean five blocking execs, serially, on every discovery pass.
+   *
+   * ponytail: caches the promise, rejections included, for the process lifetime.
+   * Identical to how the delegate already caches its own codec probe, and the
+   * encoder list of a binary cannot change while that binary is in use. Key it
+   * with a TTL only if an ffmpeg is ever swapped underneath a running Homebridge.
+   */
+  private readonly runCache = new Map<string, Promise<string>>()
+  private readonly sharedRun: RunFfmpeg = (path, args) => {
+    const key = `${path} ${args.join(' ')}`
+    let running = this.runCache.get(key)
+    if (!running) {
+      running = this.runFfmpeg(path, args)
+      this.runCache.set(key, running)
+    }
+    return running
+  }
+
   /**
    * Undefined until the probe has run, and stays undefined if it failed — the
    * one flag that says whether live view is available at all.
@@ -515,8 +538,11 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
       urls: this.urls!,
       caps: this.caps,
       maxStreams: this.config!.maxStreams,
-      // Read on every stream request, never snapshot at construction: a quality
-      // or audio change in the settings must take effect without a restart.
+      // Shared across every camera: which encoders a build has is a property of
+      // the BINARY, not of any camera.
+      run: this.sharedRun,
+      // Read on every stream request, never snapshotted at construction, so the
+      // delegate can never answer from a stale copy of the settings.
       settings: () => {
         const settings = settingsFor(this.config!, deviceId)
         return { quality: settings.quality, audio: settings.audio }
@@ -526,6 +552,21 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
     // build a second controller for the same accessory.
     this.delegates.set(accessory.UUID, delegate)
 
+    // The delegate's own, never hand-built here: it advertises a codec only when
+    // the camera opted in AND this ffmpeg can actually encode it, so the
+    // advertisement cannot drift from the arguments sent.
+    const audio = await delegate.audioStreamingOptions()
+    // Silence otherwise. HAP encodes SupportedAudioStreamConfiguration into the
+    // stream management services (and creates the Microphone service) when the
+    // controller is configured, and `CameraController.streamingOptions` is
+    // private and read-only — there is no supported way to re-advertise codecs
+    // afterwards. So this advertisement is fixed for the life of the process:
+    // turning audio OFF takes effect on the next stream request, turning it ON
+    // needs the restart Homebridge already prompts for when settings are saved.
+    if (!audio && settingsFor(this.config!, deviceId).audio) {
+      this.log.warn(`Audio is enabled for "${label}" but no codec HomeKit accepts could be advertised, so live view will be video-only. The ffmpeg at ${this.caps.path} can encode neither libopus nor libfdk_aac.`)
+    }
+
     try {
       accessory.configureController(new this.api.hap.CameraController({
         cameraStreamCount: delegate.maxStreams,
@@ -533,10 +574,7 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
         streamingOptions: {
           supportedCryptoSuites: [this.api.hap.SRTPCryptoSuites.AES_CM_128_HMAC_SHA1_80],
           video: videoStreamingOptions(this.api.hap),
-          // The delegate's own, never hand-built here: it advertises a codec
-          // only when the camera opted in AND this ffmpeg can actually encode
-          // it, so the advertisement cannot drift from the arguments sent.
-          audio: await delegate.audioStreamingOptions(),
+          audio,
         },
       }))
     }
