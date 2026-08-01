@@ -723,6 +723,45 @@ describe('uniFiProtectPlatform', () => {
     }
   })
 
+  // `applyChanges` is called bare from a `setTimeout` (the failsafe) and bare
+  // from a bus listener (resync). A throw in the first is an uncaught exception
+  // and a process exit — Homebridge dies, not just the sensor — and in the
+  // second it would skip the discovery that resync exists to trigger.
+  it('survives a throw while applying changes on both the failsafe and resync paths', async () => {
+    vi.useFakeTimers()
+    try {
+      const { platform, bus } = await withCameras()
+      const doorbell = platform.accessories.get(`uuid-${DOORBELL}`) as unknown as FakeAccessory
+      const boom = Object.assign(new Error('HAP exploded'), { cause: { apiKey: 'sk-live-DO-NOT-LOG' } })
+      doorbell.getServiceById = () => {
+        throw boom
+      }
+
+      bus.emit('protectEvent', frames('motion')[0])
+      // Uncaught here = process exit. Fake timers rethrow it into this await.
+      await vi.advanceTimersByTimeAsync(121_000)
+
+      const before = (platform.client.getCameras as ReturnType<typeof vi.fn>).mock.calls.length
+      bus.emit('protectEvent', frames('motion')[0])
+      expect(() => bus.emit('resyncRequired', 'events')).not.toThrow()
+      await vi.advanceTimersByTimeAsync(0)
+      // The throw must not have skipped the discovery pass resync exists for.
+      expect((platform.client.getCameras as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(before)
+
+      // Every logged argument a string, and the credential on `cause` nowhere
+      // near the log — log.error(err) runs util.inspect, which walks it.
+      for (const call of [...log.warn.mock.calls, ...log.error.mock.calls]) {
+        for (const arg of call)
+          expect(typeof arg).toBe('string')
+        expect(call.join(' ')).not.toContain('sk-live-DO-NOT-LOG')
+      }
+      expect(JSON.stringify(log.warn.mock.calls)).toContain('HAP exploded')
+    }
+    finally {
+      vi.useRealTimers()
+    }
+  })
+
   // Leaked failsafe timers keep the Node process alive and Homebridge never
   // finishes shutting down.
   it('stops the tracker on shutdown so no failsafe fires afterwards', async () => {

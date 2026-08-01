@@ -62,9 +62,20 @@ function record(value: unknown): Record<string, unknown> {
  * The same floor `platform.ts` applies to accessories, one layer down: act on
  * a payload you understood, never on one you did not. Removing nothing is
  * always recoverable; removing everything is not.
+ *
+ * Checks the FIELDS `desiredSubtypes` actually reads, not merely that their
+ * containers are objects: a rename of `objectTypes` delivers
+ * `{ smartDetectSettings: {}, featureFlags: {} }`, which passes a
+ * container-only check while yielding `['motion']` — exactly the wipe this
+ * guard exists to stop. Every one of these four is present on every camera
+ * this hardware reports.
  */
 export function isUnderstood(device: Record<string, unknown>): boolean {
-  return isRecord(device.smartDetectSettings) && isRecord(device.featureFlags)
+  const settings = device.smartDetectSettings
+  const flags = device.featureFlags
+  return isRecord(settings) && isRecord(flags)
+    && Array.isArray(settings.objectTypes) && Array.isArray(settings.audioTypes)
+    && typeof flags.hasSpeaker === 'boolean' && typeof flags.hasLedStatus === 'boolean'
 }
 
 /** The subtypes this device should expose, given what is enabled in Protect. */
@@ -127,11 +138,17 @@ export function buildCameraServices(
 ): void {
   const { Characteristic: C, Service: S } = api.hap
   const label = deviceLabel(device)
+  const understood = isUnderstood(device)
 
   const info = accessory.getService(S.AccessoryInformation) ?? accessory.addService(S.AccessoryInformation)
-  info.setCharacteristic(C.Manufacturer, 'Ubiquiti')
-    .setCharacteristic(C.Model, typeof device.modelKey === 'string' ? device.modelKey : 'camera')
-    .setCharacteristic(C.SerialNumber, typeof device.mac === 'string' ? device.mac : String(device.id ?? 'unknown'))
+  // Only from a payload we understood. A degraded one has no `mac`, so
+  // SerialNumber would fall back to the device id — and a changed serial can
+  // make HomeKit treat this as a different accessory entirely.
+  if (understood) {
+    info.setCharacteristic(C.Manufacturer, 'Ubiquiti')
+      .setCharacteristic(C.Model, typeof device.modelKey === 'string' ? device.modelKey : 'camera')
+      .setCharacteristic(C.SerialNumber, typeof device.mac === 'string' ? device.mac : String(device.id ?? 'unknown'))
+  }
 
   const desired = desiredSubtypes(device)
 
@@ -151,7 +168,7 @@ export function buildCameraServices(
       wireLed(api, log, service, device, label, callbacks)
   }
 
-  if (!isUnderstood(device)) {
+  if (!understood) {
     log.warn(`Could not read the detection settings for "${label}" — keeping its existing sensors. Update the plugin if this persists.`)
     return
   }

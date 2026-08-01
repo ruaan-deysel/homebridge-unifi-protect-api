@@ -68,18 +68,23 @@ export class EventTracker {
     // the same event id (a ring can stay open 300+ seconds); that end frame must
     // be a no-op here, not a second trigger.
     if (routed.stateless) {
-      return routed.phase === 'start'
-        ? routed.subtypes.map(subtype => ({ deviceId: routed.deviceId, subtype, active: true }))
-        : []
+      // Only a genuine end frame is dropped. An `add` already carrying a numeric
+      // `end` routes as `momentary`, and a press that arrives that way is still
+      // a press — gating on `phase === 'start'` silently lost it.
+      return routed.phase === 'end'
+        ? []
+        : routed.subtypes.map(subtype => ({ deviceId: routed.deviceId, subtype, active: true }))
     }
 
     if (routed.phase === 'momentary') {
-      // Too short to span two frames. Report the transition in both directions so
-      // a brief detection is visible rather than silently dropped.
-      return [
-        ...routed.subtypes.map(subtype => ({ deviceId: routed.deviceId, subtype, active: true })),
-        ...routed.subtypes.map(subtype => ({ deviceId: routed.deviceId, subtype, active: false })),
-      ]
+      // Too short to span two frames, but it must still go through the holder
+      // accounting: emitting a bare on/off pair switched the sensor OFF while a
+      // longer overlapping event was still holding it on. Acquire then release —
+      // transitions surface only where the count crosses zero, so a momentary
+      // arriving mid-event produces nothing and leaves the sensor on.
+      if (this.active.has(routed.eventId))
+        return []
+      return [...this.start(routed), ...this.end(routed.eventId)]
     }
 
     return routed.phase === 'start' ? this.start(routed) : this.end(routed.eventId)
