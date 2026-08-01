@@ -1,5 +1,6 @@
 import type { API, Logging, PlatformAccessory, Service } from 'homebridge'
 import type { SensorChange } from './tracker.js'
+import { errorMessage } from '../protect/errors.js'
 
 /** Labels shown in Home.app, one per stable subtype. */
 export const SUBTYPE_LABELS: Record<string, string> = {
@@ -18,6 +19,15 @@ export const SUBTYPE_LABELS: Record<string, string> = {
 /** Audio detections that have a native HomeKit service. */
 const AUDIO_SERVICE = new Set(['audio-alrmSmoke', 'audio-alrmCmonx'])
 
+/**
+ * Every subtype this module creates, and therefore the only ones it may
+ * remove. Allow-list rather than deny-list on purpose: a service added by
+ * another module survives by default, so Task 4's streaming and package-camera
+ * services do not have to register anything here to avoid being torn down and
+ * rebuilt — which would kill an active stream — on every discovery.
+ */
+const OWNED_SUBTYPES = new Set([...Object.keys(SUBTYPE_LABELS), 'led'])
+
 export interface CameraCallbacks {
   setLed: (deviceId: string, on: boolean) => Promise<void>
 }
@@ -30,10 +40,31 @@ function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : []
 }
 
-function record(value: unknown): Record<string, unknown> {
+function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : {}
+}
+
+function record(value: unknown): Record<string, unknown> {
+  return isRecord(value) ? value : {}
+}
+
+/**
+ * Whether an absent detection type means "the user disabled it" or "this
+ * payload could not be understood".
+ *
+ * `cameraSchema` makes `featureFlags` and `smartDetectSettings` required, but
+ * `ProtectClient.validate` returns the **raw** payload when validation fails,
+ * so one Ubiquiti field rename delivers a camera with neither. Read
+ * optimistically that object yields `['motion']` — and removal would then strip
+ * every smart-detect sensor, the Doorbell and the LED switch off all five
+ * cameras, taking the user's automations with them.
+ *
+ * The same floor `platform.ts` applies to accessories, one layer down: act on
+ * a payload you understood, never on one you did not. Removing nothing is
+ * always recoverable; removing everything is not.
+ */
+export function isUnderstood(device: Record<string, unknown>): boolean {
+  return isRecord(device.smartDetectSettings) && isRecord(device.featureFlags)
 }
 
 /** The subtypes this device should expose, given what is enabled in Protect. */
@@ -110,19 +141,29 @@ export function buildCameraServices(
     let service = accessory.getServiceById(type, subtype)
     if (!service) {
       service = accessory.addService(type, name, subtype)
+      // Set once, at creation. Writing it on every discovery would overwrite
+      // whatever the user renamed the service to in Home.app.
+      service.setCharacteristic(C.ConfiguredName, name)
       log.debug(`Added ${subtype} service to "${label}".`)
     }
-    service.setCharacteristic(C.ConfiguredName, name)
 
     if (subtype === 'led')
       wireLed(api, log, service, device, label, callbacks)
   }
 
+  if (!isUnderstood(device)) {
+    log.warn(`Could not read the detection settings for "${label}" — keeping its existing sensors. Update the plugin if this persists.`)
+    return
+  }
+
   // Removal is destructive, so it runs only from a confirmed successful
-  // discovery — the caller in platform.ts guarantees that.
+  // discovery — the caller in platform.ts guarantees that — and only over
+  // subtypes this module owns. Anything else on the accessory (Task 4's
+  // CameraController streaming services, a package camera) is left alone
+  // without having to register itself here.
   for (const service of [...accessory.services]) {
     const subtype = service.subtype
-    if (!subtype || desired.includes(subtype))
+    if (!subtype || !OWNED_SUBTYPES.has(subtype) || desired.includes(subtype))
       continue
     accessory.removeService(service)
     log.info(`Removed ${subtype} from "${label}" — no longer enabled in Protect.`)
@@ -148,10 +189,10 @@ function wireLed(
       await callbacks.setLed(String(device.id), Boolean(value))
     }
     catch (error) {
-      // Only the message is logged: the error object carries request context
-      // and util.inspect on it — which is what log.error(err) uses — would
-      // print the API key.
-      log.warn(`Could not change the status LED on "${label}": ${(error as Error).message}`)
+      // errorMessage, never the error object: it carries request context and
+      // util.inspect on it — which is what log.error(err) uses — has printed
+      // the API key before. It also survives a reject(null).
+      log.warn(`Could not change the status LED on "${label}": ${errorMessage(error)}`)
       // Must throw, not swallow. A handler that returns normally tells HAP the
       // write succeeded and HAP then commits the new value, so reverting the
       // characteristic in here would simply be overwritten. Throwing is what
@@ -182,5 +223,9 @@ export function applyChange(api: API, accessory: PlatformAccessory, change: Sens
     service.updateCharacteristic(C.CarbonMonoxideDetected, change.active ? C.CarbonMonoxideDetected.CO_LEVELS_ABNORMAL : C.CarbonMonoxideDetected.CO_LEVELS_NORMAL)
     return
   }
-  service.updateCharacteristic(C.MotionDetected, change.active)
+  // Only sensors fall through to MotionDetected. Without this the `led`
+  // subtype would write MotionDetected onto a Switch — unreachable from the
+  // router today, and a landmine for Task 5, which owns the LED.
+  if (type === api.hap.Service.MotionSensor)
+    service.updateCharacteristic(C.MotionDetected, change.active)
 }

@@ -5,6 +5,7 @@ import { Buffer } from 'node:buffer'
 import { z } from 'zod'
 import { API_BASE_PATH } from '../settings.js'
 import {
+  errorMessage,
   ProtectAuthError,
   ProtectError,
   ProtectNotFoundError,
@@ -274,8 +275,4 @@ function retryAfterMs(header: string | string[] | undefined): number | undefined
   if (!Number.isFinite(seconds) || seconds <= 0)
     return undefined
   return Math.min(seconds * 1000, MAX_RETRY_AFTER_MS)
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
 }
