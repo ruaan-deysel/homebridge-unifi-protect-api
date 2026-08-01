@@ -15,12 +15,25 @@
 
 declare module '*/homebridge-ui/server.js' {
   export interface HttpDependencies {
-    fetchImpl: (url: string, init?: { headers?: Record<string, string> }) => Promise<Response>
+    fetchImpl?: (url: string, init?: { headers?: Record<string, string>, consoleCert?: string }) => Promise<Response>
+    readCert?: (host: string) => Promise<{ pem: string, fingerprint: string }>
   }
   export interface ConsoleCredentials {
     host: string
     apiKey: string
+    /** PEM of the trusted console certificate. Nothing is sent without it. */
+    consoleCert: string
   }
+  export interface ConsoleCertResult {
+    pem: string
+    fingerprint: string
+    trustedFingerprint: string | null
+    matches: boolean | null
+  }
+  export function consoleCertRequest(
+    payload?: { host?: string, consoleCert?: string },
+    deps?: HttpDependencies,
+  ): Promise<ConsoleCertResult>
   export interface TestConnectionResult {
     version: string
     nvrName: string

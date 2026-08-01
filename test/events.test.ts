@@ -1,7 +1,14 @@
+import type { Server as HttpsServer } from 'node:https'
+import type { AddressInfo } from 'node:net'
+import type { ProtectEventsOptions } from '../src/protect/events.js'
+import type { TestCert } from './support/tls.js'
 import { Buffer } from 'node:buffer'
 import { EventEmitter } from 'node:events'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createServer as createHttpsServer } from 'node:https'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { WebSocketServer } from 'ws'
 import { ProtectEvents } from '../src/protect/events.js'
+import { makeSelfSigned } from './support/tls.js'
 
 /** Minimal stand-in for a `ws` socket, driven manually by the tests. */
 class FakeSocket extends EventEmitter {
@@ -57,12 +64,17 @@ class FakeSocket extends EventEmitter {
 
 const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }
 
-function makeEvents() {
+/** Stands in for the PEM the platform pins with. Never parsed by the fake socket. */
+const TRUSTED_PEM = '-----BEGIN CERTIFICATE-----\nZmFrZQ==\n-----END CERTIFICATE-----\n'
+
+function makeEvents(overrides: Partial<ProtectEventsOptions> = {}) {
   return new ProtectEvents({
     host: '10.0.0.1',
     apiKey: 'SECRET-KEY',
     log,
+    consoleCert: TRUSTED_PEM,
     socketFactory: (url, options) => new FakeSocket(url, options) as never,
+    ...overrides,
   })
 }
 
@@ -85,17 +97,30 @@ describe('protectEvents', () => {
     events.stop()
   })
 
-  it('sends the api key as a header and skips certificate verification', () => {
+  it('sends the api key as a header, pinned to the trusted certificate', () => {
     const events = makeEvents()
     events.start()
 
     expect(FakeSocket.instances[0]!.options).toEqual({
       headers: { 'X-API-KEY': 'SECRET-KEY' },
-      rejectUnauthorized: false,
+      // The upgrade request carries the key, so this path is pinned exactly
+      // like the REST one — never `rejectUnauthorized: false`.
+      rejectUnauthorized: true,
+      ca: [TRUSTED_PEM],
+      checkServerIdentity: expect.any(Function),
       // Without this `ws` waits forever on a console that accepts the TCP
       // connection but never answers the upgrade.
       handshakeTimeout: 15_000,
     })
+    events.stop()
+  })
+
+  it('refuses to dial at all before a certificate has been trusted', () => {
+    const events = makeEvents({ consoleCert: undefined })
+    events.start()
+
+    expect(FakeSocket.instances).toEqual([])
+    expect(JSON.stringify(log.error.mock.calls)).toContain('certificate has not been trusted')
     events.stop()
   })
 
@@ -486,5 +511,96 @@ describe('protectEvents', () => {
 
     expect(FakeSocket.instances).toHaveLength(countAtRestart)
     events.stop()
+  })
+})
+
+/**
+ * The fake socket above cannot prove anything about TLS. These run the real
+ * `ws` client against a real wss server, because the question — does the API
+ * key reach a console presenting the wrong certificate — is only answerable on
+ * a real handshake.
+ */
+describe('protectEvents over a real wss socket', () => {
+  const API_KEY = 'SUPER-SECRET-KEY'
+  let real: TestCert
+  let impostor: TestCert
+  let https: HttpsServer | undefined
+  let wss: WebSocketServer | undefined
+
+  beforeAll(() => {
+    real = makeSelfSigned('unifi.local')
+    impostor = makeSelfSigned('unifi.local')
+  })
+
+  interface Peer {
+    host: string
+    /**
+     * `X-API-KEY` as the peer decrypted it, one entry per upgrade request. A
+     * peer presenting its own certificate holds its own private key, so this is
+     * exactly what a MITM would learn — an empty list means the credential
+     * never left this machine.
+     */
+    upgrades: (string | string[] | undefined)[]
+    /** TCP connections accepted, whether or not a handshake completed. */
+    connections: number
+  }
+
+  async function serve(tls: TestCert): Promise<Peer> {
+    const peer = { upgrades: [] as Peer['upgrades'], connections: 0 } as Peer
+    https = createHttpsServer(tls)
+    https.on('connection', () => peer.connections++)
+    wss = new WebSocketServer({ server: https })
+    wss.on('headers', (_headers, request) => peer.upgrades.push(request.headers['x-api-key']))
+    await new Promise<void>(resolve => https!.listen(0, '127.0.0.1', resolve))
+    peer.host = `127.0.0.1:${(https!.address() as AddressInfo).port}`
+    return peer
+  }
+
+  afterEach(async () => {
+    wss?.close()
+    wss = undefined
+    const closing = https
+    https = undefined
+    if (closing)
+      await new Promise<void>(resolve => closing.close(() => resolve()))
+  })
+
+  /** Real `ws`, real TLS — the default socketFactory, deliberately not stubbed. */
+  const connectTo = (peer: Peer, consoleCert: string) =>
+    new ProtectEvents({ host: peer.host, apiKey: API_KEY, log, consoleCert, maxBackoffMs: 50 })
+
+  // The positive control: with the right certificate the key really does
+  // arrive, so the assertion in the next test is an observation, not a
+  // structural impossibility.
+  it('sends the api key once the presented certificate is the pinned one', async () => {
+    const peer = await serve(real)
+    const events = connectTo(peer, real.cert)
+    events.start()
+    try {
+      await vi.waitFor(() => expect(peer.upgrades).toContain(API_KEY))
+    }
+    finally {
+      events.stop()
+    }
+  })
+
+  it('does not deliver the api key to a console presenting a different certificate', async () => {
+    const peer = await serve(impostor)
+    const events = connectTo(peer, real.cert)
+    events.start()
+    try {
+      // Both channels dial, fail the handshake, and back off (50ms here), so
+      // by the time this settles a leak has had several chances to happen.
+      await vi.waitFor(() => expect(peer.connections).toBeGreaterThanOrEqual(2))
+      await new Promise(resolve => setTimeout(resolve, 250))
+
+      // Dialled repeatedly, and not one upgrade request was ever decrypted:
+      // the pin rejected the certificate before `ws` wrote the header.
+      expect(peer.connections).toBeGreaterThanOrEqual(2)
+      expect(peer.upgrades).toEqual([])
+    }
+    finally {
+      events.stop()
+    }
   })
 })

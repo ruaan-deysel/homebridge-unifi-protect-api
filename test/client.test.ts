@@ -42,6 +42,7 @@ function harness(responder: HttpRequestFn): Harness {
     apiKey: API_KEY,
     log,
     httpRequest: http as unknown as HttpRequestFn,
+    consoleCert: 'TRUSTED-PEM',
     // No backoff sleeps in tests.
     queue: { maxRetries: 0 },
   })
@@ -59,6 +60,10 @@ describe('protectClient requests', () => {
     expect(url).toBe('https://192.168.1.1/proxy/protect/integration/v1/cameras')
     expect(options.headers['X-API-KEY']).toBe(API_KEY)
     expect(options.method).toBe('GET')
+    // The transport refuses to send without this, so dropping it here would
+    // fail closed on real hardware while every injected-transport test stayed
+    // green.
+    expect(options.consoleCert).toBe('TRUSTED-PEM')
   })
 
   it('sends a JSON body with a content type on POST', async () => {

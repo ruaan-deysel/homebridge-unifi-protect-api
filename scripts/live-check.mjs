@@ -2,9 +2,11 @@
 // Manual smoke test. NOT part of `npm test`. Run this after a Protect firmware
 // update to find out what changed before your users do.
 import { Buffer } from 'node:buffer'
+import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import https from 'node:https'
 import process from 'node:process'
+import { connect } from 'node:tls'
 import WebSocket from 'ws'
 
 const env = Object.fromEntries(
@@ -25,11 +27,36 @@ if (!host || !apiKey) {
 const base = `https://${host}/proxy/protect/integration/v1`
 let failed = 0
 
-// node:https, not fetch. fetch cannot skip verification of the console's
-// self-signed certificate, and silently ignores an `agent` option.
+/**
+ * Reads the console's certificate over a handshake that sends nothing, then
+ * pins every request in this run to it — this script carries the same API key
+ * the plugin does, so it must not be the one place that would hand it to
+ * anything that answers on the LAN. Same shape as src/protect/cert.ts;
+ * `checkServerIdentity` skips the hostname check ONLY (the cert is issued for
+ * the UDM's hostname while we connect by IP), certificate identity is enforced.
+ *
+ * Trust on first use, per run: the fingerprint is printed so you can compare it
+ * with the one your console shows.
+ */
+const pinned = await new Promise((resolve, reject) => {
+  const url = new URL(`https://${host}`)
+  const socket = connect({ host: url.hostname, port: Number(url.port || 443), rejectUnauthorized: false }, () => {
+    const raw = socket.getPeerCertificate().raw
+    socket.destroy()
+    const pem = `-----BEGIN CERTIFICATE-----\n${raw.toString('base64').replace(/.{1,64}/g, '$&\n')}-----END CERTIFICATE-----\n`
+    const fingerprint = createHash('sha256').update(raw).digest('hex').toUpperCase().replace(/..(?!$)/g, '$&:')
+    console.log(`      Pinned to ${host} — SHA-256 ${fingerprint}\n`)
+    resolve({ rejectUnauthorized: true, ca: [pem], checkServerIdentity: () => undefined })
+  })
+  socket.setTimeout(15_000, () => socket.destroy(new Error('timed out reading the certificate')))
+  socket.on('error', reject)
+})
+
+// node:https, not fetch. fetch cannot be given a custom trust anchor without an
+// undici dispatcher, and silently ignores an `agent` option.
 function get(url) {
   return new Promise((resolve, reject) => {
-    const req = https.request(url, { headers: { 'X-API-KEY': apiKey }, rejectUnauthorized: false }, (res) => {
+    const req = https.request(url, { headers: { 'X-API-KEY': apiKey }, ...pinned }, (res) => {
       const chunks = []
       res.on('data', c => chunks.push(c))
       res.on('end', () => resolve({ status: res.statusCode, type: res.headers['content-type'] ?? '', body: Buffer.concat(chunks) }))
@@ -83,7 +110,7 @@ for (const channel of ['devices', 'events']) {
   await new Promise((resolve) => {
     const socket = new WebSocket(`wss://${host}/proxy/protect/integration/v1/subscribe/${channel}`, {
       headers: { 'X-API-KEY': apiKey },
-      rejectUnauthorized: false,
+      ...pinned,
     })
     const timer = setTimeout(() => {
       failed++

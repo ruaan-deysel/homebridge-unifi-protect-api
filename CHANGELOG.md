@@ -6,6 +6,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- The console's certificate is now pinned instead of TLS verification being disabled.
+  On the first connection the plugin reads the certificate, stores it in `config.json`
+  as `consoleCert` and logs its SHA-256 fingerprint; every later REST request and both
+  WebSocket subscriptions are verified against it. Only the hostname check is skipped
+  (the certificate is issued for the console's hostname while the plugin connects by IP)
+  — certificate identity is enforced, so another host on the LAN can no longer
+  impersonate the console and capture the API key.
+- A changed certificate fails closed: the plugin refuses to connect, and the log and the
+  settings UI both show the trusted and presented fingerprints plus how to re-trust it
+  deliberately. Nothing is ever re-trusted silently.
+
 ## [0.1.0] - 2026-07-31
 
 Foundation release. Discovers devices and validates connectivity; accessory services
