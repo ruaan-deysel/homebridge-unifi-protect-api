@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events'
 import { readFileSync } from 'node:fs'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { applyChange, buildCameraServices, desiredSubtypes } from '../src/accessories/camera.js'
 
 const cameras = JSON.parse(readFileSync('test/fixtures/cameras.json', 'utf8'))
@@ -146,7 +146,8 @@ const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(), succ
 
 function setup(device: Record<string, unknown>, setLed = vi.fn(async () => {})) {
   const accessory = new FakeAccessory()
-  const build = () => buildCameraServices(api, log as never, accessory as never, device, { setLed })
+  const build = (next: Record<string, unknown> = device) =>
+    buildCameraServices(api, log as never, accessory as never, next, { setLed })
   build()
   return { accessory, build, setLed }
 }
@@ -154,6 +155,8 @@ function setup(device: Record<string, unknown>, setLed = vi.fn(async () => {})) 
 const subtypesOf = (a: FakeAccessory) => a.services.map(s => s.subtype).filter(Boolean).sort()
 
 describe('buildCameraServices', () => {
+  beforeEach(() => vi.clearAllMocks())
+
   it('builds exactly the desired set plus accessory information', () => {
     const device = byName('Doorbell')
     const { accessory } = setup(device)
@@ -195,11 +198,73 @@ describe('buildCameraServices', () => {
     expect(accessory.getService(S.AccessoryInformation)).toBeDefined()
   })
 
+  // The Critical. `ProtectClient.validate` returns the RAW payload when
+  // cameraSchema fails, so one Ubiquiti field rename delivers a camera with no
+  // smartDetectSettings and no featureFlags. Read optimistically that yields
+  // ['motion'] — and an ungated removal loop then strips every smart-detect
+  // sensor, the Doorbell and the LED switch off a fully-built accessory,
+  // taking the user's automations with them. Third instance of this bug class
+  // in this repo; the other two were also Critical.
+  it('removes nothing when a degraded payload arrives for a populated accessory', () => {
+    const { accessory, build } = setup(byName('Doorbell'))
+    const before = [...accessory.services]
+    expect(subtypesOf(accessory).length).toBe(7)
+
+    // Every shape validation can fail into: absent, and present-but-wrong-type.
+    for (const degraded of [
+      { id: byName('Doorbell').id, name: 'Doorbell' },
+      { ...byName('Doorbell'), smartDetectSettings: undefined },
+      { ...byName('Doorbell'), featureFlags: 'renamed-by-firmware' },
+      { ...byName('Doorbell'), smartDetectSettings: [], featureFlags: [] },
+    ]) {
+      build(degraded as Record<string, unknown>)
+      expect(accessory.services, JSON.stringify(degraded).slice(0, 60)).toEqual(before)
+    }
+
+    expect(log.warn).toHaveBeenCalled()
+    expect(JSON.stringify(log.warn.mock.calls)).toContain('keeping its existing sensors')
+  })
+
+  // A camera that genuinely has every type disabled must still be diffed —
+  // otherwise the floor above would be indistinguishable from "never remove".
+  it('still removes when the payload is understood and simply has nothing enabled', () => {
+    const { accessory, build } = setup(byName('Doorbell'))
+
+    build({ ...byName('Doorbell'), smartDetectSettings: { objectTypes: [], audioTypes: [] } })
+
+    expect(subtypesOf(accessory)).toEqual(['led', 'motion', 'ring'])
+  })
+
+  // Task 4 adds CameraController streaming and a package-camera service. Those
+  // must survive without registering anything here — tearing them down and
+  // rebuilding them each discovery would kill an active stream.
+  it('leaves services owned by other modules alone', () => {
+    const { accessory, build } = setup(byName('Driveway'))
+    const foreign = accessory.addService(S.Switch, 'Streaming', 'camera-stream')
+
+    build()
+    build({ ...byName('Driveway'), smartDetectSettings: { objectTypes: [], audioTypes: [] } })
+
+    expect(accessory.getServiceById(S.Switch, 'camera-stream')).toBe(foreign)
+  })
+
   it('never removes a subtype-less service such as accessory information', () => {
     const { accessory, build } = setup({ id: 'x' })
     build()
     expect(accessory.getService(S.AccessoryInformation)).toBeDefined()
     expect(subtypesOf(accessory)).toEqual(['motion'])
+  })
+
+  it('sets ConfiguredName once at creation and never overwrites a user rename', () => {
+    const { accessory, build } = setup(byName('Garage'))
+    const motion = accessory.getServiceById(S.MotionSensor, 'motion')!
+    expect(motion.valueOf_(C.ConfiguredName)).toBe('Garage Motion')
+
+    // What the user typed in Home.app.
+    motion.setCharacteristic(C.ConfiguredName, 'Back Door Movement')
+    build()
+
+    expect(motion.valueOf_(C.ConfiguredName)).toBe('Back Door Movement')
   })
 
   it('names services from the device but falls back when the name is unusable', () => {
@@ -272,6 +337,19 @@ describe('applyChange', () => {
     applyChange(api, accessory as never, { subtype: 'audio-alrmCmonx', active: false })
     expect(smoke.valueOf_(C.SmokeDetected)).toBe(C.SmokeDetected.SMOKE_NOT_DETECTED)
     expect(co.valueOf_(C.CarbonMonoxideDetected)).toBe(C.CarbonMonoxideDetected.CO_LEVELS_NORMAL)
+  })
+
+  // Unreachable from the router today, but Task 5 owns the LED and this is
+  // where a stray `led` change would silently write MotionDetected on a Switch.
+  it('never writes a sensor characteristic onto the LED switch', () => {
+    const { accessory } = setup(byName('Garage'))
+    const led = accessory.getServiceById(S.Switch, 'led')!
+    const on = led.valueOf_(C.On)
+
+    applyChange(api, accessory as never, { subtype: 'led', active: true })
+
+    expect(led.valueOf_(C.MotionDetected)).toBeUndefined()
+    expect(led.valueOf_(C.On)).toBe(on)
   })
 
   it('ignores a subtype with no service without throwing', () => {

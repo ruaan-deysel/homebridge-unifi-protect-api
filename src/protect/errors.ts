@@ -26,3 +26,12 @@ export class ProtectUnavailableError extends ProtectError {}
 export function isRetryable(error: unknown): boolean {
   return error instanceof ProtectRateLimitError || error instanceof ProtectUnavailableError
 }
+
+/**
+ * The message and nothing else. Callers must never log the error *object* —
+ * `util.inspect`, which is what `log.error(err)` uses, walks its properties and
+ * has printed the API key from a request context before.
+ */
+export function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
