@@ -3,6 +3,8 @@
   .up-card { border: 1px solid rgba(128,128,128,.3); border-radius: 6px; padding: .75rem; margin-bottom: .5rem; }
   .up-muted { opacity: .7; font-size: .85rem; }
   .up-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: .25rem .75rem; }
+  .up-warn { border-color: #b23; }
+  .up-fp { font-family: monospace; font-size: .8rem; word-break: break-all; }
 </style>
 
 <div class="up-row">
@@ -14,12 +16,14 @@
 </div>
 
 <div class="up-row up-muted" id="status" aria-live="polite"></div>
+<div id="trust" aria-live="polite"></div>
 <div id="devices"></div>
 
 <script type="module">
   import { ensureConfig, renderDeviceHeader, setDeviceSetting } from './config-ops.js'
 
   const statusEl = document.getElementById('status')
+  const trustEl = document.getElementById('trust')
   const devicesEl = document.getElementById('devices')
   const hostEl = document.getElementById('host')
   const keyEl = document.getElementById('apiKey')
@@ -94,16 +98,87 @@
     }
   }
 
+  /**
+   * Every line here is built with DOM APIs and lands as `textContent`.
+   * Fingerprints and hostnames come from whatever answered on the network —
+   * treat them as attacker-controlled and NEVER interpolate them into markup.
+   */
+  function renderTrust(lines, { warn = false, retrust = null } = {}) {
+    trustEl.replaceChildren()
+    if (lines.length === 0)
+      return
+    const card = document.createElement('div')
+    card.className = warn ? 'up-card up-warn' : 'up-card up-muted'
+    for (const line of lines) {
+      const p = document.createElement('div')
+      if (line.fingerprint)
+        p.className = 'up-fp'
+      p.textContent = line.text
+      card.append(p)
+    }
+    if (retrust) {
+      const button = document.createElement('button')
+      button.className = 'btn btn-danger'
+      button.type = 'button'
+      button.textContent = 'Trust this certificate'
+      // Deliberate, explicit, one click that the user has to find and press —
+      // the plugin itself never re-trusts on its own.
+      button.addEventListener('click', async () => {
+        config = { ...config, consoleCert: retrust }
+        await save()
+        renderTrust([{ text: 'The new certificate is now trusted. Restart Homebridge, then press Test Connection.' }])
+      })
+      card.append(button)
+    }
+    trustEl.append(card)
+  }
+
+  if (config.consoleCert)
+    renderTrust([{ text: 'This console\'s certificate is trusted and pinned. Press Test Connection to verify it still matches.' }])
+
   document.getElementById('test').addEventListener('click', async () => {
-    statusEl.textContent = 'Connecting…'
+    statusEl.textContent = 'Checking the console\'s certificate…'
     // The key is only ever sent to the local server-side handler over the
     // homebridge IPC channel — never logged, never echoed back into the DOM.
     config = { ...config, host: hostEl.value.trim(), apiKey: keyEl.value.trim() }
+
+    // Certificate first, credential second: nothing below sends the API key
+    // until the certificate on the wire is the one this install trusts.
+    let cert
     try {
-      const info = await homebridge.request('/test-connection', { host: config.host, apiKey: config.apiKey })
+      cert = await homebridge.request('/console-cert', { host: config.host, consoleCert: config.consoleCert })
+    }
+    catch (error) {
+      statusEl.textContent = error.message
+      return
+    }
+
+    if (cert.matches === false) {
+      statusEl.textContent = 'Refused to connect — the console\'s certificate changed. The API key was not sent.'
+      renderTrust([
+        { text: `The certificate presented by ${config.host} does not match the one this plugin trusts, so the connection was refused before the API key was sent.` },
+        { text: `Trusted: ${cert.trustedFingerprint}`, fingerprint: true },
+        { text: `Presented: ${cert.fingerprint}`, fingerprint: true },
+        { text: 'If you know why it changed — the console was reinstalled, reset, or its certificate regenerated — trust the new one below. If you do not, treat this as an interception attempt and do not trust it.' },
+      ], { warn: true, retrust: cert.pem })
+      return
+    }
+
+    if (cert.matches === null) {
+      config = { ...config, consoleCert: cert.pem }
+      renderTrust([
+        { text: `Now trusting this console's certificate. Compare it with the fingerprint your console shows if you want to be certain — every later connection is pinned to it.` },
+        { text: `SHA-256: ${cert.fingerprint}`, fingerprint: true },
+      ])
+    }
+
+    statusEl.textContent = 'Connecting…'
+    const credentials = { host: config.host, apiKey: config.apiKey, consoleCert: config.consoleCert }
+    try {
+      const info = await homebridge.request('/test-connection', credentials)
       statusEl.textContent = `Connected — ${info.nvrName}, Protect ${info.version}`
       await save()
-      const { devices } = await homebridge.request('/discover', { host: config.host, apiKey: config.apiKey })
+      const { devices } = await homebridge.request('/discover', credentials)
       render(devices)
     }
     catch (error) {

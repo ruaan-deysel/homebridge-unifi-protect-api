@@ -6,7 +6,8 @@ import type { ProtectPluginConfig } from './config.js'
 import { applyChange, buildCameraServices } from './accessories/camera.js'
 import { routeEvent } from './accessories/router.js'
 import { EventTracker } from './accessories/tracker.js'
-import { parseConfig, settingsFor } from './config.js'
+import { parseConfig, settingsFor, storeConsoleCert } from './config.js'
+import { certMismatchMessage, fetchConsoleCert, fingerprintOf } from './protect/cert.js'
 import { ProtectClient } from './protect/client.js'
 import { errorMessage, ProtectAuthError } from './protect/errors.js'
 import { ProtectEvents } from './protect/events.js'
@@ -78,6 +79,14 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
   events!: ProtectEvents
   private config?: ProtectPluginConfig
   private authFailed = false
+  private trusted = false
+  /**
+   * Latched on a certificate mismatch. Like `authFailed`, a retry cannot fix
+   * it — only the user deciding to re-trust can, and that means a restart.
+   */
+  private certMismatch = false
+  /** Injected in tests, so the suite never opens a TLS socket. */
+  readConsoleCert = fetchConsoleCert
   private eventsStarted = false
   private busWired = false
   private inFlight?: Promise<void>
@@ -180,8 +189,11 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
     // only thing that can route it back to an accessory.
     this.tracker.onFailsafe = changes => this.applyChanges(changes)
 
-    this.client = new ProtectClient({ host: this.config.host, apiKey: this.config.apiKey, log: this.log })
-    this.events = new ProtectEvents({ host: this.config.host, apiKey: this.config.apiKey, log: this.log })
+    // `consoleCert` may be undefined on a first run. Both transports refuse to
+    // send anything until `ensureTrust` sets it — see fail-closed there.
+    const shared = { host: this.config.host, apiKey: this.config.apiKey, log: this.log, consoleCert: this.config.consoleCert }
+    this.client = new ProtectClient(shared)
+    this.events = new ProtectEvents(shared)
 
     this.api.on('didFinishLaunching', () => this.discoverSafely())
     this.api.on('shutdown', () => {
@@ -247,6 +259,11 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
     if (!this.config || this.authFailed || this.stopped)
       return
 
+    // Before anything that carries the API key. A mismatch stops here, so the
+    // credential is never offered to a console that is not the trusted one.
+    if (!await this.ensureTrust())
+      return
+
     // Captured up front: a retry-driven pass must not reset the backoff, or a
     // proxy that permanently 401s the WebSocket upgrade while REST stays healthy
     // loops at the floor delay forever — every retry succeeding at REST.
@@ -286,6 +303,71 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
       this.retryDelayMs = RETRY_MIN_MS
     this.reconcile(devices)
     this.startEvents()
+  }
+
+  /**
+   * Trust on first use, pin afterwards.
+   *
+   * The certificate is read over a TLS handshake that sends nothing (see
+   * `fetchConsoleCert`), so this runs before the API key is ever offered. It is
+   * what produces the readable mismatch message; the actual protection is the
+   * per-connection pinning in both transports, which would refuse a swapped
+   * certificate even if this check were removed.
+   */
+  private async ensureTrust(): Promise<boolean> {
+    if (this.trusted)
+      return true
+    if (this.certMismatch)
+      return false
+
+    const config = this.config!
+    let presented
+    try {
+      presented = await this.readConsoleCert(config.host)
+    }
+    catch (error) {
+      this.log.warn(`Could not read the certificate of the console at ${config.host}. ${error instanceof Error ? error.message : String(error)}`)
+      this.scheduleRetry()
+      return false
+    }
+    if (this.stopped)
+      return false
+
+    const stored = config.consoleCert
+    if (stored && fingerprintOf(stored) !== presented.fingerprint) {
+      // Fail closed. Silently re-trusting here would undo the entire point.
+      this.certMismatch = true
+      this.log.error(certMismatchMessage(config.host, fingerprintOf(stored), presented.fingerprint))
+      return false
+    }
+
+    this.applyTrust(stored ?? presented.pem)
+    if (!stored) {
+      config.consoleCert = presented.pem
+      this.log.info(`Trusting the certificate of the UniFi console at ${config.host} — SHA-256 ${presented.fingerprint}. Compare it with the fingerprint your console shows if you want to be certain; every later connection is pinned to it.`)
+      this.persistTrust(config.host, presented.pem)
+    }
+    return true
+  }
+
+  private applyTrust(pem: string): void {
+    this.trusted = true
+    this.client.consoleCert = pem
+    this.events.consoleCert = pem
+  }
+
+  private persistTrust(host: string, pem: string): void {
+    const configPath = this.api.user?.configPath?.()
+    try {
+      if (!configPath)
+        throw new Error('Homebridge did not report a config path')
+      storeConsoleCert(configPath, host, pem)
+    }
+    catch (error) {
+      // Not fatal: the certificate is trusted for this session either way, it
+      // just gets re-learned (and re-logged) after a restart.
+      this.log.warn(`Trusted the console certificate for this session but could not save it to config.json (${error instanceof Error ? error.message : String(error)}). It will be trusted again on the next restart.`)
+    }
   }
 
   private scheduleRetry(): void {

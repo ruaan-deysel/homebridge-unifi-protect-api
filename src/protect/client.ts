@@ -43,6 +43,8 @@ export interface ProtectClientOptions {
   httpRequest?: HttpRequestFn
   queue?: RequestQueueOptions
   timeoutMs?: number
+  /** PEM of the trusted console certificate. See `consoleCert` on the class. */
+  consoleCert?: string
 }
 
 const noopLog: ProtectLogger = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} }
@@ -61,6 +63,13 @@ export class ProtectClient {
   private readonly timeoutMs: number
   /** Schema drift is permanent for a session; warning once per message keeps the log usable. */
   private readonly warned = new Set<string>()
+  /**
+   * Trust anchor for every request. Writable because trust-on-first-use happens
+   * after construction: the platform builds the client from config (where the
+   * PEM may not be stored yet), then sets it once the console's certificate has
+   * been read and trusted. Until it is set, `httpsRequestFn` refuses to send.
+   */
+  consoleCert?: string
 
   constructor(options: ProtectClientOptions) {
     this.baseUrl = `https://${options.host}${API_BASE_PATH}`
@@ -69,6 +78,7 @@ export class ProtectClient {
     this.httpRequest = options.httpRequest ?? httpsRequestFn
     this.queue = new RequestQueue(options.queue)
     this.timeoutMs = options.timeoutMs ?? 15_000
+    this.consoleCert = options.consoleCert
   }
 
   getMetaInfo(): Promise<z.infer<typeof metaInfoSchema>> {
@@ -216,6 +226,7 @@ export class ProtectClient {
           },
           body: payload,
           timeoutMs: this.timeoutMs,
+          consoleCert: this.consoleCert,
         })
       }
       catch (error) {
