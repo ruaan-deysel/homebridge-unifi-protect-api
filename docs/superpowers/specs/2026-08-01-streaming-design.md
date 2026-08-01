@@ -53,14 +53,38 @@ container (`HostConfig.Devices` is empty).
 So hardware transcoding is currently impossible for two independent reasons: the device is
 absent, and the bundled ffmpeg could not use it if it were present. Both must be fixed.
 
-`intel-media-va-driver-non-free` (24.1.0) and `ffmpeg` (7:6.1.1-3ubuntu5) are installable from
-the container's own apt repositories. **Not yet verified: whether that ffmpeg build actually
-carries VAAPI and QSV encoders** — only its availability was confirmed. Confirming it is part
-of the first implementation task, because if it does not, a different ffmpeg build must be
-sourced and the environment prerequisite changes.
+**Resolved 2026-08-01 — the environment is now set up and measured.** `/dev/dri` is passed
+through, `intel-media-va-driver-non-free` 24.1.0 is installed, and `vainfo` inside the
+container reports the Intel iHD driver with `VAProfileHEVCMain: VAEntrypointVLD` (hardware
+HEVC decode) and `VAProfileH264Main/High: VAEntrypointEncSlice` (hardware H.264 encode) —
+exactly the pipeline required.
 
-`/mnt/user/appdata/homebridge/startup.sh` is the hook the image runs at container start, and is
-where the install belongs so it survives image updates.
+Ubuntu's `ffmpeg` 6.1.1 **does** carry `vaapi` and `qsv`, with `h264_vaapi` and `h264_qsv`
+encoders. It installs to `/usr/bin/ffmpeg`.
+
+**Important: `/usr/local/bin` precedes `/usr/bin` on PATH**, so a bare `ffmpeg` still resolves
+to the bundled static build with no Intel support. The plugin must probe candidate *paths*,
+not the bare command name. Both binaries are deliberately left in place.
+
+The install is persisted in `/mnt/user/appdata/homebridge/startup.sh`, the hook the image runs
+at container start, so it survives image updates. It is guarded on `/dev/dri/renderD128`
+existing and is a no-op when already installed.
+
+### Measured cost — this decides the concurrency design
+
+20 seconds of the real 2688×1512 HEVC stream, transcoded to H.264 on this host:
+
+| Path | CPU consumed | Cores |
+|------|--------------|-------|
+| VAAPI (hardware) | 1.79 s | ≈ 0.09 |
+| libx264 `veryfast` | 49.1 s | ≈ 2.5 |
+
+**Hardware is ~27× cheaper.** All five cameras streaming concurrently cost roughly half a core
+via VAAPI. The same load in software would need 12.5 cores — more than this host has, on a
+machine that also runs everything else.
+
+Note that `speed` reads ~1.01x on both: the source is a live 30 fps stream and cannot be
+consumed faster than realtime. The meaningful figures are CPU cost and `drop=0`, not speed.
 
 ## Environment prerequisite
 
@@ -156,7 +180,16 @@ each request otherwise hits the console.
 - A watchdog reaps sessions HomeKit never stopped. A stranded ffmpeg holding a 4 MP decode is
   considerably worse than the stranded timer the sensor tracker already guards against.
 
-**Concurrency is capped** (default 4, configurable). Past the cap the plugin refuses with a
+**Concurrency is capped, and the default depends on the encoder path** — a refinement the
+benchmark forced. A flat cap is wrong in both directions: too low for hardware, too high for
+software.
+
+| Encoder | Default cap | Rationale |
+|---------|-------------|-----------|
+| hardware (`h264_qsv` / `h264_vaapi`) | 6 | ≈ 0.09 cores each; all five cameras plus headroom |
+| software (`libx264`) | 2 | ≈ 2.5 cores each; 3 would saturate a 12-thread host |
+
+The cap is configurable and overrides the default. Past the cap the plugin refuses with a
 clear log rather than thrashing. The host runs other workloads; this ceiling protects them
 too.
 
