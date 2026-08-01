@@ -13,7 +13,8 @@ const deviceSettingsSchema = z.object({
 const defaultsSchema = z.object({
   exposeNewDevices: z.boolean().default(true),
   quality: qualitySchema.default('high'),
-  // Apple's 200GB iCloud plan supports exactly ONE HKSV camera. Defaulting this
+  // Apple caps HKSV by camera COUNT, not storage: 50GB=1, 200GB=5, 2TB+=unlimited.
+  // Footage does not count against the iCloud quota. Defaulting this
   // to true makes HomeKit silently refuse to record every camera after the first.
   hksv: z.boolean().default(false),
 }).default({ exposeNewDevices: true, quality: 'high', hksv: false })
