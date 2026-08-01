@@ -1,0 +1,45 @@
+[
+  {
+    "channel": "events",
+    "at": 1785563321048,
+    "payload": {
+      "item": {
+        "id": "fake0event00000000000001",
+        "modelKey": "event",
+        "type": "ring",
+        "start": 1785563319100,
+        "device": "1caae4537220700882c792db"
+      },
+      "type": "add"
+    }
+  },
+  {
+    "channel": "events",
+    "at": 1785563621032,
+    "payload": {
+      "item": {
+        "id": "fake0event00000000000001",
+        "modelKey": "event",
+        "type": "ring",
+        "start": 1785563319100,
+        "end": 1785563621106,
+        "device": "1caae4537220700882c792db"
+      },
+      "type": "update"
+    }
+  },
+  {
+    "channel": "events",
+    "at": 1785563627948,
+    "payload": {
+      "item": {
+        "id": "fake0event00000000000002",
+        "modelKey": "event",
+        "type": "ring",
+        "start": 1785563626015,
+        "device": "1caae4537220700882c792db"
+      },
+      "type": "add"
+    }
+  }
+]
