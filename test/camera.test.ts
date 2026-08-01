@@ -1,7 +1,7 @@
-import { EventEmitter } from 'node:events'
 import { readFileSync } from 'node:fs'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { applyChange, buildCameraServices, desiredSubtypes } from '../src/accessories/camera.js'
+import { C, FakeAccessory, FakeHapStatusError, hap, S } from './fake-hap.js'
 
 const cameras = JSON.parse(readFileSync('test/fixtures/cameras.json', 'utf8'))
 const byName = (n: string) => cameras.find((c: { name: string }) => c.name === n)
@@ -51,97 +51,7 @@ describe('desiredSubtypes', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// A HAP stand-in. Service and characteristic "types" are plain objects used as
-// identity tokens, which is all the builder ever does with them.
-// ---------------------------------------------------------------------------
-
-const S = {
-  AccessoryInformation: { name: 'AccessoryInformation' },
-  MotionSensor: { name: 'MotionSensor' },
-  SmokeSensor: { name: 'SmokeSensor' },
-  CarbonMonoxideSensor: { name: 'CarbonMonoxideSensor' },
-  Doorbell: { name: 'Doorbell' },
-  Switch: { name: 'Switch' },
-}
-
-const C = {
-  Manufacturer: { name: 'Manufacturer' },
-  Model: { name: 'Model' },
-  SerialNumber: { name: 'SerialNumber' },
-  ConfiguredName: { name: 'ConfiguredName' },
-  Name: { name: 'Name' },
-  On: { name: 'On' },
-  MotionDetected: { name: 'MotionDetected' },
-  SmokeDetected: { name: 'SmokeDetected', SMOKE_DETECTED: 1, SMOKE_NOT_DETECTED: 0 },
-  CarbonMonoxideDetected: { name: 'CarbonMonoxideDetected', CO_LEVELS_ABNORMAL: 1, CO_LEVELS_NORMAL: 0 },
-  ProgrammableSwitchEvent: { name: 'ProgrammableSwitchEvent', SINGLE_PRESS: 0 },
-}
-
-class FakeCharacteristic extends EventEmitter {
-  value: unknown = null
-  onSet(handler: (value: unknown) => unknown) {
-    this.on('set', handler)
-    return this
-  }
-}
-
-class FakeService {
-  readonly characteristics = new Map<object, FakeCharacteristic>()
-  constructor(public type: object, public displayName?: string, public subtype?: string) {}
-
-  getCharacteristic(type: object): FakeCharacteristic {
-    let c = this.characteristics.get(type)
-    if (!c)
-      this.characteristics.set(type, c = new FakeCharacteristic())
-    return c
-  }
-
-  setCharacteristic(type: object, value: unknown) {
-    this.getCharacteristic(type).value = value
-    return this
-  }
-
-  updateCharacteristic(type: object, value: unknown) {
-    this.getCharacteristic(type).value = value
-    return this
-  }
-
-  valueOf_(type: object) {
-    return this.characteristics.get(type)?.value
-  }
-}
-
-class FakeAccessory {
-  services: FakeService[] = []
-  getService(type: object) {
-    return this.services.find(s => s.type === type && !s.subtype)
-  }
-
-  getServiceById(type: object, subtype: string) {
-    return this.services.find(s => s.type === type && s.subtype === subtype)
-  }
-
-  addService(type: object, displayName?: string, subtype?: string) {
-    const service = new FakeService(type, displayName, subtype)
-    this.services.push(service)
-    return service
-  }
-
-  removeService(service: FakeService) {
-    this.services = this.services.filter(s => s !== service)
-  }
-}
-
-class FakeHapStatusError extends Error {
-  constructor(public hapStatus: number) {
-    super(`hap status ${hapStatus}`)
-  }
-}
-
-const api = {
-  hap: { Service: S, Characteristic: C, HapStatusError: FakeHapStatusError, HAPStatus: { SERVICE_COMMUNICATION_FAILURE: -70402 } },
-} as never
+const api = { hap } as never
 const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(), success: vi.fn() }
 
 function setup(device: Record<string, unknown>, setLed = vi.fn(async () => {})) {
@@ -301,12 +211,12 @@ describe('applyChange', () => {
   it('sets motion on the plain and per-type motion sensors', () => {
     const { accessory } = setup(device)
 
-    applyChange(api, accessory as never, { subtype: 'motion', active: true })
-    applyChange(api, accessory as never, { subtype: 'detect-person', active: true })
+    applyChange(api, accessory as never, { deviceId: device.id, subtype: 'motion', active: true })
+    applyChange(api, accessory as never, { deviceId: device.id, subtype: 'detect-person', active: true })
     expect(accessory.getServiceById(S.MotionSensor, 'motion')?.valueOf_(C.MotionDetected)).toBe(true)
     expect(accessory.getServiceById(S.MotionSensor, 'detect-person')?.valueOf_(C.MotionDetected)).toBe(true)
 
-    applyChange(api, accessory as never, { subtype: 'motion', active: false })
+    applyChange(api, accessory as never, { deviceId: device.id, subtype: 'motion', active: false })
     expect(accessory.getServiceById(S.MotionSensor, 'motion')?.valueOf_(C.MotionDetected)).toBe(false)
   })
 
@@ -314,10 +224,10 @@ describe('applyChange', () => {
     const { accessory } = setup(device)
     const ring = accessory.getServiceById(S.Doorbell, 'ring')!
 
-    applyChange(api, accessory as never, { subtype: 'ring', active: false })
+    applyChange(api, accessory as never, { deviceId: device.id, subtype: 'ring', active: false })
     expect(ring.valueOf_(C.ProgrammableSwitchEvent)).toBeUndefined()
 
-    applyChange(api, accessory as never, { subtype: 'ring', active: true })
+    applyChange(api, accessory as never, { deviceId: device.id, subtype: 'ring', active: true })
     expect(ring.valueOf_(C.ProgrammableSwitchEvent)).toBe(C.ProgrammableSwitchEvent.SINGLE_PRESS)
   })
 
@@ -328,13 +238,13 @@ describe('applyChange', () => {
     const smoke = accessory.getServiceById(S.SmokeSensor, 'audio-alrmSmoke')!
     const co = accessory.getServiceById(S.CarbonMonoxideSensor, 'audio-alrmCmonx')!
 
-    applyChange(api, accessory as never, { subtype: 'audio-alrmSmoke', active: true })
-    applyChange(api, accessory as never, { subtype: 'audio-alrmCmonx', active: true })
+    applyChange(api, accessory as never, { deviceId: device.id, subtype: 'audio-alrmSmoke', active: true })
+    applyChange(api, accessory as never, { deviceId: device.id, subtype: 'audio-alrmCmonx', active: true })
     expect(smoke.valueOf_(C.SmokeDetected)).toBe(C.SmokeDetected.SMOKE_DETECTED)
     expect(co.valueOf_(C.CarbonMonoxideDetected)).toBe(C.CarbonMonoxideDetected.CO_LEVELS_ABNORMAL)
 
-    applyChange(api, accessory as never, { subtype: 'audio-alrmSmoke', active: false })
-    applyChange(api, accessory as never, { subtype: 'audio-alrmCmonx', active: false })
+    applyChange(api, accessory as never, { deviceId: device.id, subtype: 'audio-alrmSmoke', active: false })
+    applyChange(api, accessory as never, { deviceId: device.id, subtype: 'audio-alrmCmonx', active: false })
     expect(smoke.valueOf_(C.SmokeDetected)).toBe(C.SmokeDetected.SMOKE_NOT_DETECTED)
     expect(co.valueOf_(C.CarbonMonoxideDetected)).toBe(C.CarbonMonoxideDetected.CO_LEVELS_NORMAL)
   })
@@ -346,7 +256,7 @@ describe('applyChange', () => {
     const led = accessory.getServiceById(S.Switch, 'led')!
     const on = led.valueOf_(C.On)
 
-    applyChange(api, accessory as never, { subtype: 'led', active: true })
+    applyChange(api, accessory as never, { deviceId: device.id, subtype: 'led', active: true })
 
     expect(led.valueOf_(C.MotionDetected)).toBeUndefined()
     expect(led.valueOf_(C.On)).toBe(on)
@@ -357,7 +267,7 @@ describe('applyChange', () => {
 
     // Unknown to the builder entirely, and known-but-not-built on this camera.
     for (const subtype of ['nonsense', 'detect-vehicle', 'ring', 'led', 'audio-alrmSmoke'])
-      expect(() => applyChange(api, accessory as never, { subtype, active: true }), subtype).not.toThrow()
+      expect(() => applyChange(api, accessory as never, { deviceId: 'x', subtype, active: true }), subtype).not.toThrow()
 
     expect(subtypesOf(accessory)).toEqual(['detect-animal', 'detect-person', 'motion'])
   })

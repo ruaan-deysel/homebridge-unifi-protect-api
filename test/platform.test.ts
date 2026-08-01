@@ -1,15 +1,34 @@
 import { EventEmitter } from 'node:events'
+import { readFileSync } from 'node:fs'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { UniFiProtectPlatform } from '../src/platform.js'
 import { ProtectAuthError, ProtectUnavailableError } from '../src/protect/errors.js'
+import { C, FakeAccessory, hap, S } from './fake-hap.js'
 
 const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(), success: vi.fn() }
+
+/** The five real cameras Task 0 captured off the live console. */
+const cameras = JSON.parse(readFileSync('test/fixtures/cameras.json', 'utf8')) as Record<string, unknown>[]
+function camera(name: string) {
+  return cameras.find(c => c.name === name)!
+}
+/** Frames captured from the live event socket, verbatim. */
+function frames(file: string): unknown[] {
+  return (JSON.parse(readFileSync(`test/fixtures/events/${file}.json`, 'utf8')) as { payload: unknown }[]).map(f => f.payload)
+}
+
+class FakePlatformAccessory extends FakeAccessory {
+  context: Record<string, unknown> = {}
+  constructor(public displayName: string, public UUID: string) {
+    super()
+  }
+}
 
 function makeApi() {
   const api = new EventEmitter() as never as Record<string, unknown> & EventEmitter
   Object.assign(api, {
-    hap: { uuid: { generate: (s: string) => `uuid-${s}` } },
-    platformAccessory: class { constructor(public displayName: string, public UUID: string) {} context: Record<string, unknown> = {} },
+    hap: { ...hap, uuid: { generate: (s: string) => `uuid-${s}` } },
+    platformAccessory: FakePlatformAccessory,
     registerPlatformAccessories: vi.fn(),
     unregisterPlatformAccessories: vi.fn(),
     updatePlatformAccessories: vi.fn(),
@@ -516,6 +535,213 @@ describe('uniFiProtectPlatform', () => {
     for (const key of ['constructor', 'toString', 'valueOf', 'hasOwnProperty', '__proto__'])
       expect(() => bus.emit('deviceUpdate', { item: { id: 'cam1', modelKey: key } })).not.toThrow()
     expect(platform.accessories.get('uuid-cam1')?.displayName).toBe('Doorbell')
+  })
+
+  // -------------------------------------------------------------------------
+  // The event pipeline: protectEvent -> router -> tracker -> HAP services.
+  // Driven by the frames Task 0 captured off the live console, verbatim.
+  // -------------------------------------------------------------------------
+
+  const DOORBELL = camera('Doorbell').id as string
+  const DRIVEWAY = camera('Driveway').id as string
+
+  /** Discovers the five real cameras and hands back the wired platform. */
+  async function withCameras(devices: unknown[] = cameras) {
+    const ctx = makePlatform(validConfig, devices)
+    await ctx.platform.discover()
+    const sensor = (id: string, subtype: string) =>
+      (ctx.platform.accessories.get(`uuid-${id}`) as unknown as FakeAccessory).getServiceById(S.MotionSensor, subtype)
+    const detected = (id: string, subtype: string) => sensor(id, subtype)?.valueOf_(C.MotionDetected)
+    return { ...ctx, sensor, detected }
+  }
+
+  it('builds the sensor services for every exposed camera during discovery', async () => {
+    const { platform } = await withCameras()
+
+    const doorbell = platform.accessories.get(`uuid-${DOORBELL}`) as unknown as FakeAccessory
+    expect(doorbell.services.map(s => s.subtype).filter(Boolean).sort()).toEqual(
+      ['detect-animal', 'detect-package', 'detect-person', 'detect-vehicle', 'led', 'motion', 'ring'],
+    )
+    // Sidegate reports hasLedStatus: false and no speaker.
+    const sidegate = platform.accessories.get(`uuid-${camera('Sidegate').id}`) as unknown as FakeAccessory
+    expect(sidegate.services.map(s => s.subtype).filter(Boolean).sort()).toEqual(['detect-animal', 'detect-person', 'motion'])
+  })
+
+  it('rebuilds services on a later discovery when a detection type is disabled in protect', async () => {
+    const { platform } = await withCameras()
+    const driveway = platform.accessories.get(`uuid-${DRIVEWAY}`) as unknown as FakeAccessory
+    expect(driveway.getServiceById(S.MotionSensor, 'detect-vehicle')).toBeDefined()
+
+    platform.client = makeClient(cameras.map(c =>
+      c.id === DRIVEWAY ? { ...c, smartDetectSettings: { objectTypes: ['person'], audioTypes: [] } } : c,
+    )) as never
+    await platform.discover()
+
+    expect(driveway.getServiceById(S.MotionSensor, 'detect-vehicle')).toBeUndefined()
+    expect(driveway.getServiceById(S.MotionSensor, 'detect-person')).toBeDefined()
+  })
+
+  // The Critical from Task 3, one layer up: `ProtectClient` returns the RAW
+  // payload when cameraSchema fails, so a Ubiquiti field rename is a real
+  // production input. The platform must not defeat the builder's floor.
+  it('removes no services when a degraded discovery arrives', async () => {
+    const { platform } = await withCameras()
+    const doorbell = platform.accessories.get(`uuid-${DOORBELL}`) as unknown as FakeAccessory
+    const before = [...doorbell.services]
+
+    platform.client = makeClient(cameras.map(c => ({ id: c.id, name: c.name, modelKey: 'camera' }))) as never
+    await platform.discover()
+
+    expect(doorbell.services).toEqual(before)
+  })
+
+  it('drives a motion sensor from the captured motion frames', async () => {
+    const { bus, detected } = await withCameras()
+    const [start, end] = frames('motion')
+
+    bus.emit('protectEvent', start)
+    expect(detected(DOORBELL, 'motion')).toBe(true)
+
+    bus.emit('protectEvent', end)
+    expect(detected(DOORBELL, 'motion')).toBe(false)
+  })
+
+  it('drives the per-type sensor on the right camera from the captured smart-detect frames', async () => {
+    const { bus, detected } = await withCameras()
+
+    // Frame 0 is Driveway, frame 2 is the Doorbell — the same detection type on
+    // two devices, so a handler that ignored `device` would light both.
+    bus.emit('protectEvent', frames('smart-detect')[0])
+    expect(detected(DRIVEWAY, 'detect-person')).toBe(true)
+    expect(detected(DOORBELL, 'detect-person')).toBeFalsy()
+
+    bus.emit('protectEvent', frames('smart-detect')[2])
+    expect(detected(DOORBELL, 'detect-person')).toBe(true)
+  })
+
+  // Real hardware redelivers the end frame for one event id up to 3x with an
+  // identical `end`. The tracker dedupes; this proves nothing upstream undoes it.
+  it('survives the console redelivering an end frame three times', async () => {
+    const { bus, detected } = await withCameras()
+    const smart = frames('smart-detect')
+
+    bus.emit('protectEvent', smart[2])
+    expect(detected(DOORBELL, 'detect-person')).toBe(true)
+    for (const frame of smart.slice(4, 7))
+      bus.emit('protectEvent', frame)
+    expect(detected(DOORBELL, 'detect-person')).toBe(false)
+
+    // A fresh event after the redeliveries must still light the sensor — a
+    // holder count driven negative by the extra ends would leave it dark.
+    bus.emit('protectEvent', smart[2])
+    expect(detected(DOORBELL, 'detect-person')).toBe(true)
+  })
+
+  it('fires the doorbell once and ignores the end frame 302 seconds later', async () => {
+    const { platform, bus } = await withCameras()
+    const doorbell = platform.accessories.get(`uuid-${DOORBELL}`) as unknown as FakeAccessory
+    const ring = doorbell.getServiceById(S.Doorbell, 'ring')!
+    const [press, lateEnd] = frames('ring')
+
+    bus.emit('protectEvent', press)
+    expect(ring.valueOf_(C.ProgrammableSwitchEvent)).toBe(C.ProgrammableSwitchEvent.SINGLE_PRESS)
+
+    // Reset so a second press would be visible, then deliver the late end.
+    ring.updateCharacteristic(C.ProgrammableSwitchEvent, null)
+    bus.emit('protectEvent', lateEnd)
+    expect(ring.valueOf_(C.ProgrammableSwitchEvent)).toBeNull()
+  })
+
+  it('ignores an event for an unknown device silently and tracks nothing for it', async () => {
+    vi.useFakeTimers()
+    try {
+      const { bus, detected } = await withCameras()
+      const [start] = frames('motion')
+      // Discovery's own logging is not what this test is about.
+      vi.clearAllMocks()
+
+      expect(() => bus.emit('protectEvent', { ...(start as object), item: { ...(start as { item: object }).item, device: 'nope' } })).not.toThrow()
+
+      expect(detected(DOORBELL, 'motion')).toBeFalsy()
+      // A chime or an unadopted device emits these constantly — no log spam.
+      expect(log.warn).not.toHaveBeenCalled()
+      expect(log.info).not.toHaveBeenCalled()
+      // And no failsafe timer: an unexposed camera streaming events all day must
+      // not accumulate tracker entries for sensors that do not exist.
+      expect(vi.getTimerCount()).toBe(0)
+    }
+    finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not throw out of the handler on a malformed frame', async () => {
+    const { bus, detected } = await withCameras()
+
+    for (const frame of [
+      null,
+      undefined,
+      'nonsense',
+      [],
+      { item: { type: 5 } },
+      { item: null },
+      { type: 'add', item: { id: 1, device: DOORBELL, type: 'motion' } },
+      { type: 'add', item: { id: 'e', device: DOORBELL, type: 'smartDetectZone', smartDetectTypes: 'person' } },
+      { type: 'add', item: { id: 'e', device: DOORBELL, type: '__proto__' } },
+    ])
+      expect(() => bus.emit('protectEvent', frame), JSON.stringify(frame ?? null)).not.toThrow()
+
+    expect(detected(DOORBELL, 'motion')).toBeFalsy()
+  })
+
+  // There is no `GET /v1/events` on this API: an event open across a dropped
+  // socket can never be reconciled by polling, only assumed over.
+  it('clears active sensors when the bus asks for a resync', async () => {
+    const { bus, detected } = await withCameras()
+
+    bus.emit('protectEvent', frames('motion')[0])
+    expect(detected(DOORBELL, 'motion')).toBe(true)
+
+    bus.emit('resyncRequired', 'events')
+
+    expect(detected(DOORBELL, 'motion')).toBe(false)
+  })
+
+  it('clears a stranded sensor when the failsafe expires', async () => {
+    vi.useFakeTimers()
+    try {
+      const { bus, detected } = await withCameras()
+      bus.emit('protectEvent', frames('motion')[0])
+      expect(detected(DOORBELL, 'motion')).toBe(true)
+
+      await vi.advanceTimersByTimeAsync(121_000)
+
+      expect(detected(DOORBELL, 'motion')).toBe(false)
+    }
+    finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // Leaked failsafe timers keep the Node process alive and Homebridge never
+  // finishes shutting down.
+  it('stops the tracker on shutdown so no failsafe fires afterwards', async () => {
+    vi.useFakeTimers()
+    try {
+      const { api, bus, detected } = await withCameras()
+      bus.emit('protectEvent', frames('motion')[0])
+      expect(detected(DOORBELL, 'motion')).toBe(true)
+
+      api.emit('shutdown')
+      await vi.advanceTimersByTimeAsync(600_000)
+
+      // Untouched: the timer was cancelled, not merely late.
+      expect(detected(DOORBELL, 'motion')).toBe(true)
+      expect(vi.getTimerCount()).toBe(0)
+    }
+    finally {
+      vi.useRealTimers()
+    }
   })
 
   it('applies a rename delivered as a partial device update frame', async () => {
