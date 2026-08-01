@@ -14,6 +14,10 @@
   shipped to `main` with no changelog entry at all, because the only task that mentioned
   the changelog was the final gate — which never closed. A user-visible change with no
   entry is an incomplete task, not a tidy-up for later.
+  **`CHANGELOG.md` is therefore a shared file across every task**: never `git add -A` or
+  `git add CHANGELOG.md` blindly while another implementer may be running, and read the
+  current `## [Unreleased]` section before appending so entries are not duplicated. Tasks
+  dispatched in parallel MUST stage explicit paths only.
 - **The RTSPS URL is a credential.** It carries an auth token. It must never reach a log line, an error message, a thrown `Error`, or a crash report — including via `util.inspect`, which is what Homebridge's `log.error(err)` uses. **ffmpeg echoes its full command line on failure by default**, so stderr must be redacted *before* logging, not filtered after.
 - **The API key is a credential** under the same rules. `errorMessage()` in `src/protect/errors.ts` is the only sanctioned way to turn an error into a loggable string.
 - **All cameras stay under ONE bridge**: `registerPlatformAccessories` only, never `publishExternalAccessories`.
@@ -809,7 +813,8 @@ git commit -m "feat(protect): supervise ffmpeg processes with redacted logging"
 - [ ] starting a stream selects the substream from the request's resolution
 - [ ] ffmpeg arguments include the hardware flags when the probe found hardware, and do not when it did not
 - [ ] audio is omitted unless the camera opts in
-- [ ] the concurrency cap defaults to 6 with hardware and 2 with software, and a request past the cap is refused with a logged reason rather than spawning
+- [ ] the concurrency cap is **host-wide, shared across every camera**, not per-delegate — five cameras must not each get their own cap
+- [ ] the cap defaults to 6 with hardware and 2 with software, and a request past the cap is refused with a logged reason rather than spawning
 - [ ] stopping a stream kills its process and frees the slot
 
 **Verify:** `npx vitest run test/streaming.test.ts && npx tsc --noEmit`
@@ -994,6 +999,10 @@ export class StreamingDelegate {
 
   constructor(private readonly options: DelegateOptions) {}
 
+  /**
+   * Sessions belonging to THIS camera. The concurrency cap is deliberately not
+   * measured from here — see maxStreams.
+   */
   get activeCount(): number {
     return this.sessions.size
   }
@@ -1026,7 +1035,12 @@ export class StreamingDelegate {
 
   startSession(sessionId: string, request: { width: number, height: number, fps: number, bitrate: number },
     rtp: { address: string, videoPort: number, videoSsrc: number, videoKey: Buffer }): boolean {
-    if (this.sessions.size >= this.maxStreams) {
+    // HOST-WIDE, not per-camera. Each camera has its own delegate, so counting
+    // this.sessions here would give five cameras five independent caps — up to
+    // 30 concurrent transcodes on hardware, or 10 on the software path at
+    // ~2.5 cores each, which would bury a 12-thread host. FfmpegProcess.activeCount
+    // is a process-wide counter for exactly this reason.
+    if (FfmpegProcess.activeCount >= this.maxStreams) {
       this.options.log.warn(`Refusing a stream for "${this.options.label}": already running ${this.sessions.size} of a maximum ${this.maxStreams}. Raise maxStreams only if the host can take it.`)
       return false
     }
