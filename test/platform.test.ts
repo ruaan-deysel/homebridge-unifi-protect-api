@@ -17,6 +17,14 @@ function frames(file: string): unknown[] {
   return (JSON.parse(readFileSync(`test/fixtures/events/${file}.json`, 'utf8')) as { payload: unknown }[]).map(f => f.payload)
 }
 
+/**
+ * `deviceUpdate` frames, unlike `protectEvent` frames, are not wrapped in a
+ * `payload` envelope — read verbatim as captured off the `devices` channel.
+ */
+function deviceUpdates(file: string): { type: string, item: Record<string, unknown> }[] {
+  return JSON.parse(readFileSync(`test/fixtures/events/${file}.json`, 'utf8'))
+}
+
 class FakePlatformAccessory extends FakeAccessory {
   context: Record<string, unknown> = {}
   constructor(public displayName: string, public UUID: string) {
@@ -545,6 +553,7 @@ describe('uniFiProtectPlatform', () => {
 
   const DOORBELL = camera('Doorbell').id as string
   const DRIVEWAY = camera('Driveway').id as string
+  const GARAGE = camera('Garage').id as string
 
   /** Discovers the five real cameras and hands back the wired platform. */
   async function withCameras(devices: unknown[] = cameras) {
@@ -798,16 +807,53 @@ describe('uniFiProtectPlatform', () => {
   // The other half of Task 5: a change made in the Protect app, not Home.app,
   // must still reach the switch. Assert the characteristic's actual value, not
   // merely that the handler ran without throwing.
-  it('updates the LED switch from a deviceUpdate frame changing ledSettings', async () => {
+  //
+  // Fix round 1: this test previously used a synthetic frame. Toggling a real
+  // camera's LED while subscribed to the `devices` channel showed the console
+  // sends only three keys — `id`, `modelKey`, `ledSettings` — no
+  // `smartDetectSettings`, `featureFlags`, `name`, `mac` or `state`. A frame
+  // with those keys is captured verbatim in
+  // `test/fixtures/events/device-update-led.json` (Garage's real id). The full
+  // `cameraSchema` rejects it outright; only a schema requiring `id` and
+  // `modelKey` and leaving everything else optional can parse it.
+  it('updates the LED switch from a real deviceUpdate frame changing ledSettings', async () => {
     const { platform, bus } = await withCameras()
-    const doorbell = platform.accessories.get(`uuid-${DOORBELL}`) as unknown as FakeAccessory
-    const on = doorbell.getServiceById(S.Switch, 'led')!.getCharacteristic(C.On)
-    // Doorbell's fixture ships ledSettings.isEnabled: false.
+    const garage = platform.accessories.get(`uuid-${GARAGE}`) as unknown as FakeAccessory
+    const on = garage.getServiceById(S.Switch, 'led')!.getCharacteristic(C.On)
+    // Garage's fixture ships ledSettings.isEnabled: false.
     expect(on.value).toBe(false)
 
-    bus.emit('deviceUpdate', { type: 'update', item: { id: DOORBELL, modelKey: 'camera', ledSettings: { isEnabled: true, welcomeLed: true, floodLed: true } } })
-
+    const [ledOn, ledOff] = deviceUpdates('device-update-led')
+    bus.emit('deviceUpdate', ledOn)
     expect(on.value).toBe(true)
+
+    bus.emit('deviceUpdate', ledOff)
+    expect(on.value).toBe(false)
+  })
+
+  // The worst bug class in this repo: a partial nested delta must not read as
+  // "everything else is now empty". `applyDeviceUpdate`'s merge is shallow
+  // (`Object.assign`), so an update carrying a `smartDetectSettings` with only
+  // `objectTypes` and no `audioTypes` would replace the cached full object
+  // wholesale — exactly the shape `isUnderstood()` exists to floor.
+  //
+  // In practice the generated `smartDetectSettingsSchema` requires BOTH fields
+  // whenever the key is present at all, so this frame is rejected as malformed
+  // before the merge ever runs — a stronger guarantee than the floor catching
+  // it after the fact. Either way, no service is removed; that is the property
+  // this test pins.
+  it('removes no service when a partial nested smartDetectSettings delta arrives', async () => {
+    const { platform, bus } = await withCameras()
+    const doorbell = platform.accessories.get(`uuid-${DOORBELL}`) as unknown as FakeAccessory
+    const before = [...doorbell.services]
+    expect(before.map(s => s.subtype).filter(Boolean)).toContain('detect-vehicle')
+
+    // Real shape: only the changed field, no audioTypes alongside it.
+    bus.emit('deviceUpdate', { type: 'update', item: { id: DOORBELL, modelKey: 'camera', smartDetectSettings: { objectTypes: ['person'] } } })
+
+    expect(doorbell.services).toEqual(before)
+    // Rejected upstream by the schema, not silently accepted and floored late.
+    expect(JSON.stringify(log.debug.mock.calls)).toContain('malformed')
   })
 
   // The wire payload is what real hardware actually receives — a test that only
