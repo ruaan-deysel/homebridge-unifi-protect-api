@@ -43,9 +43,42 @@ describe('parseConfig', () => {
     expect(result.success).toBe(true)
     expect(result.success && result.data.defaults).toEqual({
       exposeNewDevices: true,
-      quality: 'high',
+      // 'auto', not a pinned substream: the right one depends on what HomeKit
+      // asks for, and a 2688x1512 transcode for a phone thumbnail is 27x the CPU.
+      quality: 'auto',
       hksv: false,
     })
+  })
+
+  it('accepts a per-camera quality override', () => {
+    const parsed = parseConfig({ ...minimal, devices: { cam1: { quality: 'high' } } })
+    expect(parsed.success).toBe(true)
+  })
+
+  // Written out explicitly by the settings UI, which saves the default it read
+  // rather than omitting it. Zod does NOT re-validate a `.default()` value, so
+  // dropping 'auto' from the enum would leave every other test green while
+  // rejecting the config of anyone who has ever opened the settings page.
+  it('accepts an explicit auto quality, per camera and as the global default', () => {
+    expect(parseConfig({ ...minimal, devices: { cam1: { quality: 'auto' } } }).success).toBe(true)
+    const parsed = parseConfig({ ...minimal, defaults: { quality: 'auto' } })
+    expect(parsed.success && settingsFor(parsed.data, 'cam1').quality).toBe('auto')
+  })
+
+  it('rejects a nonsense quality', () => {
+    const parsed = parseConfig({ ...minimal, devices: { cam1: { quality: 'ultra' } } })
+    expect(parsed.success).toBe(false)
+  })
+
+  it('accepts the global streaming settings and rejects an out-of-range stream cap', () => {
+    const parsed = parseConfig({ ...minimal, maxStreams: 4, ffmpegPath: '/opt/ffmpeg' })
+    expect(parsed.success && parsed.data.maxStreams).toBe(4)
+    expect(parsed.success && parsed.data.ffmpegPath).toBe('/opt/ffmpeg')
+    // A cap of zero would advertise cameras that can never stream; 100 would
+    // let HomeKit ask for 100 concurrent HEVC transcodes.
+    expect(parseConfig({ ...minimal, maxStreams: 0 }).success).toBe(false)
+    expect(parseConfig({ ...minimal, maxStreams: 100 }).success).toBe(false)
+    expect(parseConfig({ ...minimal, maxStreams: 2.5 }).success).toBe(false)
   })
 })
 
@@ -73,13 +106,29 @@ describe('settingsFor', () => {
     const strict = parseConfig({ ...minimal, defaults: { exposeNewDevices: false } })
     expect(strict.success && settingsFor(strict.data, 'unseen')).toMatchObject({
       expose: false,
-      quality: 'high',
+      quality: 'auto',
       hksv: false,
     })
   })
 
   it('leaves hksv off by default — the 50GB iCloud plan supports only one camera', () => {
     expect(settingsFor(data, 'unseen').hksv).toBe(false)
+  })
+
+  // Recording audio is legally more restricted than video in many places, and
+  // an outdoor camera hears passers-by who have not consented. It must never
+  // become true because a camera simply exists in the config.
+  it('defaults audio off for a camera that does not ask for it', () => {
+    const parsed = parseConfig({ ...minimal, devices: { cam1: {} } })
+    expect(parsed.success && settingsFor(parsed.data, 'cam1').audio).toBe(false)
+    expect(settingsFor(data, 'unseen').audio).toBe(false)
+  })
+
+  it('honours a per-camera audio opt-in', () => {
+    const parsed = parseConfig({ ...minimal, devices: { cam1: { audio: true } } })
+    expect(parsed.success && settingsFor(parsed.data, 'cam1').audio).toBe(true)
+    // ...and only for that camera.
+    expect(parsed.success && settingsFor(parsed.data, 'cam2').audio).toBe(false)
   })
 })
 

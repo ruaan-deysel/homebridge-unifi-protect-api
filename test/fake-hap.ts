@@ -14,6 +14,8 @@ export const S = {
   CarbonMonoxideSensor: { name: 'CarbonMonoxideSensor' },
   Doorbell: { name: 'Doorbell' },
   Switch: { name: 'Switch' },
+  Microphone: { name: 'Microphone' },
+  CameraRTPStreamManagement: { name: 'CameraRTPStreamManagement' },
 }
 
 export const C = {
@@ -77,8 +79,46 @@ export class FakeService {
   }
 }
 
+/**
+ * Stands in for `hap.CameraController`. Real HAP's `configureController` calls
+ * `constructServices()` and adds everything it returns to the accessory, so the
+ * services a controller brings with it are modelled here rather than assumed
+ * away: the RTP stream managements carry a numeric subtype (`"0"`, `"1"`, ...),
+ * which is what `camera.ts`'s removal loop has to leave alone.
+ */
+export class FakeCameraController {
+  constructor(public readonly options: Record<string, unknown>) {}
+
+  constructServices(): FakeService[] {
+    const count = (this.options.cameraStreamCount as number | undefined) ?? 1
+    const services = Array.from({ length: count }, (_, i) => new FakeService(S.CameraRTPStreamManagement, undefined, String(i)))
+    // HAP adds a Microphone service only when audio is actually advertised.
+    if ((this.options.streamingOptions as { audio?: unknown } | undefined)?.audio)
+      services.push(new FakeService(S.Microphone, 'Microphone'))
+    return services
+  }
+}
+
+/**
+ * The mistake this fake exists to catch: a `DoorbellController` brings its OWN
+ * Doorbell service, which lands beside the subtyped `ring` one the event
+ * pipeline already drives and makes the doorbell appear twice in Home.app.
+ */
+export class FakeDoorbellController extends FakeCameraController {
+  constructServices(): FakeService[] {
+    return [...super.constructServices(), new FakeService(S.Doorbell, 'Doorbell')]
+  }
+}
+
 export class FakeAccessory {
   services: FakeService[] = []
+  controllers: FakeCameraController[] = []
+
+  configureController(controller: FakeCameraController) {
+    this.controllers.push(controller)
+    this.services.push(...controller.constructServices())
+  }
+
   getService(type: object) {
     return this.services.find(s => s.type === type && !s.subtype)
   }
@@ -104,10 +144,15 @@ export class FakeHapStatusError extends Error {
   }
 }
 
-/** The `api.hap` shape `camera.ts` reads. */
+/** The `api.hap` shape `camera.ts` and `platform.ts` read. */
 export const hap = {
   Service: S,
   Characteristic: C,
   HapStatusError: FakeHapStatusError,
   HAPStatus: { SERVICE_COMMUNICATION_FAILURE: -70402 },
+  CameraController: FakeCameraController,
+  DoorbellController: FakeDoorbellController,
+  SRTPCryptoSuites: { AES_CM_128_HMAC_SHA1_80: 0, AES_CM_256_HMAC_SHA1_80: 1, NONE: 2 },
+  H264Profile: { BASELINE: 0, MAIN: 1, HIGH: 2 },
+  H264Level: { LEVEL3_1: 0, LEVEL3_2: 1, LEVEL4_0: 2 },
 }

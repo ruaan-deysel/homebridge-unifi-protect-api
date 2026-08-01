@@ -1,6 +1,9 @@
 // Pure configuration transforms. No DOM, no network — unit tested directly.
 
-export const DEFAULTS = { exposeNewDevices: true, quality: 'high', hksv: false }
+// Must track `defaultsSchema` in src/config.ts: `ensureConfig` writes these into
+// config.json on every UI save, so a stale value here silently overrides the
+// plugin's own default for every user who touches the settings page.
+export const DEFAULTS = { exposeNewDevices: true, quality: 'auto', hksv: false }
 
 /**
  * Normalises the platform block WITHOUT dropping anything it does not know

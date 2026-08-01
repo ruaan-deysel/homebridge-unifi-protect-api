@@ -1,16 +1,19 @@
-import type { API, DynamicPlatformPlugin, Logging, PlatformAccessory, PlatformConfig } from 'homebridge'
+import type { API, CameraStreamingOptions, DynamicPlatformPlugin, HAP, Logging, PlatformAccessory, PlatformConfig } from 'homebridge'
 import type { z } from 'zod'
 import type { CameraCallbacks } from './accessories/camera.js'
 import type { SensorChange } from './accessories/tracker.js'
 import type { ProtectPluginConfig } from './config.js'
+import type { FfmpegCapabilities } from './protect/ffmpeg.js'
 import { applyChange, buildCameraServices } from './accessories/camera.js'
 import { routeEvent } from './accessories/router.js'
+import { StreamingDelegate } from './accessories/streaming.js'
 import { EventTracker } from './accessories/tracker.js'
 import { parseConfig, settingsFor, storeConsoleCert } from './config.js'
 import { certMismatchMessage, fetchConsoleCert, fingerprintOf } from './protect/cert.js'
 import { ProtectClient } from './protect/client.js'
 import { errorMessage, ProtectAuthError } from './protect/errors.js'
 import { ProtectEvents } from './protect/events.js'
+import { probeFfmpeg } from './protect/ffmpeg.js'
 import {
   cameraPartialWithReferenceSchema,
   chimePartialWithReferenceSchema,
@@ -18,6 +21,7 @@ import {
   sensorPartialWithReferenceSchema,
   viewerPartialWithReferenceSchema,
 } from './protect/schemas.js'
+import { StreamUrls } from './protect/stream.js'
 import { PLATFORM_NAME, PLUGIN_NAME } from './settings.js'
 
 /** The fields reconciliation needs. `name` is nullable on the wire. */
@@ -73,6 +77,27 @@ function labelFor(device: DiscoveredDevice): string {
   return device.name?.trim() || `Protect ${device.modelKey} ${device.id}`
 }
 
+/**
+ * What the camera advertises to HomeKit. The resolutions are the three Protect
+ * substreams as measured on the live console (2688x1512, 1280x720, 640x360) and
+ * nothing else, deliberately: the transcode does not scale, so advertising a
+ * size no substream produces would promise a frame this plugin cannot send, and
+ * `selectQuality` maps each of these straight back to the substream that serves it.
+ */
+function videoStreamingOptions(hap: HAP): CameraStreamingOptions['video'] {
+  return {
+    codec: {
+      profiles: [hap.H264Profile.BASELINE, hap.H264Profile.MAIN, hap.H264Profile.HIGH],
+      levels: [hap.H264Level.LEVEL3_1, hap.H264Level.LEVEL3_2, hap.H264Level.LEVEL4_0],
+    },
+    resolutions: [
+      [2688, 1512, 30],
+      [1280, 720, 30],
+      [640, 360, 30],
+    ],
+  }
+}
+
 export class UniFiProtectPlatform implements DynamicPlatformPlugin {
   readonly accessories = new Map<string, PlatformAccessory>()
   client!: ProtectClient
@@ -87,6 +112,22 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
   private certMismatch = false
   /** Injected in tests, so the suite never opens a TLS socket. */
   readConsoleCert = fetchConsoleCert
+  /** Injected in tests, so the suite never execs a real ffmpeg. */
+  probeFfmpeg = probeFfmpeg
+  /**
+   * Undefined until the probe has run, and stays undefined if it failed — the
+   * one flag that says whether live view is available at all.
+   */
+  private caps?: FfmpegCapabilities
+  private urls?: StreamUrls
+  /** Latched: the probe runs once for the platform, not per discovery or camera. */
+  private probed = false
+  /**
+   * Accessory UUID -> its streaming delegate. Every one must be stopped on
+   * shutdown: a stranded ffmpeg holds a 4 MP HEVC decode open indefinitely.
+   * Also the guard against a second `configureController` on a later discovery.
+   */
+  private readonly delegates = new Map<string, StreamingDelegate>()
   private eventsStarted = false
   private busWired = false
   private inFlight?: Promise<void>
@@ -202,6 +243,10 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
       // the bus's own `stopped` and brings the sockets back up.
       this.stopped = true
       clearTimeout(this.retryTimer)
+      // Before anything else: an ffmpeg left running holds a 4 MP HEVC decode
+      // open for as long as the host is up, and nothing else will ever kill it.
+      for (const delegate of this.delegates.values())
+        delegate.stopAll()
       this.events?.stop()
       // Every active event holds a failsafe timer. Leaked, they keep the Node
       // process alive and Homebridge never finishes shutting down.
@@ -259,6 +304,14 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
     if (!this.config || this.authFailed || this.stopped)
       return
 
+    // Exactly once for the whole platform. Per camera it would exec ffmpeg twice
+    // for every camera on every discovery, and the answer is a property of the
+    // host, not of any one camera.
+    if (!this.probed) {
+      this.probed = true
+      await this.prepareStreaming()
+    }
+
     // Before anything that carries the API key. A mismatch stops here, so the
     // credential is never offered to a console that is not the trusted one.
     if (!await this.ensureTrust())
@@ -301,7 +354,7 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
 
     if (!retryDriven)
       this.retryDelayMs = RETRY_MIN_MS
-    this.reconcile(devices)
+    await this.reconcile(devices)
     this.startEvents()
   }
 
@@ -417,7 +470,84 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
     return { ...raw, ledSettings } as unknown as DiscoveredDevice
   }
 
-  private reconcile(devices: DiscoveredDevice[]): void {
+  /**
+   * Finds the ffmpeg live view will use and prepares the shared stream-URL
+   * cache. NEVER rejects and never throws: sensors, switches and the doorbell
+   * are useful without live view, so a host with no usable ffmpeg must still
+   * run everything else rather than failing the platform.
+   */
+  private async prepareStreaming(): Promise<void> {
+    try {
+      this.caps = await this.probeFfmpeg({ log: this.log, configuredPath: this.config!.ffmpegPath })
+      this.urls = new StreamUrls(this.client)
+    }
+    catch (error) {
+      // errorMessage, and the STRING: Homebridge's log.error(err) runs
+      // util.inspect over the object, which has leaked the API key out of an
+      // error's request context in this repo before.
+      this.log.warn(`No usable ffmpeg, so live view and snapshots are disabled. Sensors, switches and the doorbell keep working. ${errorMessage(error)}`)
+    }
+  }
+
+  /**
+   * Gives a camera accessory its `CameraController`, once.
+   *
+   * A `CameraController` and NOT a `DoorbellController`: sub-project 2a already
+   * builds the subtyped `ring` Doorbell service and drives it off the event
+   * pipeline, and a controller-owned second one makes the doorbell appear twice
+   * in Home.app.
+   */
+  private async attachStreaming(accessory: PlatformAccessory, deviceId: string): Promise<void> {
+    // No usable ffmpeg means no live view for anyone; already-wired means a
+    // later discovery, and configuring a second controller would duplicate
+    // every stream management service on the accessory.
+    // `stopped` too: shutdown has already stopped every delegate it knew about,
+    // so one attached after it would never be stopped by anything.
+    if (!this.caps || this.stopped || this.delegates.has(accessory.UUID))
+      return
+
+    const label = accessory.displayName
+    const delegate = new StreamingDelegate({
+      deviceId,
+      label,
+      log: this.log,
+      client: this.client,
+      urls: this.urls!,
+      caps: this.caps,
+      maxStreams: this.config!.maxStreams,
+      // Read on every stream request, never snapshot at construction: a quality
+      // or audio change in the settings must take effect without a restart.
+      settings: () => {
+        const settings = settingsFor(this.config!, deviceId)
+        return { quality: settings.quality, audio: settings.audio }
+      },
+    })
+    // Claimed before the await below, so a discovery arriving mid-probe cannot
+    // build a second controller for the same accessory.
+    this.delegates.set(accessory.UUID, delegate)
+
+    try {
+      accessory.configureController(new this.api.hap.CameraController({
+        cameraStreamCount: delegate.maxStreams,
+        delegate,
+        streamingOptions: {
+          supportedCryptoSuites: [this.api.hap.SRTPCryptoSuites.AES_CM_128_HMAC_SHA1_80],
+          video: videoStreamingOptions(this.api.hap),
+          // The delegate's own, never hand-built here: it advertises a codec
+          // only when the camera opted in AND this ffmpeg can actually encode
+          // it, so the advertisement cannot drift from the arguments sent.
+          audio: await delegate.audioStreamingOptions(),
+        },
+      }))
+    }
+    catch (error) {
+      this.delegates.delete(accessory.UUID)
+      // errorMessage, and the STRING — see prepareStreaming.
+      this.log.warn(`Could not enable live view for "${label}": ${errorMessage(error)}`)
+    }
+  }
+
+  private async reconcile(devices: DiscoveredDevice[]): Promise<void> {
     const config = this.config!
     const wanted = new Map<string, DiscoveredDevice>()
     // Every device the console actually reported, before the expose filter.
@@ -474,8 +604,12 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
       // in Protect only reaches HomeKit if the surviving accessory is re-diffed.
       // `buildCameraServices` is idempotent and applies its own floor against a
       // degraded payload, so it removes nothing it did not understand.
-      if (device.modelKey === 'camera')
+      if (device.modelKey === 'camera') {
         buildCameraServices(this.api, this.log, accessory, device as unknown as Record<string, unknown>, this.cameraCallbacks)
+        // Cameras only: a light or a chime has nothing to stream, and a
+        // CameraController on one would offer HomeKit a live view of nothing.
+        await this.attachStreaming(accessory, device.id)
+      }
     }
 
     // Belt to the client's braces. An inventory that is empty while the cache is
