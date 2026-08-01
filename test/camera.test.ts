@@ -80,8 +80,8 @@ describe('buildCameraServices', () => {
     expect(accessory.getServiceById(S.MotionSensor, 'detect-person')).toBeDefined()
   })
 
-  it('is idempotent — a second build adds nothing and stacks no handlers', () => {
-    const { accessory, build } = setup(byName('Doorbell'))
+  it('is idempotent — a second build adds nothing and leaves one working LED handler', async () => {
+    const { accessory, build, setLed } = setup(byName('Doorbell'))
     const before = accessory.services.length
     const led = accessory.getServiceById(S.Switch, 'led')!
 
@@ -90,8 +90,11 @@ describe('buildCameraServices', () => {
 
     expect(accessory.services.length).toBe(before)
     expect(accessory.getServiceById(S.Switch, 'led')).toBe(led)
-    // Re-registering onSet on every discovery would fire the write N times.
-    expect(led.getCharacteristic(C.On).listenerCount('set')).toBe(1)
+    // hap-nodejs holds a single `set` handler, so a rebuild can only ever
+    // replace it — what must not break is that it still works and still
+    // writes exactly once.
+    await led.getCharacteristic(C.On).setHandler!(true)
+    expect(setLed).toHaveBeenCalledTimes(1)
   })
 
   it('removes exactly the disabled type and leaves every other service intact', () => {
@@ -177,16 +180,22 @@ describe('buildCameraServices', () => {
     expect(subtypesOf(accessory)).toEqual(['motion'])
   })
 
-  it('sets ConfiguredName once at creation and never overwrites a user rename', () => {
+  // hap-nodejs 2.1.9 declares ConfiguredName on none of the service types this
+  // module creates, so writing it logged a "[HAP] ... Adding anyway." warning
+  // per service — ~23 lines on this console's first boot. The user's rename
+  // survives because the name is written once, at creation, and never again.
+  it('names a service once at creation, never rewrites it, and never writes ConfiguredName', () => {
     const { accessory, build } = setup(byName('Garage'))
     const motion = accessory.getServiceById(S.MotionSensor, 'motion')!
-    expect(motion.valueOf_(C.ConfiguredName)).toBe('Garage Motion')
+    expect(motion.displayName).toBe('Garage Motion')
 
-    // What the user typed in Home.app.
-    motion.setCharacteristic(C.ConfiguredName, 'Back Door Movement')
+    // A later discovery, including one where the console renamed the device.
     build()
+    build({ ...byName('Garage'), name: 'Back Door' })
 
-    expect(motion.valueOf_(C.ConfiguredName)).toBe('Back Door Movement')
+    expect(accessory.getServiceById(S.MotionSensor, 'motion')).toBe(motion)
+    expect(motion.displayName).toBe('Garage Motion')
+    expect(motion.characteristics.has(C.ConfiguredName)).toBe(false)
   })
 
   it('names services from the device but falls back when the name is unusable', () => {
@@ -201,7 +210,7 @@ describe('buildCameraServices', () => {
     // ledSettings.isEnabled is true on Backyard, so HomeKit starts on.
     expect(on.value).toBe(true)
 
-    const fire = (value: unknown) => Promise.all(on.listeners('set').map(h => h(value)))
+    const fire = (value: unknown) => Promise.resolve(on.setHandler!(value))
     await fire(false)
     expect(setLed).toHaveBeenCalledWith(byName('Backyard').id, false)
 

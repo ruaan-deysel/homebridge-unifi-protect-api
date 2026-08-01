@@ -138,12 +138,9 @@ describe('routeEvent', () => {
     expect(routed?.phase).toBe('start')
   })
 
-  it('never lets event ids be mistaken for a shape check: ring ids are 24-hex device-id-shaped, motion/smartDetect ids are UUIDs', () => {
-    const ringFrame = load('ring').find((f: { payload: { type: string } }) => f.payload.type === 'add')
-    const motionFrame = load('motion').find((f: { payload: { type: string } }) => f.payload.type === 'add')
-    expect(ringFrame.payload.item.id).toHaveLength(24)
-    expect(motionFrame.payload.item.id).toMatch(/^[0-9a-f-]{36}$/)
-    expect(routeEvent(ringFrame.payload)?.eventId).toBe(ringFrame.payload.item.id)
-    expect(routeEvent(motionFrame.payload)?.eventId).toBe(motionFrame.payload.item.id)
-  })
+  // Deleted in the final review (M5): it asserted "ring ids are 24-hex" as
+  // hardware truth, but every committed fixture id is a redaction placeholder
+  // and `fake0event00000000000001` is not hex. It pinned a property of the
+  // redaction scheme, not of production. The real guarantee — nothing here
+  // branches on id shape — is structural.
 })

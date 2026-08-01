@@ -54,6 +54,20 @@ const RETRY_MAX_MS = 300_000
  */
 const CONFIRM_MIN_MS = 60_000
 
+/**
+ * How long a successful LED write's value outranks a REST read of the same
+ * camera. A discovery whose inventory GET was already in flight when the PATCH
+ * landed comes back carrying the pre-write `ledSettings`, and caching that
+ * rebuilds the switch from the stale value and visibly flips it back in
+ * Home.app. Long enough to cover that in-flight read, short enough that a
+ * change made in the Protect app is never ignored for a visible time.
+ *
+ * ponytail: a fixed window, not console-echo tracking. It self-clears, cannot
+ * leak an entry, and does not depend on echo behaviour that cannot be verified
+ * without the hardware in hand. Track the echo only if 10s ever proves short.
+ */
+const LED_WRITE_GRACE_MS = 10_000
+
 function labelFor(device: DiscoveredDevice): string {
   return device.name?.trim() || `Protect ${device.modelKey} ${device.id}`
 }
@@ -121,9 +135,19 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
    * A rejection is handled there — it becomes a HapStatusError so HomeKit puts
    * the switch back rather than showing a state Protect refused.
    */
+  /**
+   * Device id -> the value a recent successful LED write asked for, and the
+   * `performance.now()` reading it was written at. Read by
+   * `applyRecentLedWrite` on the discovery path. `performance.now()`, never
+   * `Date.now()`: an NTP step must not expire or extend the window.
+   */
+  private readonly recentLedWrites = new Map<string, { on: boolean, at: number }>()
+
   private readonly cameraCallbacks: CameraCallbacks = {
     setLed: async (deviceId, on) => {
       await this.client.patchCamera(deviceId, { ledSettings: { isEnabled: on } })
+      // Covers the discovery path — see applyRecentLedWrite.
+      this.recentLedWrites.set(deviceId, { on, at: performance.now() })
       // Optimistic cache update. Without this, an unrelated deviceUpdate frame
       // landing between this write and the console echoing the change back
       // rebuilds the switch from the stale cached ledSettings and flips it
@@ -293,6 +317,24 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
     return [...cameras, ...lights, ...sensors, ...chimes, ...viewers] as DiscoveredDevice[]
   }
 
+  /**
+   * Returns the device with a still-fresh LED write applied over whatever the
+   * console reported. A copy, never a mutation — the caller's object comes
+   * straight out of the client's response.
+   */
+  private applyRecentLedWrite(device: DiscoveredDevice): DiscoveredDevice {
+    const recent = this.recentLedWrites.get(device.id)
+    if (!recent)
+      return device
+    if (performance.now() - recent.at >= LED_WRITE_GRACE_MS) {
+      this.recentLedWrites.delete(device.id)
+      return device
+    }
+    const raw = device as unknown as Record<string, unknown>
+    const ledSettings = { ...(raw.ledSettings as Record<string, unknown> | undefined), isEnabled: recent.on }
+    return { ...raw, ledSettings } as unknown as DiscoveredDevice
+  }
+
   private reconcile(devices: DiscoveredDevice[]): void {
     const config = this.config!
     const wanted = new Map<string, DiscoveredDevice>()
@@ -318,7 +360,11 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
       wanted.set(uuid, device)
     }
 
-    for (const [uuid, device] of wanted) {
+    for (const [uuid, reportedDevice] of wanted) {
+      // Before anything caches or re-diffs it: a REST read that raced a LED
+      // write carries the pre-write ledSettings, and `wireLed` would push that
+      // stale value straight back onto the switch.
+      const device = this.applyRecentLedWrite(reportedDevice)
       const label = labelFor(device)
       let accessory = this.accessories.get(uuid)
       if (accessory) {

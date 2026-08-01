@@ -48,7 +48,7 @@
     {
       "id": 5,
       "subject": "Task 5: Status LED switch",
-      "status": "pending",
+      "status": "completed",
       "description": "**Goal:** A Switch per camera that reads ledSettings.isEnabled and writes it back to Protect.\n\n**Files:**\n- Modify: `src/accessories/camera.ts`, `src/platform.ts`\n- Test: `test/camera.test.ts` (extend)\n\n**Acceptance Criteria:**\n- [ ] cameras with hasLedStatus get an led Switch and Sidegate does not\n- [ ] the switch reflects ledSettings.isEnabled\n- [ ] a deviceUpdate frame changing the LED updates the switch\n- [ ] setting the switch calls patchCamera with the exact body\n- [ ] a failed write reverts the characteristic and logs a warning\n\n**Verify:** npx vitest run test/camera.test.ts && npm run build\n\nFull step-by-step code is in `docs/superpowers/plans/2026-07-31-camera-sensors.md`.\n\n```json:metadata\n{\"files\":[],\"verifyCommand\":\"npx vitest run test/camera.test.ts && npm run build\",\"acceptanceCriteria\":[\"cameras with hasLedStatus get an led Switch and Sidegate does not\",\"the switch reflects ledSettings.isEnabled\",\"a deviceUpdate frame changing the LED updates the switch\",\"setting the switch calls patchCamera with the exact body\",\"a failed write reverts the characteristic and logs a warning\"],\"modelTier\":\"standard\"}\n```",
       "blockedBy": [
         3,
@@ -66,5 +66,5 @@
       ]
     }
   ],
-  "lastUpdated": "2026-08-01T16:27:00+10:00"
+  "lastUpdated": "2026-08-01T17:13:00+10:00"
 }
