@@ -25,8 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   value — and duplicates are ignored.
 - Live streaming video quality is automatically selected based on HomeKit's resolution
   request: 640×360 and below uses the low substream, 1280×720 uses medium, and anything
-  larger uses high. Per-camera quality override allows manual selection or disables
-  automatic scaling.
+  larger uses high. Per-camera quality override allows pinning a substream instead.
 - Live view transcoding now probes ffmpeg at startup and prefers Intel Quick Sync (QSV) or
   VAAPI hardware encoding over the bundled software encoder, since every Protect stream is
   HEVC and HomeKit only accepts H.264. Hardware encoding cuts CPU cost roughly 27× on
