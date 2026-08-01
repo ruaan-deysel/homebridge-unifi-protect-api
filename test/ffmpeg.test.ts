@@ -30,6 +30,14 @@ describe('chooseEncoder', () => {
     expect(chooseEncoder('qsv\n', ' V..... hevc_qsv HEVC (Intel Quick Sync)\n V....D libx264 libx264 H.264\n'))
       .toEqual({ encoder: 'libx264' })
   })
+
+  // Synthetic: none of the real fixtures contain an encoder name that is a
+  // *prefix* of a longer one, so the tests above pass even without the `\b`
+  // boundary in hasEncoder. This one exercises that boundary directly.
+  it('does not mistake h264_qsv_backup for h264_qsv (synthetic)', () => {
+    expect(chooseEncoder('qsv\n', ' V..... h264_qsv_backup Some experimental variant\n V....D libx264 libx264 H.264\n'))
+      .toEqual({ encoder: 'libx264' })
+  })
 })
 
 describe('probeFfmpeg', () => {
@@ -80,7 +88,8 @@ const URL = `rtsps://192.0.2.1:7441/live?token=${SECRET}`
 function fakeSpawn() {
   const proc = Object.assign(new EventEmitter(), {
     stderr: new EventEmitter(),
-    kill: vi.fn(),
+    // Real child.kill() returns true once the signal was actually delivered.
+    kill: vi.fn(() => true),
     killed: false,
   })
   const spawn: SpawnFn = vi.fn(() => proc as unknown as ReturnType<SpawnFn>)
@@ -115,9 +124,33 @@ describe('ffmpegProcess', () => {
     proc.stderr.emit('data', Buffer.from(`Error opening input ${URL}\n`))
     proc.emit('close', 1)
 
+    // Positive assertion first: the vacuous-pass hole is that "no secret
+    // present" is trivially true of an empty call list. Prove the warning
+    // actually fired before proving it is clean.
+    expect(log.warn).toHaveBeenCalledTimes(1)
+    expect(log.warn.mock.calls[0]?.[0]).toContain('ffmpeg exited with code 1')
+
     const logged = inspect(log.warn.mock.calls, { depth: 10 })
     expect(logged).not.toContain(SECRET)
     expect(log.warn.mock.calls.flat().every(a => typeof a === 'string')).toBe(true)
+  })
+
+  it('redacts a chunk before truncation, so a scheme cut off by the 4000-char bound cannot leak a token', () => {
+    log.warn.mockClear()
+    const { proc, spawn } = fakeSpawn()
+    const p = new FfmpegProcess({ path: '/usr/bin/ffmpeg', args: [], log, spawn })
+    p.start()
+
+    // Pad past the buffer's 4000-char bound so a naive "append then slice"
+    // would cut the `rtsps://` scheme off the URL, leaving redactStreamUrls
+    // (which only matches an intact scheme) nothing to match.
+    const padding = 'x'.repeat(4000)
+    proc.stderr.emit('data', Buffer.from(`${padding}${URL}\n`))
+    proc.emit('close', 1)
+
+    expect(log.warn).toHaveBeenCalledTimes(1)
+    const logged = inspect(log.warn.mock.calls, { depth: 10 })
+    expect(logged).not.toContain(SECRET)
   })
 
   it('tracks and releases an active slot', () => {
@@ -136,6 +169,37 @@ describe('ffmpegProcess', () => {
     p.stop()
     p.stop()
     expect(proc.kill).toHaveBeenCalledTimes(1)
+  })
+
+  it('start() refuses to spawn a second child on the same instance', () => {
+    const { spawn } = fakeSpawn()
+    const p = new FfmpegProcess({ path: '/usr/bin/ffmpeg', args: [], log, spawn })
+    p.start()
+    expect(() => p.start()).toThrow(/start\(\) called twice/)
+    expect(spawn).toHaveBeenCalledTimes(1)
+  })
+
+  it('stop() retries when the kill signal was not actually delivered, and stops retrying once it is', () => {
+    const { proc, spawn } = fakeSpawn()
+    proc.kill.mockReturnValueOnce(false) // first delivery fails
+    const p = new FfmpegProcess({ path: '/usr/bin/ffmpeg', args: [], log, spawn })
+    p.start()
+    p.stop() // fails: does not latch `killed`
+    p.stop() // retries, succeeds (fakeSpawn's default kill() returns true)
+    p.stop() // already killed: no further attempt
+    expect(proc.kill).toHaveBeenCalledTimes(2)
+  })
+
+  it('calls onExit exactly once when a failed spawn emits error then close', () => {
+    const before = FfmpegProcess.activeCount
+    const onExit = vi.fn()
+    const { proc, spawn } = fakeSpawn()
+    const p = new FfmpegProcess({ path: '/usr/bin/ffmpeg', args: [], log, spawn, onExit })
+    p.start()
+    proc.emit('error', new Error('ENOENT'))
+    proc.emit('close', null)
+    expect(onExit).toHaveBeenCalledTimes(1)
+    expect(FfmpegProcess.activeCount).toBe(before)
   })
 
   it('activeCount reflects running processes and returns to zero after teardown', () => {
