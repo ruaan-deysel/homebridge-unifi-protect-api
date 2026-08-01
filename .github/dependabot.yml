@@ -1,0 +1,58 @@
+version: 2
+
+updates:
+  # Runtime dependencies reach every user's Homebridge install, so they are
+  # raised individually and reviewed on their own merits. Dev dependencies are
+  # grouped: they never ship, and a dozen separate PRs for tooling is noise.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Australia/Brisbane
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      dev-dependencies:
+        dependency-type: development
+        update-types:
+          - minor
+          - patch
+      # Patch bumps of runtime deps are grouped too — they are the least likely
+      # to break and the most tedious to review one at a time. Minor and major
+      # runtime updates stay ungrouped so each gets its own PR.
+      runtime-patches:
+        dependency-type: production
+        update-types:
+          - patch
+    ignore:
+      # Homebridge itself is a peer dependency and its major version defines
+      # which Homebridge releases this plugin supports. Bumping it is a
+      # deliberate compatibility decision, never an automated one.
+      - dependency-name: homebridge
+        update-types:
+          - version-update:semver-major
+
+  # Actions pinned in workflows go stale silently and are a real supply-chain
+  # surface — a compromised action runs with repository credentials.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Australia/Brisbane
+    labels:
+      - dependencies
+      - github-actions
+    commit-message:
+      prefix: chore
+    groups:
+      github-actions:
+        patterns:
+          - "*"
