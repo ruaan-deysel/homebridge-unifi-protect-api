@@ -20,7 +20,7 @@
 <div id="devices"></div>
 
 <script type="module">
-  import { ensureConfig, renderDeviceHeader, setDeviceSetting } from './config-ops.js'
+  import { ensureConfig, renderDeviceHeader, renderQualitySelect, setDeviceSetting } from './config-ops.js'
 
   const statusEl = document.getElementById('status')
   const trustEl = document.getElementById('trust')
@@ -88,6 +88,16 @@
       // honour it, so the UI never lets someone flip a setting that will
       // silently do nothing.
       if (device.type === 'camera') {
+        // Live and enabled, unlike hksv/talkback below: both of these genuinely
+        // work now, so a disabled control would be the dishonest one.
+        const { wrap, select } = renderQualitySelect(document, device, settingOf(device.id, 'quality', config.defaults.quality))
+        select.addEventListener('change', async () => {
+          config = setDeviceSetting(config, device.id, 'quality', select.value)
+          await save()
+        })
+        grid.append(wrap)
+        if (device.hasMic)
+          toggle('audio', 'Live view audio', false)
         toggle('hksv', 'HomeKit Secure Video', config.defaults.hksv, true)
         if (device.hasSpeaker)
           toggle('talkback', 'Two-way audio', false, true)

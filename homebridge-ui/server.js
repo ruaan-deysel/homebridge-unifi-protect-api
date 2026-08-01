@@ -173,6 +173,9 @@ export async function discoverRequest(payload = {}, deps) {
     name: device.name,
     type,
     hasSpeaker: device.featureFlags?.hasSpeaker ?? false,
+    // Capability-driven UI: the audio toggle is only offered for a camera that
+    // actually has a microphone.
+    hasMic: device.featureFlags?.hasMic ?? false,
     hasLedStatus: device.featureFlags?.hasLedStatus ?? false,
     hasPackageCamera: device.hasPackageCamera ?? false,
     smartDetectTypes: device.featureFlags?.smartDetectTypes ?? [],

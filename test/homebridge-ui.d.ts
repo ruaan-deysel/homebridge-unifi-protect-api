@@ -43,6 +43,7 @@ declare module '*/homebridge-ui/server.js' {
     name: string
     type: string
     hasSpeaker: boolean
+    hasMic: boolean
     hasLedStatus: boolean
     hasPackageCamera: boolean
     smartDetectTypes: string[]
@@ -99,4 +100,11 @@ declare module '*/homebridge-ui/public/config-ops.js' {
     doc: MinimalDocument,
     device: { name?: string, type?: string },
   ): (MinimalDomElement | string)[]
+
+  export const QUALITY_OPTIONS: [string, string][]
+  export function renderQualitySelect(
+    doc: MinimalDocument,
+    device: { id?: string },
+    value?: string,
+  ): { wrap: MinimalDomElement, select: MinimalDomElement }
 }
