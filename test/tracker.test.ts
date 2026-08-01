@@ -94,7 +94,11 @@ describe('eventTracker', () => {
     const changes: unknown[] = []
     t.onFailsafe = c => changes.push(...c)
     t.apply(ev('e1', ['motion']))
+    // Assert the timer actually exists before stop() — otherwise this test
+    // could pass by never having created one in the first place.
+    expect(vi.getTimerCount()).toBeGreaterThan(0)
     t.stop()
+    expect(vi.getTimerCount()).toBe(0)
     vi.advanceTimersByTime(5000)
     expect(changes).toEqual([])
   })
