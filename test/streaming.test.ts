@@ -1,15 +1,26 @@
 import type { PrepareStreamRequest, PrepareStreamResponse, SourceResponse, StreamingRequest } from 'homebridge'
 import type { ChildProcess } from 'node:child_process'
+import type { StreamArgs } from '../src/accessories/streaming.js'
 import { Buffer } from 'node:buffer'
 import { EventEmitter } from 'node:events'
 import { inspect } from 'node:util'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { buildFfmpegArgs, defaultMaxStreams, StreamingDelegate } from '../src/accessories/streaming.js'
+import { AAC_ELD_ENCODER, buildFfmpegArgs, defaultMaxStreams, StreamingDelegate } from '../src/accessories/streaming.js'
 import { FfmpegProcess } from '../src/protect/ffmpeg.js'
 
 const CAPS_HW = { path: '/usr/bin/ffmpeg', encoder: 'h264_vaapi' as const, hwaccel: 'vaapi' as const }
 const CAPS_SW = { path: '/usr/local/bin/ffmpeg', encoder: 'libx264' as const }
 const URL = 'rtsps://192.0.2.1:7441/live?token=SENTINEL'
+
+/** An `-encoders` listing shaped like the real one, with libfdk_aac present or not. */
+function encoderList(withAacEld: boolean): string {
+  return [
+    ' V..... h264_vaapi           H.264/AVC (VAAPI)',
+    ' V..... libx264              libx264 H.264 / AVC',
+    ' A..... aac                  AAC (Advanced Audio Coding)',
+    withAacEld ? ' A..... libfdk_aac           Fraunhofer FDK AAC' : ' A..... libopus              libopus Opus',
+  ].join('\n')
+}
 
 describe('defaultMaxStreams', () => {
   // Measured 2026-08-01: 20s of 2688x1512 costs 1.79s CPU on VAAPI, 49.1s on
@@ -21,17 +32,15 @@ describe('defaultMaxStreams', () => {
 })
 
 describe('buildFfmpegArgs', () => {
-  const base = {
+  const base: StreamArgs = {
     url: URL,
-    width: 1280,
-    height: 720,
-    fps: 30,
     bitrate: 3000,
-    audio: false,
     address: '192.0.2.9',
-    videoPort: 5000,
-    videoSsrc: 1,
-    videoKey: Buffer.alloc(30),
+    video: { port: 5000, ssrc: 1, key: Buffer.alloc(30), payloadType: 99, localPort: 5001 },
+  }
+  const withAudio: StreamArgs = {
+    ...base,
+    audio: { port: 5002, ssrc: 2, key: Buffer.alloc(30, 7), payloadType: 110, sampleRate: 16, bitrate: 24, localPort: 5003 },
   }
 
   it('uses hardware flags when the probe found hardware', () => {
@@ -47,11 +56,6 @@ describe('buildFfmpegArgs', () => {
     expect(args.join(' ')).toContain('-c:v libx264')
   })
 
-  it('omits audio unless the camera opts in', () => {
-    expect(buildFfmpegArgs(CAPS_HW, base)).toContain('-an')
-    expect(buildFfmpegArgs(CAPS_HW, { ...base, audio: true })).not.toContain('-an')
-  })
-
   it('always reads rtsp over tcp', () => {
     expect(buildFfmpegArgs(CAPS_HW, base).join(' ')).toContain('-rtsp_transport tcp')
   })
@@ -59,6 +63,61 @@ describe('buildFfmpegArgs', () => {
   it('brackets an ipv6 destination', () => {
     const args = buildFfmpegArgs(CAPS_HW, { ...base, address: 'fd00::1' })
     expect(args.at(-1)).toContain('srtp://[fd00::1]:5000')
+  })
+
+  it('uses the payload types homekit asked for, not a hardcoded 99', () => {
+    const args = buildFfmpegArgs(CAPS_HW, {
+      ...withAudio,
+      video: { ...base.video, payloadType: 97 },
+    })
+    expect(args.join(' ')).toContain('-payload_type 97')
+    expect(args.join(' ')).toContain('-payload_type 110')
+    expect(args).not.toContain('99')
+  })
+
+  describe('without audio', () => {
+    const args = buildFfmpegArgs(CAPS_HW, base)
+
+    it('drops the input audio track and emits exactly one output', () => {
+      expect(args).toContain('-an')
+      expect(args.filter(a => a === '-f')).toHaveLength(1)
+      expect(args.filter(a => a.startsWith('srtp://'))).toHaveLength(1)
+      expect(args).not.toContain(AAC_ELD_ENCODER)
+    })
+  })
+
+  describe('with audio', () => {
+    const args = buildFfmpegArgs(CAPS_HW, withAudio)
+    const joined = args.join(' ')
+
+    it('emits a second rtp output aimed at homekit audio port', () => {
+      // `-f rtp` carries one stream, so audio MUST be its own output.
+      expect(args.filter(a => a === '-f')).toHaveLength(2)
+      const destinations = args.filter(a => a.startsWith('srtp://'))
+      expect(destinations).toEqual([
+        'srtp://192.0.2.9:5000?rtcpport=5000&localrtcpport=5001&pkt_size=1316',
+        'srtp://192.0.2.9:5002?rtcpport=5002&localrtcpport=5003&pkt_size=188',
+      ])
+    })
+
+    it('encodes aac-eld at the rate homekit asked for and never mutes the input', () => {
+      expect(joined).toContain(`-c:a ${AAC_ELD_ENCODER} -profile:a aac_eld`)
+      expect(joined).toContain('-ar 16k')
+      expect(joined).toContain('-b:a 24k')
+      expect(args).not.toContain('-an')
+    })
+
+    it('gives each output its own ssrc and srtp key', () => {
+      expect(joined).toContain('-ssrc 1')
+      expect(joined).toContain('-ssrc 2')
+      expect(joined).toContain(Buffer.alloc(30).toString('base64'))
+      expect(joined).toContain(Buffer.alloc(30, 7).toString('base64'))
+    })
+
+    it('maps the audio track optionally, so a camera with no microphone still starts', () => {
+      expect(joined).toContain('-map 0:a:0?')
+      expect(joined).toContain('-map 0:v:0')
+    })
   })
 })
 
@@ -81,6 +140,8 @@ interface DelegateOverrides {
   getSnapshot?: () => Promise<Buffer>
   url?: () => Promise<string>
   audio?: boolean
+  aacEld?: boolean
+  run?: () => Promise<string>
   quality?: 'auto' | 'low' | 'medium' | 'high'
 }
 
@@ -95,11 +156,16 @@ async function failingUrl(): Promise<string> {
   throw new Error('console said no')
 }
 
+async function failingProbe(): Promise<string> {
+  throw new Error('ffmpeg is gone')
+}
+
 function makeDelegate(overrides: DelegateOverrides = {}) {
   const log = makeLog()
   const getSnapshot = vi.fn(overrides.getSnapshot ?? (async () => jpeg))
   const get = vi.fn(overrides.url ?? (async () => URL))
   const spawn = vi.fn(() => fakeChild())
+  const run = vi.fn(overrides.run ?? (async () => encoderList(overrides.aacEld ?? true)))
   const delegate = new StreamingDelegate({
     deviceId: 'cam1',
     label: 'Driveway',
@@ -109,12 +175,29 @@ function makeDelegate(overrides: DelegateOverrides = {}) {
     caps: overrides.caps ?? CAPS_HW,
     settings: () => ({ quality: overrides.quality ?? 'auto', audio: overrides.audio ?? false }),
     spawn,
+    run,
   })
-  return { delegate, getSnapshot, get, spawn, log }
+  return { delegate, getSnapshot, get, spawn, run, log }
 }
 
-const RTP = { address: '192.0.2.9', videoPort: 5000, videoSsrc: 7, videoKey: Buffer.alloc(30), localPort: 5001 }
-const REQUEST = { width: 1280, height: 720, fps: 30, bitrate: 3000 }
+const RTP = {
+  address: '192.0.2.9',
+  video: { port: 5000, ssrc: 7, key: Buffer.alloc(30), localPort: 5001 },
+  audio: { port: 5002, ssrc: 8, key: Buffer.alloc(30, 7), localPort: 5003 },
+}
+const REQUEST = {
+  width: 1280,
+  height: 720,
+  fps: 30,
+  bitrate: 3000,
+  videoPayloadType: 99,
+  audio: { payloadType: 110, sampleRate: 16, bitrate: 24 },
+}
+
+/** The argv of the nth spawn. */
+function argvOf(spawn: { mock: { calls: unknown[] } }, index = 0): string[] {
+  return (spawn.mock.calls[index] as [string, string[]])[1]
+}
 
 afterEach(() => {
   // A leaked count would silently change every later cap assertion.
@@ -176,7 +259,7 @@ describe('streamingDelegate sessions', () => {
   })
 
   it('passes the stream url to ffmpeg and never logs it', async () => {
-    const { delegate, spawn, log } = makeDelegate()
+    const { delegate, spawn, log } = makeDelegate({ audio: true })
     await delegate.startSession('a', REQUEST, RTP)
 
     const [path, args] = spawn.mock.calls[0] as unknown as [string, string[]]
@@ -227,16 +310,89 @@ describe('streamingDelegate sessions', () => {
     second.delegate.stopAll()
   })
 
-  it('omits audio unless the camera opts in', async () => {
-    const off = makeDelegate()
-    await off.delegate.startSession('a', REQUEST, RTP)
-    expect((off.spawn.mock.calls[0] as unknown as [string, string[]])[1]).toContain('-an')
-    off.delegate.stopAll()
+  it('holds the slot across the await, so two cold starts cannot both pass the cap', async () => {
+    // The cap counts RUNNING processes, and the stream URL is awaited before the
+    // first one exists. Two starts racing through that window must not both pass.
+    let release = (): void => {}
+    async function parkedUrl(): Promise<string> {
+      await new Promise<void>((resolve) => {
+        release = resolve
+      })
+      return URL
+    }
+    const log = makeLog()
+    const spawn = vi.fn(() => fakeChild())
+    const delegate = new StreamingDelegate({
+      deviceId: 'cam1',
+      label: 'Driveway',
+      log,
+      client: {} as never,
+      urls: { get: parkedUrl } as never,
+      caps: CAPS_SW,
+      settings: () => ({ quality: 'auto', audio: false }),
+      spawn,
+      maxStreams: 1,
+    })
 
-    const on = makeDelegate({ audio: true })
-    await on.delegate.startSession('a', REQUEST, RTP)
-    expect((on.spawn.mock.calls[0] as unknown as [string, string[]])[1]).not.toContain('-an')
-    on.delegate.stopAll()
+    const first = delegate.startSession('a', REQUEST, RTP)
+    const second = delegate.startSession('b', REQUEST, RTP)
+    // The first start is parked in the URL fetch — the window where no process
+    // exists yet — and the second has already made its decision.
+    await new Promise(resolve => setImmediate(resolve))
+    release()
+
+    expect(await Promise.all([first, second])).toEqual([true, false])
+    expect(spawn).toHaveBeenCalledTimes(1)
+    expect(log.warn.mock.calls.join(' ')).toContain('maximum 1')
+    delegate.stopAll()
+  })
+
+  it('sends audio as its own rtp output when the camera opts in', async () => {
+    const { delegate, spawn, run } = makeDelegate({ audio: true })
+    await delegate.startSession('a', REQUEST, RTP)
+    const args = argvOf(spawn)
+    expect(run).toHaveBeenCalled()
+    expect(args.filter(a => a.startsWith('srtp://'))).toHaveLength(2)
+    expect(args.join(' ')).toContain('srtp://192.0.2.9:5002')
+    expect(args).not.toContain('-an')
+    delegate.stopAll()
+  })
+
+  it('stays video-only, and never probes, when the camera has not opted in', async () => {
+    const { delegate, spawn, run } = makeDelegate()
+    await delegate.startSession('a', REQUEST, RTP)
+    const args = argvOf(spawn)
+    expect(args).toContain('-an')
+    expect(args.filter(a => a.startsWith('srtp://'))).toHaveLength(1)
+    expect(run).not.toHaveBeenCalled()
+    delegate.stopAll()
+  })
+
+  it('falls back to video-only, with a warning, when ffmpeg cannot encode aac-eld', async () => {
+    const { delegate, spawn, log } = makeDelegate({ audio: true, aacEld: false })
+    expect(await delegate.startSession('a', REQUEST, RTP)).toBe(true)
+    const args = argvOf(spawn)
+    // A broken command would be worse than no audio.
+    expect(args).not.toContain(AAC_ELD_ENCODER)
+    expect(args).toContain('-an')
+    expect(args.filter(a => a.startsWith('srtp://'))).toHaveLength(1)
+    expect(log.warn.mock.calls.join(' ')).toContain('AAC-ELD')
+    delegate.stopAll()
+  })
+
+  it('falls back to video-only when the encoder probe itself fails', async () => {
+    const { delegate, spawn } = makeDelegate({ audio: true, run: failingProbe })
+    expect(await delegate.startSession('a', REQUEST, RTP)).toBe(true)
+    expect(argvOf(spawn)).toContain('-an')
+    delegate.stopAll()
+  })
+
+  it('probes the audio encoder once, not once per stream', async () => {
+    const { delegate, run } = makeDelegate({ audio: true })
+    await delegate.startSession('a', REQUEST, RTP)
+    await delegate.startSession('b', REQUEST, RTP)
+    expect(run).toHaveBeenCalledTimes(1)
+    delegate.stopAll()
   })
 })
 
@@ -255,35 +411,44 @@ function startRequest(): StreamingRequest {
   return {
     sessionID: 'session-1',
     type: 'start',
-    video: { width: 1280, height: 720, fps: 30, max_bit_rate: 802, ssrc: 1, pt: 99, mtu: 1378, rtcp_interval: 0.5 },
-    audio: {},
+    video: { width: 1280, height: 720, fps: 30, max_bit_rate: 802, ssrc: 1, pt: 97, mtu: 1378, rtcp_interval: 0.5 },
+    audio: { codec: 'AAC-eld', channel: 1, bit_rate: 0, sample_rate: 16, packet_time: 30, pt: 110, ssrc: 2, max_bit_rate: 24, rtcp_interval: 5, comfort_pt: 13, comfortNoiseEnabled: false },
   } as unknown as StreamingRequest
 }
 
 describe('streamingDelegate hap wiring', () => {
-  it('prepareStream returns a port, an ssrc and the srtp material homekit sent', async () => {
+  it('prepareStream returns a port, an ssrc and the srtp material homekit sent, for both streams', async () => {
     const { delegate } = makeDelegate()
     const response = await new Promise<PrepareStreamResponse>((resolve, reject) => {
       delegate.prepareStream(prepareRequest(), (error, r) => (r ? resolve(r) : reject(error)))
     })
     const video = response.video as SourceResponse
+    const audio = response.audio as SourceResponse
     expect(video.port).toBeGreaterThan(0)
     expect(video.ssrc).toBeGreaterThan(0)
     expect(video.srtp_key).toEqual(Buffer.alloc(16, 1))
     expect(video.srtp_salt).toEqual(Buffer.alloc(14, 2))
+    // Audio has its OWN port, ssrc and key — not video's.
+    expect(audio.port).not.toBe(video.port)
+    expect(audio.srtp_key).toEqual(Buffer.alloc(16, 3))
+    expect(audio.srtp_salt).toEqual(Buffer.alloc(14, 4))
   })
 
-  it('start uses the prepared session, and stop kills it', async () => {
-    const { delegate, spawn } = makeDelegate()
+  it('start uses the prepared session and homekit payload types, and stop kills it', async () => {
+    const { delegate, spawn } = makeDelegate({ audio: true })
     await new Promise<void>((resolve, reject) => {
       delegate.prepareStream(prepareRequest(), error => (error ? reject(error) : resolve()))
     })
     await new Promise<void>((resolve, reject) => {
       delegate.handleStreamRequest(startRequest(), error => (error ? reject(error) : resolve()))
     })
-    const args = (spawn.mock.calls[0] as unknown as [string, string[]])[1]
-    // The destination is the address and port HomeKit asked for, not a default.
-    expect(args.at(-1)).toContain('srtp://192.0.2.9:5000')
+    const joined = argvOf(spawn).join(' ')
+    // The destinations are the addresses and ports HomeKit asked for.
+    expect(joined).toContain('srtp://192.0.2.9:5000')
+    expect(joined).toContain('srtp://192.0.2.9:5002')
+    // …and the payload types it chose, which are not the old hardcoded 99.
+    expect(joined).toContain('-payload_type 97')
+    expect(joined).toContain('-payload_type 110')
     expect(delegate.activeCount).toBe(1)
 
     delegate.handleStreamRequest({ sessionID: 'session-1', type: 'stop' } as unknown as StreamingRequest, vi.fn())
