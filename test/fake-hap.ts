@@ -1,5 +1,3 @@
-import { EventEmitter } from 'node:events'
-
 /**
  * A HAP stand-in. Service and characteristic "types" are plain objects used as
  * identity tokens, which is all `camera.ts` ever does with them.
@@ -31,10 +29,24 @@ export const C = {
   ProgrammableSwitchEvent: { name: 'ProgrammableSwitchEvent', SINGLE_PRESS: 0 },
 }
 
-export class FakeCharacteristic extends EventEmitter {
+/**
+ * hap-nodejs keeps exactly ONE `set` handler: `onSet` overwrites whatever was
+ * there and the removal API is `removeOnSet()`. Modelled as a single slot and
+ * NOT as an EventEmitter — an emitter fake lets a test drive a handler array
+ * that does not exist in production, which is the code-and-tests-share-a-false-
+ * premise failure that has already produced a real bug on this branch.
+ */
+export class FakeCharacteristic {
   value: unknown = null
+  setHandler?: (value: unknown) => unknown
+
   onSet(handler: (value: unknown) => unknown) {
-    this.on('set', handler)
+    this.setHandler = handler
+    return this
+  }
+
+  removeOnSet() {
+    this.setHandler = undefined
     return this
   }
 }

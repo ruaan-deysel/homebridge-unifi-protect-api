@@ -157,10 +157,14 @@ export function buildCameraServices(
     const name = subtype === 'led' ? `${label} Status LED` : `${label} ${SUBTYPE_LABELS[subtype]}`
     let service = accessory.getServiceById(type, subtype)
     if (!service) {
+      // The name is written once, here, and never again — writing it on every
+      // discovery would overwrite whatever the user renamed the service to in
+      // Home.app. Deliberately NOT also setting `ConfiguredName`:
+      // hap-nodejs 2.1.9 declares it on neither MotionSensor, SmokeSensor,
+      // CarbonMonoxideSensor, Doorbell nor Switch, so every write logged a
+      // "[HAP] ... Adding anyway." warning — roughly 23 of them on this
+      // console's first boot, which reads as a broken plugin.
       service = accessory.addService(type, name, subtype)
-      // Set once, at creation. Writing it on every discovery would overwrite
-      // whatever the user renamed the service to in Home.app.
-      service.setCharacteristic(C.ConfiguredName, name)
       log.debug(`Added ${subtype} service to "${label}".`)
     }
 
@@ -199,8 +203,11 @@ function wireLed(
   service.updateCharacteristic(C.On, record(device.ledSettings).isEnabled === true)
 
   const characteristic = service.getCharacteristic(C.On)
-  // Re-registering would stack handlers on every rebuild.
-  characteristic.removeAllListeners('set')
+  // `removeOnSet`, not `removeAllListeners('set')`: hap-nodejs stores a single
+  // `setHandler` that `onSet` overwrites, so the emitter call was inert against
+  // the real library. Explicit clear, because "onSet happens to overwrite" is
+  // not a contract worth relying on across a rebuild.
+  characteristic.removeOnSet()
   characteristic.onSet(async (value) => {
     try {
       await callbacks.setLed(String(device.id), Boolean(value))

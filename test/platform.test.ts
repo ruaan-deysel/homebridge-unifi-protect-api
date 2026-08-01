@@ -864,7 +864,7 @@ describe('uniFiProtectPlatform', () => {
     const doorbell = platform.accessories.get(`uuid-${DOORBELL}`) as unknown as FakeAccessory
     const on = doorbell.getServiceById(S.Switch, 'led')!.getCharacteristic(C.On)
 
-    await Promise.all(on.listeners('set').map(h => h(true)))
+    await on.setHandler!(true)
 
     expect(platform.client.patchCamera).toHaveBeenCalledWith(DOORBELL, { ledSettings: { isEnabled: true } })
   })
@@ -908,7 +908,7 @@ describe('uniFiProtectPlatform', () => {
     const on = doorbell.getServiceById(S.Switch, 'led')!.getCharacteristic(C.On)
     expect(on.value).toBe(false)
 
-    await Promise.all(on.listeners('set').map(h => h(true)))
+    await on.setHandler!(true)
     // Real HAP commits the requested value itself once a `set` handler
     // resolves without throwing — the fake harness does not, so this mirrors
     // that commit before exercising what happens next.
@@ -920,6 +920,64 @@ describe('uniFiProtectPlatform', () => {
     bus.emit('deviceUpdate', { type: 'update', item: { id: DOORBELL, modelKey: 'camera', name: 'Front Door' } })
 
     expect(on.value).toBe(true)
+  })
+
+  // Final review M4: the optimistic cache covered `applyDeviceUpdate` but not
+  // `reconcile`. Discovery runs on every resync and every retry, and its
+  // inventory GET can already be in flight when the PATCH lands — so it comes
+  // back carrying the pre-write ledSettings and `wireLed` pushes the old value
+  // back onto the switch in front of the user.
+  it('keeps the LED switch on its new value across a discovery whose read raced the write', async () => {
+    const { platform } = await withCameras()
+    const doorbell = platform.accessories.get(`uuid-${DOORBELL}`) as unknown as FakeAccessory
+    const on = doorbell.getServiceById(S.Switch, 'led')!.getCharacteristic(C.On)
+    expect(on.value).toBe(false)
+
+    await on.setHandler!(true)
+    // Real HAP commits the requested value once the handler resolves; the fake
+    // does not, so mirror that commit before the racing discovery lands.
+    on.value = true
+
+    // The client still answers with the unmodified fixture — exactly what an
+    // inventory read issued before the PATCH returns.
+    await platform.discover()
+
+    expect(on.value).toBe(true)
+    expect(((doorbell as unknown as FakePlatformAccessory).context.device as { ledSettings: { isEnabled: boolean } }).ledSettings.isEnabled).toBe(true)
+  })
+
+  // Final review I1: `reconcile`'s `modelKey === 'camera'` guard was untested —
+  // replacing it with `true` left the whole suite green. Without it a light,
+  // sensor or chime grows a Motion sensor and enters the service removal loop,
+  // the code path that has produced four Criticals in this repo.
+  it('builds no camera services for a non-camera device during discovery', async () => {
+    const light = { id: 'light1', name: 'Porch', modelKey: 'light', featureFlags: { hasSpeaker: true, hasLedStatus: true }, smartDetectSettings: { objectTypes: ['person'], audioTypes: [] } }
+    const { platform } = makePlatform(validConfig, [light])
+
+    await platform.discover()
+
+    const accessory = platform.accessories.get('uuid-light1') as unknown as FakeAccessory
+    // Registered — otherwise this would pass without reconcile touching it.
+    expect(accessory).toBeDefined()
+    expect(accessory.services).toEqual([])
+  })
+
+  // Final review I1, the second call site: same guard in `applyDeviceUpdate`,
+  // equally untested.
+  it('builds and removes nothing when a deviceUpdate frame arrives for a non-camera accessory', async () => {
+    const { platform, bus } = makePlatform(validConfig, [{ id: 'light1', name: 'Porch', modelKey: 'light' }])
+    await platform.discover()
+    const accessory = platform.accessories.get('uuid-light1') as unknown as FakePlatformAccessory
+    // A service some other module owns, carrying a subtype camera.ts claims.
+    // It must survive, and no camera service may appear beside it.
+    const foreign = accessory.addService(S.MotionSensor, 'Porch Motion', 'motion')
+
+    bus.emit('deviceUpdate', { type: 'update', item: { id: 'light1', modelKey: 'light', name: 'Porch Light' } })
+
+    // The frame really was processed — without this the test would pass just
+    // as well if the schema had rejected it before reaching the guard.
+    expect(accessory.displayName).toBe('Porch Light')
+    expect(accessory.services).toEqual([foreign])
   })
 
   // Fix round 2: `applyDeviceUpdate`'s own docblock promises nothing in here
