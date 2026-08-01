@@ -88,6 +88,17 @@ describe('ensureConfig', () => {
     expect(config.host).toBe('10.0.0.1')
     expect(config.devices.cam1).toEqual({ expose: false })
   })
+
+  // Same hazard, sharper consequence: dropping `consoleCert` on a save would
+  // throw away the pinned certificate, and the next start would silently trust
+  // whatever answered — the exact failure this plugin refuses to have.
+  it('preserves the trusted console certificate through a save', () => {
+    const saved = { platform: 'UniFiProtect', host: '10.0.0.1', apiKey: 'k', consoleCert: 'PEM' }
+
+    const config = setDeviceSetting(ensureConfig(saved), 'cam1', 'expose', false)
+
+    expect(config.consoleCert).toBe('PEM')
+  })
 })
 
 describe('setDeviceSetting', () => {

@@ -1,9 +1,13 @@
 import { EventEmitter } from 'node:events'
-import { readFileSync } from 'node:fs'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { UniFiProtectPlatform } from '../src/platform.js'
+import { fingerprintOf } from '../src/protect/cert.js'
 import { ProtectAuthError, ProtectUnavailableError } from '../src/protect/errors.js'
 import { C, FakeAccessory, hap, S } from './fake-hap.js'
+import { makeSelfSigned } from './support/tls.js'
 
 const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(), success: vi.fn() }
 
@@ -67,12 +71,25 @@ function makeClient(devices: unknown[]) {
 
 const events = () => Object.assign(new EventEmitter(), { start: vi.fn(), stop: vi.fn() })
 
-function makePlatform(config: unknown = validConfig, cameras: unknown[] = []) {
+/**
+ * PEMs the fake cert reader hands back. Real ones — `fingerprintOf` hashes the
+ * DER, so a made-up string would compare equal to any other made-up string and
+ * the mismatch test would pass for the wrong reason.
+ */
+const CERT_A = makeSelfSigned('console-a').cert
+const CERT_B = makeSelfSigned('console-b').cert
+const FP_A = fingerprintOf(CERT_A)
+const FP_B = fingerprintOf(CERT_B)
+
+function makePlatform(config: unknown = validConfig, cameras: unknown[] = [], presented = CERT_A) {
   const api = makeApi()
   const platform = new UniFiProtectPlatform(log as never, config as never, api as never)
   const bus = events()
   platform.client = makeClient(cameras) as never
   platform.events = bus as never
+  // Stubbed everywhere: nothing in this suite may open a TLS socket to the
+  // fictional 10.0.0.1, and a real attempt hangs the run until it times out.
+  platform.readConsoleCert = vi.fn(async () => ({ pem: presented, fingerprint: fingerprintOf(presented) }))
   return { api, platform, bus }
 }
 
@@ -1007,5 +1024,107 @@ describe('uniFiProtectPlatform', () => {
       expect(call.join(' ')).not.toContain('sk-live-DO-NOT-LOG')
     }
     expect(JSON.stringify(log.warn.mock.calls)).toContain('HAP exploded')
+  })
+})
+
+describe('console certificate trust', () => {
+  const camera = { id: 'cam1', name: 'Doorbell', modelKey: 'camera' }
+  let dir: string
+  let configPath: string
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    dir = mkdtempSync(join(tmpdir(), 'protect-platform-test-'))
+    configPath = join(dir, 'config.json')
+    writeFileSync(configPath, JSON.stringify({ bridge: { name: 'Homebridge' }, platforms: [{ ...validConfig }] }, null, 4))
+  })
+
+  afterEach(() => rmSync(dir, { recursive: true, force: true }))
+
+  /** Homebridge hands plugins the config path here; the test api has no `user`. */
+  const withConfigPath = (api: Record<string, unknown>) => Object.assign(api, { user: { configPath: () => configPath } })
+
+  it('trusts the certificate on first use, logs the fingerprint and saves it', async () => {
+    const { api, platform } = makePlatform(validConfig, [camera], CERT_A)
+    withConfigPath(api)
+
+    await platform.discover()
+
+    expect(JSON.stringify(log.info.mock.calls)).toContain(FP_A)
+    expect(platform.client.consoleCert).toBe(CERT_A)
+    expect(platform.events.consoleCert).toBe(CERT_A)
+    // Written back to config.json, so the next start pins instead of re-trusting.
+    const saved = JSON.parse(readFileSync(configPath, 'utf8'))
+    expect(saved.platforms[0].consoleCert).toBe(CERT_A)
+    // And nothing else in the file was disturbed.
+    expect(saved.bridge).toEqual({ name: 'Homebridge' })
+  })
+
+  it('pins silently on a later run when the certificate still matches', async () => {
+    const { api, platform } = makePlatform({ ...validConfig, consoleCert: CERT_A }, [camera], CERT_A)
+    withConfigPath(api)
+
+    await platform.discover()
+
+    expect(platform.client.consoleCert).toBe(CERT_A)
+    expect(platform.accessories.has('uuid-cam1')).toBe(true)
+    // No re-trust: the file is untouched and nothing announces a new fingerprint.
+    expect(JSON.parse(readFileSync(configPath, 'utf8')).platforms[0].consoleCert).toBeUndefined()
+    expect(JSON.stringify(log.info.mock.calls)).not.toContain('Trusting')
+  })
+
+  it('fails closed when the certificate changed, without contacting the console', async () => {
+    const { api, platform } = makePlatform({ ...validConfig, consoleCert: CERT_A }, [camera], CERT_B)
+    withConfigPath(api)
+
+    await platform.discover()
+
+    // Not one request was made, so the API key was never offered.
+    expect(platform.client.getMetaInfo).not.toHaveBeenCalled()
+    expect(platform.client.consoleCert).toBeUndefined()
+    // Nor were the subscriptions started — they carry the same header.
+    expect(platform.events.start).not.toHaveBeenCalled()
+    // Actionable: both fingerprints, and how to re-trust deliberately.
+    const errors = JSON.stringify(log.error.mock.calls)
+    expect(errors).toContain(FP_A)
+    expect(errors).toContain(FP_B)
+    expect(errors).toContain('Trust this certificate')
+    // Nothing silently re-trusted itself.
+    expect(JSON.parse(readFileSync(configPath, 'utf8')).platforms[0].consoleCert).toBeUndefined()
+  })
+
+  it('does not latch onto a mismatch on a later discovery either', async () => {
+    const { api, platform } = makePlatform({ ...validConfig, consoleCert: CERT_A }, [camera], CERT_B)
+    withConfigPath(api)
+
+    await platform.discover()
+    await platform.discover()
+
+    expect(platform.client.getMetaInfo).not.toHaveBeenCalled()
+  })
+
+  it('retries rather than proceeding when the certificate cannot be read', async () => {
+    const { api, platform } = makePlatform(validConfig, [camera])
+    withConfigPath(api)
+    platform.readConsoleCert = vi.fn(async () => {
+      throw new Error('ECONNREFUSED')
+    })
+
+    await platform.discover()
+
+    expect(platform.client.getMetaInfo).not.toHaveBeenCalled()
+    expect(JSON.stringify(log.info.mock.calls)).toContain('Retrying discovery')
+    api.emit('shutdown')
+  })
+
+  it('still works for the session when config.json cannot be written', async () => {
+    const { platform } = makePlatform(validConfig, [camera], CERT_A)
+    // No `api.user` at all — the standalone/unusual Homebridge setups.
+
+    await platform.discover()
+
+    expect(platform.client.consoleCert).toBe(CERT_A)
+    expect(platform.accessories.has('uuid-cam1')).toBe(true)
+    expect(JSON.stringify(log.warn.mock.calls)).toContain('could not save it to config.json')
   })
 })

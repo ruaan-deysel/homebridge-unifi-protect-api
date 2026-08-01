@@ -3,6 +3,7 @@ import type { ProtectLogger } from './client.js'
 import { EventEmitter } from 'node:events'
 import WebSocket from 'ws'
 import { API_BASE_PATH } from '../settings.js'
+import { pinnedTlsOptions } from './cert.js'
 import { ProtectAuthError } from './errors.js'
 
 export type ProtectEventChannel = 'devices' | 'events'
@@ -26,6 +27,8 @@ export interface ProtectEventsOptions {
   /** Injected in tests. Defaults to the `ws` package. */
   socketFactory?: (url: string, options: unknown) => WebSocket
   maxBackoffMs?: number
+  /** PEM of the trusted console certificate. See `consoleCert` on the class. */
+  consoleCert?: string
 }
 
 interface ChannelState {
@@ -70,6 +73,13 @@ export class ProtectEvents extends EventEmitter<ProtectEventsMap> {
   private readonly states = new Map<ProtectEventChannel, ChannelState>()
   private stopped = false
   private authFailed = false
+  /**
+   * Trust anchor for the WebSocket upgrades. The upgrade request carries the
+   * same `X-API-KEY` header the REST calls do, so this path is pinned exactly
+   * like the REST one. Writable for the same trust-on-first-use reason as on
+   * `ProtectClient`; until it is set, `connect` refuses to dial.
+   */
+  consoleCert?: string
 
   constructor(options: ProtectEventsOptions) {
     super()
@@ -77,10 +87,11 @@ export class ProtectEvents extends EventEmitter<ProtectEventsMap> {
     this.apiKey = options.apiKey
     this.log = options.log
     this.maxBackoffMs = options.maxBackoffMs ?? 60_000
+    this.consoleCert = options.consoleCert
     // `ws`, NOT node's global WebSocket. The global is the WHATWG browser API:
     // it has no `headers` option, so it cannot send X-API-KEY, and no way to
-    // skip verification of the console's self-signed certificate. Verified
-    // against real hardware — the global fails with a non-101 status.
+    // supply the console's certificate as a trust anchor. Verified against real
+    // hardware — the global fails with a non-101 status.
     this.makeSocket = options.socketFactory
       ?? ((url, opts) => new WebSocket(url, opts as never))
   }
@@ -151,6 +162,15 @@ export class ProtectEvents extends EventEmitter<ProtectEventsMap> {
     if (this.stopped || this.authFailed)
       return
 
+    // Fail closed, exactly as the REST transport does: the upgrade request
+    // carries the API key, so it is not dialled at all until the console's
+    // certificate is trusted. No reconnect is scheduled — nothing about a
+    // retry would supply the missing trust anchor.
+    if (!this.consoleCert) {
+      this.log.error(`Not connecting the Protect ${channel} subscription: the console's certificate has not been trusted yet.`)
+      return
+    }
+
     // Makes `start()` idempotent and stops a duplicate `close` doubling the
     // reconnect chain.
     this.teardown(channel)
@@ -159,7 +179,9 @@ export class ProtectEvents extends EventEmitter<ProtectEventsMap> {
     const url = `wss://${this.host}${API_BASE_PATH}/v1/subscribe/${channel}`
     const socket = this.makeSocket(url, {
       headers: { 'X-API-KEY': this.apiKey },
-      rejectUnauthorized: false,
+      // Pinned to the console's own certificate — the handshake fails before the
+      // upgrade request (and the header above) is written. See pinnedTlsOptions.
+      ...pinnedTlsOptions(this.consoleCert),
       // `ws` has no default handshake timeout. A console that accepts the TCP
       // connection and then never answers the upgrade — a half-dead UDM, or a
       // stalled reverse proxy — leaves the socket CONNECTING forever: the

@@ -60,14 +60,29 @@ All accessories are **bridged**. This plugin runs as a child bridge named for it
 discovered device is published under that one HomeKit pairing rather than as separate
 standalone accessories.
 
-## Security note: TLS verification
+## Security note: certificate pinning
 
 Local UniFi consoles present a self-signed certificate for an IP address (or a
-non-publicly-resolvable hostname), which no public certificate authority can validate. To
-connect at all, this plugin **disables TLS certificate verification, but only for the
-console address you configure** — it does not weaken TLS verification for any other
-connection. The same applies to both WebSocket subscriptions used for real-time device and
-event updates. Only point this plugin at a UniFi console you trust and control.
+non-publicly-resolvable hostname), which no public certificate authority can validate. This
+plugin therefore **pins your console's own certificate**: on the first connection it reads
+the certificate, stores it in `config.json` as `consoleCert`, and logs its SHA-256
+fingerprint so you can compare it with the one your console shows. Every later connection —
+REST and both WebSocket subscriptions — is verified against that certificate and nothing
+else. Verification is never disabled, and never process-wide.
+
+Only the hostname check is skipped, because the certificate is issued for the console's own
+hostname while you connect to it by IP. Certificate identity is still enforced, which is
+what stops anything else on your network from impersonating the console and collecting your
+API key.
+
+If the certificate ever changes, the plugin **refuses to connect** and logs both
+fingerprints rather than trusting the new one. That is expected after the console is
+reinstalled, reset, or has its certificate regenerated — in which case re-trust it
+deliberately with **Trust this certificate** in the plugin settings, or by deleting the
+`consoleCert` line from the `UniFiProtect` block in `config.json` and restarting Homebridge.
+If you cannot explain the change, treat it as an interception attempt and do not re-trust
+it. `consoleCert` is your own hardware's identity: it is written by the plugin, and should
+not be copied between installs or committed anywhere.
 
 ## Manual hardware check
 
