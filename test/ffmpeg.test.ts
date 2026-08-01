@@ -4,24 +4,33 @@ import { EventEmitter } from 'node:events'
 import { readFileSync } from 'node:fs'
 import { inspect } from 'node:util'
 import { describe, expect, it, vi } from 'vitest'
-import { chooseEncoder, FfmpegProcess, probeFfmpeg, redactStreamUrls, splitOnLastToken } from '../src/protect/ffmpeg.js'
+import { encoderCandidates, FfmpegProcess, probeFfmpeg, redactStreamUrls, splitOnLastToken } from '../src/protect/ffmpeg.js'
 
 const fixture = (n: string) => JSON.parse(readFileSync(`test/fixtures/ffmpeg/${n}.json`, 'utf8'))
 
-describe('chooseEncoder', () => {
-  it('prefers qsv when the real hardware build offers it', () => {
+describe('encoderCandidates', () => {
+  // The real hardware build lists BOTH. Offering only the first preference is
+  // what sent the reference console to software when its QSV trial failed.
+  it('offers every encoder the real hardware build claims, best first, software last', () => {
     const { hwaccels, encoders } = fixture('hardware')
-    expect(chooseEncoder(hwaccels, encoders)).toEqual({ encoder: 'h264_qsv', hwaccel: 'qsv' })
+    expect(encoderCandidates(hwaccels, encoders)).toEqual([
+      { encoder: 'h264_qsv', hwaccel: 'qsv' },
+      { encoder: 'h264_vaapi', hwaccel: 'vaapi' },
+      { encoder: 'libx264' },
+    ])
   })
 
-  it('falls back to libx264 on the real software-only build', () => {
+  it('offers libx264 alone on the real software-only build', () => {
     const { hwaccels, encoders } = fixture('software')
-    expect(chooseEncoder(hwaccels, encoders)).toEqual({ encoder: 'libx264' })
+    expect(encoderCandidates(hwaccels, encoders)).toEqual([{ encoder: 'libx264' }])
   })
 
-  it('uses vaapi when qsv is absent', () => {
+  it('drops qsv when the build cannot do it at all', () => {
     const { encoders } = fixture('hardware')
-    expect(chooseEncoder('vaapi\ndrm\n', encoders)).toEqual({ encoder: 'h264_vaapi', hwaccel: 'vaapi' })
+    expect(encoderCandidates('vaapi\ndrm\n', encoders)).toEqual([
+      { encoder: 'h264_vaapi', hwaccel: 'vaapi' },
+      { encoder: 'libx264' },
+    ])
   })
 
   // The fixture must be able to DEFEAT the mutation its comment names: a plain
@@ -31,15 +40,15 @@ describe('chooseEncoder', () => {
   it('does not mistake an h264_qsv mentioned in a description for an h264_qsv encoder', () => {
     const encoders = ' V..... hevc_qsv HEVC (Intel Quick Sync) (alternatives: h264_qsv)\n V....D libx264 libx264 H.264\n'
     expect(encoders).toContain('h264_qsv')
-    expect(chooseEncoder('qsv\n', encoders)).toEqual({ encoder: 'libx264' })
+    expect(encoderCandidates('qsv\n', encoders)).toEqual([{ encoder: 'libx264' }])
   })
 
   // Synthetic: none of the real fixtures contain an encoder name that is a
   // *prefix* of a longer one, so the tests above pass even without the `\b`
   // boundary in hasEncoder. This one exercises that boundary directly.
   it('does not mistake h264_qsv_backup for h264_qsv (synthetic)', () => {
-    expect(chooseEncoder('qsv\n', ' V..... h264_qsv_backup Some experimental variant\n V....D libx264 libx264 H.264\n'))
-      .toEqual({ encoder: 'libx264' })
+    expect(encoderCandidates('qsv\n', ' V..... h264_qsv_backup Some experimental variant\n V....D libx264 libx264 H.264\n'))
+      .toEqual([{ encoder: 'libx264' }])
   })
 })
 
@@ -77,10 +86,32 @@ describe('probeFfmpeg', () => {
     expect(caps).toEqual({ path: '/usr/local/bin/ffmpeg', encoder: 'libx264' })
   })
 
-  // Being LISTED by -encoders only means the build was compiled with it. Without
-  // /dev/dri in the container, or without the driver, every live view would fail
-  // at the moment the user presses play, with no fallback left to take.
-  it('demotes to software when the listed hardware encoder cannot actually initialise', async () => {
+  /**
+   * The reference console, measured 2026-08-01 (i7-8700K / UHD 630, i915,
+   * /dev/dri/renderD128 present). `/usr/bin/ffmpeg` LISTS both encoders, but:
+   *
+   *   QSV   -> Device creation failed: -1313558101
+   *            Failed to set value 'qsv=hw' for option 'init_hw_device'
+   *   VAAPI -> encodes 3 frames, exits clean
+   *
+   * QSV wins the preference order, so demoting straight to software on its
+   * failure put this exact host on libx264: ~2.5 cores per stream instead of
+   * ~0.09, and a concurrency cap of two instead of six.
+   */
+  it('falls through to vaapi when the qsv trial fails, rather than demoting to software', async () => {
+    const hw = fixture('hardware')
+    const run = vi.fn(async (_path: string, args: string[]) => {
+      if (args.includes('h264_qsv'))
+        throw new Error('Device creation failed: -1313558101')
+      if (args.includes('h264_vaapi'))
+        return ''
+      return args.includes('-hwaccels') ? hw.hwaccels : hw.encoders
+    })
+    const caps = await probeFfmpeg({ log, run, candidates: ['/usr/bin/ffmpeg'] })
+    expect(caps).toEqual({ path: '/usr/bin/ffmpeg', encoder: 'h264_vaapi', hwaccel: 'vaapi' })
+  })
+
+  it('demotes to software only when every listed hardware encoder fails its trial', async () => {
     const hw = fixture('hardware')
     const run = vi.fn(async (_path: string, args: string[]) => {
       if (args.includes('-c:v'))
@@ -89,16 +120,18 @@ describe('probeFfmpeg', () => {
     })
     const caps = await probeFfmpeg({ log, run, candidates: ['/usr/bin/ffmpeg'] })
     expect(caps).toEqual({ path: '/usr/bin/ffmpeg', encoder: 'libx264' })
+    // Both were tried, not just the first.
+    expect(run.mock.calls.filter(([, args]) => args.includes('h264_qsv'))).toHaveLength(1)
+    expect(run.mock.calls.filter(([, args]) => args.includes('h264_vaapi'))).toHaveLength(1)
   })
 
-  it('keeps the hardware encoder when the trial encode succeeds', async () => {
+  it('stops at the first encoder that works, without trialling the rest', async () => {
     const hw = fixture('hardware')
     const run = vi.fn(async (_path: string, args: string[]) =>
       args.includes('-hwaccels') ? hw.hwaccels : hw.encoders)
     const caps = await probeFfmpeg({ log, run, candidates: ['/usr/bin/ffmpeg'] })
     expect(caps.encoder).toBe('h264_qsv')
-    // The trial actually ran — otherwise the test above proves nothing.
-    expect(run.mock.calls.some(([, args]) => args.includes('-c:v') && args.includes('h264_qsv'))).toBe(true)
+    expect(run.mock.calls.filter(([, args]) => args.includes('h264_vaapi'))).toHaveLength(0)
   })
 
   it('throws when no candidate runs at all', async () => {
