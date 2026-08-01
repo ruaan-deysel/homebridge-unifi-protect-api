@@ -104,7 +104,7 @@ describe('discoverRequest', () => {
       name: 'Doorbell',
       modelKey: 'camera',
       hasPackageCamera: true,
-      featureFlags: { hasSpeaker: true, hasLedStatus: true, smartDetectTypes: ['person', 'package'] },
+      featureFlags: { hasSpeaker: true, hasMic: true, hasLedStatus: true, smartDetectTypes: ['person', 'package'] },
     }]
     const fetchImpl = vi.fn(async (url: string) => ok(url.endsWith('/cameras') ? cameras : [])) as never
 
@@ -115,9 +115,20 @@ describe('discoverRequest', () => {
       name: 'Doorbell',
       type: 'camera',
       hasSpeaker: true,
+      // Without this the audio toggle is never offered and nothing else notices.
+      hasMic: true,
       hasLedStatus: true,
       hasPackageCamera: true,
       smartDetectTypes: ['person', 'package'],
     })
+  })
+
+  it('reports a missing microphone as false rather than undefined', async () => {
+    const cameras = [{ id: 'cam1', name: 'Sidegate', modelKey: 'camera', featureFlags: {} }]
+    const fetchImpl = vi.fn(async (url: string) => ok(url.endsWith('/cameras') ? cameras : [])) as never
+
+    const result = await discoverRequest(creds, { fetchImpl })
+
+    expect(result.devices[0]?.hasMic).toBe(false)
   })
 })

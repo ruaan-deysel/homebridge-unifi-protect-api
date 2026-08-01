@@ -36,7 +36,10 @@ function defaultFor(config, key) {
     return config.defaults.hksv
   if (key === 'smartDetect')
     return undefined
-  if (key === 'talkback')
+  // Both default off with no global override, exactly as `settingsFor` resolves
+  // them in src/config.ts — audio deliberately has no console-wide default,
+  // since whether recording it is legal depends on where each camera points.
+  if (key === 'talkback' || key === 'audio')
     return false
   return undefined
 }
@@ -59,6 +62,54 @@ export function renderDeviceHeader(doc, device) {
   typeEl.className = 'up-muted'
   typeEl.textContent = device.type ?? ''
   return [nameEl, ' ', typeEl]
+}
+
+/**
+ * The live-view quality choices, `[value, label]`. Every value MUST be one the
+ * `qualitySchema` enum in src/config.ts accepts — a value only this file knows
+ * about would be written to config.json on save and then refuse to load, and
+ * Zod does not re-validate defaults, so nothing else would notice. There is a
+ * test pinning these against the real schema.
+ *
+ * The resolutions are the substreams measured on the live console, not marketing
+ * numbers: someone choosing "low" deserves to know it is 640x360.
+ */
+export const QUALITY_OPTIONS = [
+  ['auto', 'Auto — follow what HomeKit asks for'],
+  ['high', 'High — 2688 × 1512'],
+  ['medium', 'Medium — 1280 × 720'],
+  ['low', 'Low — 640 × 360'],
+]
+
+/**
+ * Builds the per-camera quality selector with DOM APIs only — never
+ * `innerHTML`. `device.id` is console-supplied and therefore
+ * attacker-controlled, exactly like the name in `renderDeviceHeader`, and it is
+ * embedded in the `id`/`for` pair here. Extracted out of index.html for the same
+ * reason that one was: so the XSS discipline has a unit test guarding it.
+ *
+ * Returns the label and the select separately; wiring the `change` listener is
+ * the caller's job, which keeps this function pure DOM construction.
+ */
+export function renderQualitySelect(doc, device, value) {
+  const id = `${device.id}-quality`
+  const wrap = doc.createElement('label')
+  wrap.setAttribute('for', id)
+  wrap.append('Live view quality ')
+
+  const select = doc.createElement('select')
+  select.className = 'form-control'
+  select.id = id
+  for (const [optionValue, label] of QUALITY_OPTIONS) {
+    const option = doc.createElement('option')
+    option.value = optionValue
+    option.textContent = label
+    if (optionValue === value)
+      option.selected = true
+    select.append(option)
+  }
+  wrap.append(select)
+  return { wrap, select }
 }
 
 /**

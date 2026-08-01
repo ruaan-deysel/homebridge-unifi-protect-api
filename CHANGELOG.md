@@ -57,6 +57,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to HomeKit, bridged like every other accessory so a child bridge still holds the whole
   console under one pairing. The doorbell keeps the single Doorbell service the event
   pipeline drives — attaching live view does not add a second one.
+- The settings UI now offers both new per-camera controls, so neither needs `config.json` to
+  be edited by hand: a live-view quality selector labelled with the real substream
+  resolutions (auto, 2688×1512, 1280×720, 640×360) and an audio toggle, offered only for a
+  camera that reports a microphone. Both take effect on the next stream request.
 - New settings: `maxStreams` caps concurrent live views for the whole host (default six on
   hardware encoding, two on software), `ffmpegPath` points at a specific ffmpeg binary, and
   each camera takes `quality` (`auto`, `high`, `medium`, `low`; `auto` by default) and

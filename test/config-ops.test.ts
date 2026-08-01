@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { DEFAULTS, ensureConfig, renderDeviceHeader, setDeviceSetting } from '../homebridge-ui/public/config-ops.js'
+import { DEFAULTS, ensureConfig, QUALITY_OPTIONS, renderDeviceHeader, renderQualitySelect, setDeviceSetting } from '../homebridge-ui/public/config-ops.js'
+import { parseConfig, settingsFor } from '../src/config.js'
 
 // Minimal fake DOM — just enough to prove renderDeviceHeader never turns
 // console-supplied text into markup. The load-bearing assertion is the
@@ -13,6 +14,10 @@ class FakeElement {
   tagName: string
   children: (FakeElement | string)[] = []
   attributes: Record<string, string> = {}
+  /** Properties, not markup — assigning these can never parse a payload. */
+  id = ''
+  value = ''
+  selected = false
   private _text = ''
 
   constructor(tagName: string) {
@@ -122,6 +127,89 @@ describe('setDeviceSetting', () => {
     const original = ensureConfig({})
     setDeviceSetting(original, 'cam1', 'hksv', true)
     expect(original.devices).toEqual({})
+  })
+})
+
+describe('the streaming settings the UI now writes', () => {
+  const minimal = { platform: 'UniFiProtect', host: '10.0.0.1', apiKey: 'k' }
+
+  it('stores a quality override and drops it again when set back to the default', () => {
+    let config = setDeviceSetting(ensureConfig({}), 'cam1', 'quality', 'low')
+    expect(config.devices.cam1).toEqual({ quality: 'low' })
+
+    config = setDeviceSetting(config, 'cam1', 'quality', 'auto')
+
+    // Back to the default, so nothing is written — otherwise changing the
+    // global default would leave every "untouched" camera pinned.
+    expect(config.devices.cam1).toBeUndefined()
+  })
+
+  it('stores an audio opt-in and drops it again when switched off', () => {
+    let config = setDeviceSetting(ensureConfig({}), 'cam1', 'audio', true)
+    expect(config.devices.cam1).toEqual({ audio: true })
+
+    config = setDeviceSetting(config, 'cam1', 'audio', false)
+
+    expect(config.devices.cam1).toBeUndefined()
+  })
+
+  // What the UI writes must be what the plugin can load. Zod does NOT
+  // re-validate a `.default()` value, so a UI-only value would sail through
+  // every other test here and then refuse to load at startup.
+  it('offers only quality values the plugin schema accepts', () => {
+    for (const [value] of QUALITY_OPTIONS) {
+      const parsed = parseConfig({ ...minimal, devices: { cam1: { quality: value } } })
+      expect(parsed.success, value).toBe(true)
+      expect(parsed.success && settingsFor(parsed.data, 'cam1').quality).toBe(value)
+    }
+    // ...and every value the schema accepts is offered, or a setting exists
+    // that the UI can never reach.
+    expect(QUALITY_OPTIONS.map(([value]) => value).sort()).toEqual(['auto', 'high', 'low', 'medium'])
+  })
+
+  // `ensureConfig` writes DEFAULTS into config.json on every save, so a value
+  // that has drifted from the schema silently overrides the plugin's own
+  // default for everyone who opens the settings page.
+  it('keeps the UI defaults identical to the schema defaults', () => {
+    const parsed = parseConfig(minimal)
+    expect(parsed.success && parsed.data.defaults).toEqual(DEFAULTS)
+    // And a camera with no override resolves to audio off on both sides.
+    expect(parsed.success && settingsFor(parsed.data, 'cam1').audio).toBe(false)
+    expect(setDeviceSetting(ensureConfig({}), 'cam1', 'audio', false).devices.cam1).toBeUndefined()
+  })
+})
+
+describe('renderQualitySelect', () => {
+  const device = { id: 'cam1' }
+
+  it('renders every option, in order, with the current value selected', () => {
+    const { wrap, select } = renderQualitySelect(fakeDocument, device, 'medium') as unknown as { wrap: FakeElement, select: FakeElement }
+
+    expect(select.tagName).toBe('SELECT')
+    const options = select.children as FakeElement[]
+    expect(options.map(o => o.value)).toEqual(QUALITY_OPTIONS.map(([value]) => value))
+    expect(options.filter(o => o.selected).map(o => o.value)).toEqual(['medium'])
+    // The label is wired to the control, or clicking it does nothing.
+    expect(wrap.attributes.for).toBe('cam1-quality')
+    expect(select.id).toBe('cam1-quality')
+    // Real measured resolutions, so "low" is an informed choice.
+    expect(wrap.textContent).toContain('640 × 360')
+  })
+
+  it('selects nothing when the stored value is unknown, rather than guessing', () => {
+    const { select } = renderQualitySelect(fakeDocument, device, 'ultra') as unknown as { select: FakeElement }
+    expect((select.children as FakeElement[]).some(o => o.selected)).toBe(false)
+  })
+
+  // A device id comes straight from the Protect console, exactly like the name.
+  it('renders a console-supplied device id as an inert attribute, never as markup', () => {
+    const payload = '"><img src=x onerror=alert(1)>'
+
+    const { wrap, select } = renderQualitySelect(fakeDocument, { id: payload }, 'auto') as unknown as { wrap: FakeElement, select: FakeElement }
+
+    expect(wrap.attributes.for).toBe(`${payload}-quality`)
+    expect(select.id).toBe(`${payload}-quality`)
+    expect(findByTag([wrap], 'IMG')).toBeNull()
   })
 })
 
