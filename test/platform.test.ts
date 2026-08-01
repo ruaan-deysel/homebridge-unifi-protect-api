@@ -53,6 +53,7 @@ function makeClient(devices: unknown[]) {
     getSensors: vi.fn(async () => of('sensor')),
     getChimes: vi.fn(async () => of('chime')),
     getViewers: vi.fn(async () => of('viewer')),
+    patchCamera: vi.fn(async () => ({})),
   }
 }
 
@@ -792,5 +793,33 @@ describe('uniFiProtectPlatform', () => {
     const accessory = platform.accessories.get('uuid-cam1')
     expect(accessory?.displayName).toBe('Front Door')
     expect(accessory?.context.device).toMatchObject({ id: 'cam1', name: 'Front Door', modelKey: 'camera' })
+  })
+
+  // The other half of Task 5: a change made in the Protect app, not Home.app,
+  // must still reach the switch. Assert the characteristic's actual value, not
+  // merely that the handler ran without throwing.
+  it('updates the LED switch from a deviceUpdate frame changing ledSettings', async () => {
+    const { platform, bus } = await withCameras()
+    const doorbell = platform.accessories.get(`uuid-${DOORBELL}`) as unknown as FakeAccessory
+    const on = doorbell.getServiceById(S.Switch, 'led')!.getCharacteristic(C.On)
+    // Doorbell's fixture ships ledSettings.isEnabled: false.
+    expect(on.value).toBe(false)
+
+    bus.emit('deviceUpdate', { type: 'update', item: { id: DOORBELL, modelKey: 'camera', ledSettings: { isEnabled: true, welcomeLed: true, floodLed: true } } })
+
+    expect(on.value).toBe(true)
+  })
+
+  // The wire payload is what real hardware actually receives — a test that only
+  // checks `setLed` was called with the right arguments would still pass if the
+  // platform sent the wrong body to Protect.
+  it('sends the exact ledSettings body to patchCamera when the switch is set', async () => {
+    const { platform } = await withCameras()
+    const doorbell = platform.accessories.get(`uuid-${DOORBELL}`) as unknown as FakeAccessory
+    const on = doorbell.getServiceById(S.Switch, 'led')!.getCharacteristic(C.On)
+
+    await Promise.all(on.listeners('set').map(h => h(true)))
+
+    expect(platform.client.patchCamera).toHaveBeenCalledWith(DOORBELL, { ledSettings: { isEnabled: true } })
   })
 })

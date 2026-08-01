@@ -483,5 +483,13 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
       this.api.updatePlatformAccessories([accessory])
       this.log.info(`Renamed ${device.id} to "${label}".`)
     }
+
+    // Re-diff the same way reconcile() does. This is how a `ledSettings` change
+    // made in the Protect app — or any other field a deviceUpdate frame carries —
+    // reaches the switch: buildCameraServices is idempotent and re-applies its
+    // own understood/degraded floor, so this never removes a service the merge
+    // did not genuinely justify removing.
+    if (modelKey === 'camera')
+      buildCameraServices(this.api, this.log, accessory, device as unknown as Record<string, unknown>, this.cameraCallbacks)
   }
 }
