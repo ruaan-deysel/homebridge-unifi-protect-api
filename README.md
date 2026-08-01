@@ -48,12 +48,18 @@ That is why the plugin defaults to six concurrent live views on hardware and onl
 software: three software streams would saturate a 12-thread host on their own.
 
 At startup the plugin probes ffmpeg, prefers Intel Quick Sync (QSV) then VAAPI, and
-**verifies the encoder actually initialises** rather than trusting `-encoders` to list it.
-The log line says which one it chose:
+**trial-encodes each one** rather than trusting `-encoders` to list it. A candidate that
+cannot initialise is skipped and the next is tried; software is the last resort, not the
+second. The log line says which one it ended up on:
 
 ```
-Using ffmpeg at /usr/bin/ffmpeg with hardware encoding (h264_qsv).
+Using ffmpeg at /usr/bin/ffmpeg with hardware encoding (h264_vaapi).
 ```
+
+Seeing `h264_vaapi` rather than `h264_qsv` on an Intel host is normal and not a fault: on
+the reference console (UHD 630, i915) `/usr/bin/ffmpeg` lists both, QSV fails with
+`Device creation failed: -1313558101`, and VAAPI encodes cleanly. Run Homebridge with
+`DEBUG` logging to see which candidates were rejected and why.
 
 A `warn` naming `libx264` instead means hardware acceleration is not reaching the process.
 The usual causes, in order:

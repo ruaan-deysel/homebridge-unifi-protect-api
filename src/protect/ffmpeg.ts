@@ -35,12 +35,26 @@ function hasHwaccel(hwaccels: string, name: string): boolean {
   return new RegExp(`^\\s*${name}\\s*$`, 'm').test(hwaccels)
 }
 
-export function chooseEncoder(hwaccels: string, encoders: string): Omit<FfmpegCapabilities, 'path'> {
+/**
+ * Every encoder this build claims, best first, always ending in libx264.
+ *
+ * A LIST and not a single pick, because claiming is not working: measured on
+ * the reference console (i7-8700K / UHD 630), `/usr/bin/ffmpeg` lists h264_qsv
+ * and h264_vaapi, and QSV fails outright — `Device creation failed: -1313558101`
+ * — while VAAPI encodes fine. Returning only the first preference meant a failed
+ * QSV trial fell straight to software on a host with a perfectly good hardware
+ * encoder: ~2.5 cores per stream instead of ~0.09, and a cap of two instead of six.
+ * Software is the last resort, never the second.
+ */
+export function encoderCandidates(hwaccels: string, encoders: string): Omit<FfmpegCapabilities, 'path'>[] {
+  const candidates: Omit<FfmpegCapabilities, 'path'>[] = []
   if (hasHwaccel(hwaccels, 'qsv') && hasEncoder(encoders, 'h264_qsv'))
-    return { encoder: 'h264_qsv', hwaccel: 'qsv' }
+    candidates.push({ encoder: 'h264_qsv', hwaccel: 'qsv' })
   if (hasHwaccel(hwaccels, 'vaapi') && hasEncoder(encoders, 'h264_vaapi'))
-    return { encoder: 'h264_vaapi', hwaccel: 'vaapi' }
-  return { encoder: 'libx264' }
+    candidates.push({ encoder: 'h264_vaapi', hwaccel: 'vaapi' })
+  // Always present, always last: it needs no device and cannot fail its trial.
+  candidates.push({ encoder: 'libx264' })
+  return candidates
 }
 
 /**
@@ -71,31 +85,41 @@ export async function probeFfmpeg(options: ProbeOptions): Promise<FfmpegCapabili
 
   let fallback: FfmpegCapabilities | undefined
   for (const path of paths) {
-    let caps: Omit<FfmpegCapabilities, 'path'>
+    let candidates: Omit<FfmpegCapabilities, 'path'>[]
     try {
       const [hwaccels, encoders] = await Promise.all([
         run(path, ['-hide_banner', '-hwaccels']),
         run(path, ['-hide_banner', '-encoders']),
       ])
-      caps = chooseEncoder(hwaccels, encoders)
+      candidates = encoderCandidates(hwaccels, encoders)
     }
     catch (error) {
       options.log.debug(`ffmpeg at ${path} is not usable: ${errorMessage(error)}`)
       continue
     }
-    if (caps.encoder !== 'libx264') {
+
+    // Trial each in turn and take the first that ACTUALLY encodes. libx264 is
+    // last and needs no device, so `caps` is always assigned.
+    let caps = candidates.at(-1)!
+    for (const candidate of candidates) {
+      if (candidate.encoder === 'libx264')
+        break
       try {
-        await run(path, viabilityArgs(caps))
-        options.log.info(`Using ffmpeg at ${path} with hardware encoding (${caps.encoder}).`)
-        return { path, ...caps }
+        await run(path, viabilityArgs(candidate))
+        caps = candidate
+        break
       }
       catch (error) {
-        // Listed but not usable — no /dev/dri passed into the container, no
-        // driver, or the GPU is busy. Demote rather than hand every viewer a
-        // stream that cannot start.
-        options.log.debug(`ffmpeg at ${path} lists ${caps.encoder} but cannot use it: ${errorMessage(error)}`)
-        caps = { encoder: 'libx264' }
+        // Listed but not usable — no /dev/dri in the container, no driver, or
+        // the GPU is busy. Try the next hardware encoder before giving up on
+        // hardware altogether.
+        options.log.debug(`ffmpeg at ${path} lists ${candidate.encoder} but cannot use it: ${errorMessage(error)}`)
       }
+    }
+
+    if (caps.encoder !== 'libx264') {
+      options.log.info(`Using ffmpeg at ${path} with hardware encoding (${caps.encoder}).`)
+      return { path, ...caps }
     }
     // Keep looking: a later candidate may have hardware support. `/usr/local/bin`
     // precedes `/usr/bin` on PATH in the Homebridge image, and the binary it

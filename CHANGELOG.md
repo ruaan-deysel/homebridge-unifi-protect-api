@@ -94,10 +94,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Live view SSRCs are now positive signed 32-bit values. The previous range reached
   0x100000000, which HomeKit and ffmpeg both reject, so a fraction of streams simply never
   loaded — intermittently, and with nothing in the log to explain it.
-- A hardware encoder is now trial-encoded before the plugin commits to it. Being listed by
-  `ffmpeg -encoders` only means the build was compiled with it, not that the container can
-  open `/dev/dri`; a listed-but-unusable encoder made every live view fail at the moment the
-  user pressed play, with no software fallback left to take.
+- Every hardware encoder is now trial-encoded before the plugin commits to it, and a
+  candidate that fails falls through to the next one rather than to software. Being listed
+  by `ffmpeg -encoders` only means the build was compiled with it, not that the container
+  can open `/dev/dri`. On the reference console `/usr/bin/ffmpeg` lists both QSV and VAAPI,
+  QSV cannot create its device, and VAAPI works — so the plugin now runs VAAPI there, where
+  trusting the listing would have failed every live view and demoting on the first failure
+  would have put a perfectly good GPU on software encoding at roughly 27× the CPU.
 - A live view requested while Homebridge was shutting down can no longer start an ffmpeg
   after the shutdown handler has already run. Such a process was in no map and nothing would
   ever have killed it.
