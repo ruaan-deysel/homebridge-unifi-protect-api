@@ -46,12 +46,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hardware encoding, two with software. Five cameras therefore share one budget instead of
   each getting its own, and a request past the cap is refused with a logged reason instead
   of overloading the machine.
-- Live view can carry audio, transcoded to the AAC-ELD that HomeKit requires and sent as
-  its own stream alongside the video. It is **off by default and opt-in per camera** —
-  recording audio is legally more restricted than video in many places, and an outdoor
-  camera hears passers-by who have not consented. If the installed ffmpeg was built
-  without `libfdk_aac`, which is common in container images, the plugin says so once and
-  streams video only rather than producing a stream HomeKit cannot play.
+- Live view can carry audio, sent as its own stream alongside the video and transcoded to
+  Opus, which HomeKit accepts and which the hardware-capable ffmpeg can encode. AAC-ELD is
+  used instead when a build has `libfdk_aac` but not `libopus`. Audio is **off by default
+  and opt-in per camera** — recording audio is legally more restricted than video in many
+  places, and an outdoor camera hears passers-by who have not consented. If ffmpeg has
+  neither encoder the plugin says so once and streams video only, rather than producing a
+  stream HomeKit cannot play.
 - ffmpeg processes for live view are now supervised: started, tracked, and killed on
   teardown so a dropped viewer can never leave a transcode running indefinitely. ffmpeg's
   own failure output is redacted before it is ever logged, since the command line it echoes
