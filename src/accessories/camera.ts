@@ -1,15 +1,5 @@
 import type { API, Logging, PlatformAccessory, Service } from 'homebridge'
-
-/**
- * What the tracker hands to `applyChange`. Declared here because Task 3 lands
- * before the tracker; `src/accessories/tracker.ts` should import this rather
- * than redeclare it. Only these two fields are read, so a richer tracker type
- * carrying an event id or device id assigns straight in.
- */
-export interface SensorChange {
-  subtype: string
-  active: boolean
-}
+import type { SensorChange } from './tracker.js'
 
 /** Labels shown in Home.app, one per stable subtype. */
 export const SUBTYPE_LABELS: Record<string, string> = {
