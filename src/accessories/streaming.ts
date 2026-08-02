@@ -140,6 +140,11 @@ export function buildFfmpegArgs(caps: FfmpegCapabilities, s: StreamArgs): string
     String(s.video.payloadType),
     '-ssrc',
     String(s.video.ssrc),
+    // ffmpeg applies output options to the output that FOLLOWS them, so `-r`
+    // must sit here, before `-f rtp` — after the output URL it is dangling and
+    // never reaches the encoder. This is the frame-rate padding the package
+    // lens depends on to avoid looking like a stalled stream to HomeKit.
+    ...(s.fps !== undefined ? ['-r', String(s.fps)] : []),
     '-f',
     'rtp',
     '-srtp_out_suite',
@@ -148,9 +153,6 @@ export function buildFfmpegArgs(caps: FfmpegCapabilities, s: StreamArgs): string
     s.video.key.toString('base64'),
     destination(s.address, s.video, 1316),
   ]
-
-  if (s.fps !== undefined)
-    video.push('-r', String(s.fps))
 
   if (!s.audio)
     return [...input, ...video]
@@ -356,12 +358,25 @@ export class StreamingDelegate implements CameraStreamingDelegate {
   async audioStreamingOptions(): Promise<AudioStreamingOptions | undefined> {
     // The package lens carries audio, but from the SAME microphone as the main
     // lens. Two identical audio sources on one physical device benefits nobody.
+    // (Also enforced in startSession's audioFor() call — see the comment there;
+    // this guard is deliberately redundant with it, not a leftover to prune.)
     if (this.options.channel === 'package')
       return undefined
     if (!this.options.settings().audio)
       return undefined
     const codec = await this.probeAudioCodec()
     return codec ? { codecs: [audioStreamingCodec(codec)] } : undefined
+  }
+
+  /**
+   * The substream or channel this request resolves to: 'package' for the
+   * package lens, otherwise whatever selectQuality picks. Shared by
+   * streamUrlFor and the session-start log line so the two never disagree.
+   */
+  private channelFor(request: { width: number, height: number }): string {
+    return this.options.channel === 'package'
+      ? 'package'
+      : selectQuality(request.width, request.height, this.options.settings().quality)
   }
 
   /** The package lens has one stream; every other camera selects a substream. */
@@ -404,7 +419,9 @@ export class StreamingDelegate implements CameraStreamingDelegate {
       const settings = this.options.settings()
       const isPackage = this.options.channel === 'package'
       // No audio on the package path, whatever the camera's audio setting says
-      // — see audioStreamingOptions for why.
+      // — see audioStreamingOptions for why. That guard covers what HomeKit is
+      // TOLD is available; this one covers what a session actually SENDS, and
+      // both must stay in place — this is deliberate redundancy, not a leftover.
       const audio = await this.audioFor(request, rtp, settings.audio && !isPackage)
 
       let url: string
@@ -457,8 +474,7 @@ export class StreamingDelegate implements CameraStreamingDelegate {
         return false
       }
       this.sessions.set(sessionId, proc)
-      const channelDescription = isPackage ? 'package' : selectQuality(request.width, request.height, settings.quality)
-      this.options.log.info(`Live view started for "${this.options.label}" (${channelDescription} substream, ${audio ? 'with' : 'no'} audio).`)
+      this.options.log.info(`Live view started for "${this.options.label}" (${this.channelFor(request)} substream, ${audio ? 'with' : 'no'} audio).`)
       return true
     }
     finally {

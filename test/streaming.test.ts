@@ -738,6 +738,14 @@ describe('buildFfmpegArgs frame-rate padding', () => {
     expect(args[args.indexOf('-r') + 1]).toBe('15')
   })
 
+  it('places -r before -f rtp, so it applies to the output that follows it', () => {
+    // Position, not presence: ffmpeg applies an output option to the output
+    // that comes AFTER it, so `-r` appended past the output URL is dangling
+    // and never reaches the encoder — the defect this guards against.
+    const args = buildFfmpegArgs(PKG_CAPS, { ...base, fps: 15 })
+    expect(args.indexOf('-r')).toBeLessThan(args.indexOf('-f'))
+  })
+
   it('omits -r when no fps is supplied', () => {
     expect(buildFfmpegArgs(PKG_CAPS, base)).not.toContain('-r')
   })
