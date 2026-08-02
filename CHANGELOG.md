@@ -6,6 +6,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- TypeScript is pinned to the 6.x line (`^6.0.3`), matching what Homebridge 2.2.1 itself
+  builds against. npm's `latest` tag is now TypeScript 7, whose native compiler is too new
+  to assume Homebridge supports it; the caret keeps 7 out.
+
 ### Added
 - Motion sensors for every camera, driven by the live event stream rather than polling.
   `GET /v1/events` does not exist in the Integration API, so a lost end-frame can never be
