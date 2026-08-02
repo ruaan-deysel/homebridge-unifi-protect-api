@@ -58,7 +58,8 @@ describe('prepareStream when a port cannot be reserved', () => {
     // rather than fail this one test.
     const outcome = await Promise.race([
       new Promise<unknown>(resolve => delegate.prepareStream(prepareRequest(), resolve)),
-      new Promise(resolve => setTimeout(() => resolve('never answered'), 1000)),
+      // Arg passed to setTimeout rather than closed over: e18e/prefer-timer-args.
+      new Promise(resolve => setTimeout(resolve, 1000, 'never answered')),
     ])
 
     expect(outcome).toBeInstanceOf(Error)
