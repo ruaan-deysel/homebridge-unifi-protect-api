@@ -126,25 +126,42 @@ function destination(address: string, target: RtpTarget, packetSize: number): st
 }
 
 /**
- * The scale filter that matches the encoder. With hardware decoding the frames
- * are already VAAPI/QSV surfaces in GPU memory, and plain `scale` — a software
- * filter — cannot touch them: ffmpeg would fail to build the filter graph and
- * the stream would never start.
+ * Software scale, then `hwupload` so the hardware encoder gets a GPU surface.
+ * Frames are in system memory here because the scaling path decodes in software
+ * — see buildFfmpegArgs. The QSV form mirrors the working probe in
+ * `viabilityArgs`, `extra_hw_frames` and all.
  */
 function scaleFilter(caps: FfmpegCapabilities, size: { width: number, height: number }): string {
+  const scale = `scale=${size.width}:${size.height}`
   if (caps.hwaccel === 'vaapi')
-    return `scale_vaapi=w=${size.width}:h=${size.height}`
+    return `${scale},format=nv12,hwupload`
   if (caps.hwaccel === 'qsv')
-    return `vpp_qsv=w=${size.width}:h=${size.height}`
-  return `scale=${size.width}:${size.height}`
+    return `${scale},format=nv12,hwupload=extra_hw_frames=64`
+  return scale
 }
 
 export function buildFfmpegArgs(caps: FfmpegCapabilities, s: StreamArgs): string[] {
   const input: string[] = ['-hide_banner', '-loglevel', 'warning']
-  if (caps.hwaccel === 'vaapi')
+  if (s.scale) {
+    // The scaling path — the package lens, and only it — decodes in SOFTWARE and
+    // hands the encoder an uploaded surface. WHY: in-GPU `scale_vaapi` dies on the
+    // reference hardware (Intel UHD 630, ffmpeg 6.x) with "Cannot allocate memory"
+    // injecting frames into the filter graph — verified live, and `-extra_hw_frames`
+    // (16 and 32, with and without `:format=nv12`) does not help. The trade is only
+    // affordable BECAUSE it is the package lens: 1600x1200 at 2 fps, so software
+    // decoding it is trivial. The main lens is 4 MP at 30 fps, where hardware decode
+    // is worth roughly 27x the CPU — hence this branch, not a blanket change.
+    if (caps.hwaccel === 'vaapi')
+      input.push('-vaapi_device', '/dev/dri/renderD128')
+    else if (caps.hwaccel === 'qsv')
+      input.push('-init_hw_device', 'qsv=hw', '-filter_hw_device', 'hw')
+  }
+  else if (caps.hwaccel === 'vaapi') {
     input.push('-hwaccel', 'vaapi', '-hwaccel_device', '/dev/dri/renderD128', '-hwaccel_output_format', 'vaapi')
-  else if (caps.hwaccel === 'qsv')
+  }
+  else if (caps.hwaccel === 'qsv') {
     input.push('-hwaccel', 'qsv', '-hwaccel_output_format', 'qsv')
+  }
 
   // TCP, not UDP: Protect's RTSPS is TLS and UDP loses frames on a busy LAN.
   input.push('-rtsp_transport', 'tcp', '-i', s.url)

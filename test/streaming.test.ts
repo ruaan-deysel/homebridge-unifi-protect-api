@@ -784,12 +784,14 @@ describe('buildFfmpegArgs scaling', () => {
   const base = { url: PKG_URL, bitrate: 800, address: '192.0.2.9', video: pkgTarget() }
   const scale = { width: 1280, height: 960 }
 
-  // The filter has to match where the frames live. With hardware decoding they
-  // are GPU surfaces, and a software `scale` cannot touch them — the filter
-  // graph fails to build and the stream never starts.
+  const QSV_CAPS = { path: '/usr/bin/ffmpeg', encoder: 'h264_qsv' as const, hwaccel: 'qsv' as const }
+
+  // Software decode, software scale, upload for a hardware encode. In-GPU
+  // scaling (`scale_vaapi`) fails on the reference hardware with "Cannot
+  // allocate memory"; this form is the one measured working there.
   const expected = [
-    { name: 'vaapi', caps: PKG_CAPS, filter: 'scale_vaapi=w=1280:h=960' },
-    { name: 'qsv', caps: { path: '/usr/bin/ffmpeg', encoder: 'h264_qsv' as const, hwaccel: 'qsv' as const }, filter: 'vpp_qsv=w=1280:h=960' },
+    { name: 'vaapi', caps: PKG_CAPS, filter: 'scale=1280:960,format=nv12,hwupload' },
+    { name: 'qsv', caps: QSV_CAPS, filter: 'scale=1280:960,format=nv12,hwupload=extra_hw_frames=64' },
     { name: 'software', caps: { path: '/usr/bin/ffmpeg', encoder: 'libx264' as const }, filter: 'scale=1280:960' },
   ]
 
@@ -803,7 +805,40 @@ describe('buildFfmpegArgs scaling', () => {
 
   it('follows the negotiated size rather than a constant', () => {
     const args = buildFfmpegArgs(PKG_CAPS, { ...base, scale: { width: 640, height: 480 } })
-    expect(args[args.indexOf('-vf') + 1]).toBe('scale_vaapi=w=640:h=480')
+    expect(args[args.indexOf('-vf') + 1]).toBe('scale=640:480,format=nv12,hwupload')
+  })
+
+  it('drops hardware DECODE when scaling, keeping the hardware encoder', () => {
+    // The whole point of the change: hwaccel decode plus a filter is what blew
+    // up on the real console. The encoder must still be the hardware one.
+    const args = buildFfmpegArgs(PKG_CAPS, { ...base, scale })
+    expect(args).not.toContain('-hwaccel')
+    expect(args).not.toContain('-hwaccel_output_format')
+    expect(args[args.indexOf('-c:v') + 1]).toBe(PKG_CAPS.encoder)
+  })
+
+  it('initialises the encode device before the input, per encoder', () => {
+    const vaapi = buildFfmpegArgs(PKG_CAPS, { ...base, scale })
+    expect(vaapi[vaapi.indexOf('-vaapi_device') + 1]).toBe('/dev/dri/renderD128')
+    expect(vaapi.indexOf('-vaapi_device')).toBeLessThan(vaapi.indexOf('-i'))
+
+    const qsv = buildFfmpegArgs(QSV_CAPS, { ...base, scale })
+    expect(qsv[qsv.indexOf('-init_hw_device') + 1]).toBe('qsv=hw')
+    expect(qsv[qsv.indexOf('-filter_hw_device') + 1]).toBe('hw')
+    expect(qsv.indexOf('-init_hw_device')).toBeLessThan(qsv.indexOf('-i'))
+    expect(qsv).not.toContain('-hwaccel')
+
+    // Software encoder needs no device at all.
+    const sw = buildFfmpegArgs(CAPS_SW, { ...base, scale })
+    expect(sw).not.toContain('-vaapi_device')
+    expect(sw).not.toContain('-init_hw_device')
+  })
+
+  it('keeps hardware decode on the unscaled main-camera path', () => {
+    const args = buildFfmpegArgs(PKG_CAPS, base)
+    expect(args[args.indexOf('-hwaccel') + 1]).toBe('vaapi')
+    expect(args[args.indexOf('-hwaccel_output_format') + 1]).toBe('vaapi')
+    expect(args).not.toContain('-vaapi_device')
   })
 
   it('places -vf before -f rtp and the output url, so it applies to that output', () => {
@@ -835,7 +870,7 @@ describe('package session honours what homekit negotiated', () => {
     // Torn down BEFORE the assertions: a failing expect would otherwise leave
     // the process-wide count non-zero and fail every later test with it.
     delegate.stopAll()
-    expect(args[args.indexOf('-vf') + 1]).toBe('scale_vaapi=w=1024:h=768')
+    expect(args[args.indexOf('-vf') + 1]).toBe('scale=1024:768,format=nv12,hwupload')
     expect(args[args.indexOf('-r') + 1]).toBe('24')
   })
 
