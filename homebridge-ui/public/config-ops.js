@@ -169,10 +169,10 @@ export function renderQualitySelect(doc, device, value) {
 export const PACKAGE_LABEL = 'Package camera (separate accessory, 2 fps)'
 
 /**
- * Only cameras, and only where the probe (see src/protect/stream.ts,
- * `hasPackageCamera`) found the lens — a real Doorbell's `featureFlags` has no
- * such field, so this must come from the discover payload's probed result, not
- * from guessing at every camera.
+ * Only cameras, and only where `hasPackageCamera` is `true` on the device
+ * itself — a TOP-LEVEL field on the discover payload (not under
+ * `featureFlags`), read straight off what the console already sent. No probe:
+ * nothing here makes a request to learn whether the lens exists.
  */
 export function shouldOfferPackageCamera(device) {
   return device.type === 'camera' && device.hasPackageCamera === true

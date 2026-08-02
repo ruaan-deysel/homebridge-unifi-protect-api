@@ -1415,6 +1415,32 @@ describe('uniFiProtectPlatform', () => {
     expect(doorbellOf(accessories).getServiceById(S.MotionSensor, 'detect-package')).toBeDefined()
   })
 
+  // Otherwise Home.app shows Default-Manufacturer/Model/Serial on its tile.
+  it('populates AccessoryInformation on the package accessory, with its own serial', async () => {
+    const { accessories } = await withCameras(cameras, { config: packageOn(DOORBELL) })
+    const pkg = packageOf(accessories)!
+    const main = doorbellOf(accessories)
+    const info = pkg.getService(S.AccessoryInformation)!
+
+    expect(info.valueOf_(C.Manufacturer)).toBe('Ubiquiti')
+    expect(info.valueOf_(C.Model)).toBe('camera')
+    expect(info.valueOf_(C.SerialNumber)).toBe(`${camera('Doorbell').mac}-package`)
+    // Two bridged accessories sharing a serial is one accessory as far as
+    // HomeKit's identity tracking is concerned.
+    expect(info.valueOf_(C.SerialNumber)).not.toBe(main.getService(S.AccessoryInformation)!.valueOf_(C.SerialNumber))
+  })
+
+  // A degraded payload has no `mac` — writing a serial derived from the id
+  // instead would make HomeKit treat the accessory as new the moment a real
+  // payload arrives.
+  it('does not set AccessoryInformation on the package accessory from a degraded payload', async () => {
+    const degraded = cameras.map(c => ({ id: c.id, name: c.name, modelKey: 'camera', hasPackageCamera: true }))
+    const { accessories } = await withCameras(degraded, { config: packageOn(DOORBELL) })
+    const pkg = packageOf(accessories)!
+
+    expect(pkg.getService(S.AccessoryInformation)).toBeUndefined()
+  })
+
   // The lens is 1600x1200 — 4:3, unlike every other stream this plugin serves.
   // Advertising a 16:9 size would promise a frame it cannot produce.
   it('advertises 4:3 resolutions and no audio for the package lens', async () => {
@@ -1499,6 +1525,45 @@ describe('uniFiProtectPlatform', () => {
     expect(api.unregisterPlatformAccessories).not.toHaveBeenCalled()
   })
 
+  // A transient outage (ffmpeg missing at startup) must not cost an
+  // already-registered package accessory its HomeKit room/scene/automation
+  // membership. Main camera accessories get the same treatment in this
+  // situation — they just end up controller-less.
+  it('keeps an already-registered package accessory across a startup with no usable ffmpeg, controller-less', async () => {
+    const config = packageOn(DOORBELL)
+    const { accessories } = await withCameras(cameras, { config })
+    const pkg = packageOf(accessories)!
+    expect(pkg.controllers).toHaveLength(1)
+
+    // A fresh platform models the next startup: the accessory cache already
+    // has the package accessory (Homebridge restores it from its own cache
+    // on disk), but this run's ffmpeg probe fails.
+    const probe = vi.fn(async () => {
+      throw new Error('no usable ffmpeg')
+    })
+    const restarted = makePlatform(config, cameras)
+    restarted.platform.probeFfmpeg = probe as never
+    restarted.platform.accessories.set(pkg.UUID, pkg as never)
+
+    await restarted.platform.discover()
+
+    expect(restarted.platform.accessories.has(pkg.UUID)).toBe(true)
+    expect(restarted.api.unregisterPlatformAccessories).not.toHaveBeenCalled()
+    // No second controller wired on top of the one already there.
+    expect(pkg.controllers).toHaveLength(1)
+  })
+
+  // No pre-existing accessory and no usable ffmpeg: there is nothing to keep
+  // and nothing worth creating controller-less.
+  it('registers no package accessory when ffmpeg is unusable and none existed yet', async () => {
+    const probe = vi.fn(async () => {
+      throw new Error('no usable ffmpeg')
+    })
+    const { accessories } = await withCameras(cameras, { config: packageOn(DOORBELL), probeFfmpeg: probe })
+
+    expect(packageOf(accessories)).toBeUndefined()
+  })
+
   // The user's own explicit instruction, exactly like `expose: false` — so it
   // takes effect now rather than waiting out the confirmation window meant for
   // a console answering mid-reboot.
@@ -1509,6 +1574,24 @@ describe('uniFiProtectPlatform', () => {
 
     const live = (platform as unknown as { config: ProtectPluginConfig }).config
     live.devices[DOORBELL] = { packageCamera: false }
+    await platform.discover()
+
+    expect(platform.accessories.has(pkg.UUID)).toBe(false)
+    expect(registered(api.unregisterPlatformAccessories)).toContain(pkg)
+    expect(stop).toHaveBeenCalledTimes(1)
+  })
+
+  // A genuine removal, unlike the no-ffmpeg case above: the lens itself is
+  // gone from the console's answer, present ffmpeg or not, and must not wait
+  // out the confirmation window.
+  it('removes the package accessory when hasPackageCamera flips to false, even with ffmpeg present', async () => {
+    const config = packageOn(DOORBELL)
+    const { api, platform, accessories } = await withCameras(cameras, { config })
+    const pkg = packageOf(accessories)!
+    const stop = vi.spyOn(delegateOf(pkg), 'stopAll')
+
+    const client = (platform as unknown as { client: ReturnType<typeof makeClient> }).client
+    client.getCameras.mockResolvedValueOnce(cameras.map(c => (c.id === DOORBELL ? { ...c, hasPackageCamera: false } : c)))
     await platform.discover()
 
     expect(platform.accessories.has(pkg.UUID)).toBe(false)

@@ -4,7 +4,7 @@ import type { CameraCallbacks } from './accessories/camera.js'
 import type { SensorChange } from './accessories/tracker.js'
 import type { ProtectPluginConfig } from './config.js'
 import type { FfmpegCapabilities, RunFfmpeg } from './protect/ffmpeg.js'
-import { applyChange, buildCameraServices } from './accessories/camera.js'
+import { applyChange, buildCameraServices, isUnderstood } from './accessories/camera.js'
 import { routeEvent } from './accessories/router.js'
 import { StreamingDelegate } from './accessories/streaming.js'
 import { EventTracker } from './accessories/tracker.js'
@@ -647,10 +647,17 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
    * disappearing and breaks the user's automations.
    */
   private async attachPackageCamera(device: DiscoveredDevice): Promise<string | undefined> {
+    const uuid = this.api.hap.uuid.generate(packageSeed(device.id))
     // No usable ffmpeg means no live view for anyone. `urls` too: both are set
-    // together in prepareStreaming, and the delegate needs it.
+    // together in prepareStreaming, and the delegate needs it. An already
+    // registered package accessory is kept anyway (controller-less) — the
+    // outage is transient, and unregistering here would be immediate (see
+    // `reconcile`'s `reported` set) and permanently drop the user's HomeKit
+    // room/scene/automation membership over a startup blip. A package
+    // accessory that does not exist yet is not created for a camera with no
+    // usable ffmpeg: that is a genuine "nothing to show yet".
     if (!this.caps || !this.urls)
-      return
+      return this.accessories.has(uuid) ? uuid : undefined
     if (!settingsFor(this.config!, device.id).packageCamera)
       return
     // Straight off the payload this loop is already holding — no request of any
@@ -662,7 +669,6 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
     if (device.hasPackageCamera !== true)
       return
 
-    const uuid = this.api.hap.uuid.generate(packageSeed(device.id))
     const label = `${labelFor(device)} Package Camera`
     // From here on the accessory belongs in HomeKit, so the UUID is returned
     // even when wiring it up fails or shutdown lands mid-pass: the removal
@@ -684,6 +690,20 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
         this.api.updatePlatformAccessories([accessory])
       }
       accessory.context.device = device
+
+      // Same guard as buildCameraServices: only from a payload we understood.
+      // A degraded one has no `mac`, and a changed SerialNumber makes HomeKit
+      // treat this as a different accessory.
+      const raw = device as unknown as Record<string, unknown>
+      if (isUnderstood(raw)) {
+        const { Characteristic: C, Service: S } = this.api.hap
+        const info = accessory.getService(S.AccessoryInformation) ?? accessory.addService(S.AccessoryInformation)
+        // Suffixed like `packageSeed`'s UUID: two bridged accessories sharing a
+        // serial is one accessory as far as HomeKit's identity tracking cares.
+        info.setCharacteristic(C.Manufacturer, 'Ubiquiti')
+          .setCharacteristic(C.Model, typeof raw.modelKey === 'string' ? raw.modelKey : 'camera')
+          .setCharacteristic(C.SerialNumber, `${typeof raw.mac === 'string' ? raw.mac : String(device.id ?? 'unknown')}-package`)
+      }
 
       // Already wired means a later discovery; `stopped` means shutdown has
       // already stopped every delegate it knew about, so one attached now would
