@@ -113,19 +113,14 @@
     await save()
   })
 
-  // Which section a per-device toggle belongs in. `expose` is the only
-  // General control; everything camera-specific that cameraToggles() offers
-  // is live-view related except hksv (Recording) and packageCamera (a
-  // genuinely separate accessory).
-  const TOGGLE_SECTION = { hksv: 'Recording', packageCamera: 'Extra accessories' }
-
   /**
-   * Renders one device's settings into the detail pane and moves focus to its
-   * heading — the list stays where it is, but the content the user asked for
-   * just replaced what used to be there, so focus has to follow it.
+   * Renders one device's settings into the detail pane. `renderDetail` moves
+   * focus to its heading itself — the list stays where it is, but the content
+   * the user asked for just replaced what used to be there, so focus has to
+   * follow it.
    */
   function showDetail(device) {
-    const { pane, heading, bodies } = renderDetail(document, device)
+    const { pane, bodies } = renderDetail(document, device)
 
     const toggle = (body, key, label, comingLater) => {
       const fallback = defaultFor(config, key)
@@ -171,14 +166,14 @@
         await save()
       })
       bodies['Live view'].append(wrap)
-      // Which checkboxes a camera gets — including whether the package lens
-      // is offered — is decided in config-ops.js, where a test can reach it.
-      for (const { key, label, comingLater } of cameraToggles(device))
-        toggle(bodies[TOGGLE_SECTION[key] ?? 'Live view'], key, label, comingLater)
+      // Which checkboxes a camera gets, and which section each files under
+      // — including whether the package lens is offered — is decided in
+      // config-ops.js, where a test can reach it.
+      for (const { key, label, comingLater, section } of cameraToggles(device))
+        toggle(bodies[section ?? 'Live view'], key, label, comingLater)
     }
 
     deviceDetailEl.replaceChildren(pane)
-    heading.focus()
   }
 
   function render(devices) {

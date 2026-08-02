@@ -1,25 +1,9 @@
+import type { FakeElement } from './config-ops.test.js'
 import { describe, expect, it } from 'vitest'
 import { renderDetail, renderDeviceList, renderTabs } from '../homebridge-ui/public/ui-render.js'
-import { FakeElement, makeDoc } from './config-ops.test.js'
+import { makeDoc } from './config-ops.test.js'
 
 const doc = makeDoc()
-
-// Local to this file, not exported from config-ops.test.ts: this one walks a
-// single node rather than a list, which is what renderDeviceList/renderDetail
-// hand back. The actual injection guard is FakeElement's innerHTML setter
-// (shared) — this is just a cheap belt-and-braces restatement.
-function findByTag(node: FakeElement, tagName: string): FakeElement | undefined {
-  if (node.tagName === tagName)
-    return node
-  for (const child of node.children) {
-    if (child instanceof FakeElement) {
-      const found = findByTag(child, tagName)
-      if (found)
-        return found
-    }
-  }
-  return undefined
-}
 
 const DEVICES = [
   { id: 'a', name: 'Doorbell', type: 'camera', hasSpeaker: true, hasMic: true, hasPackageCamera: true },
@@ -91,6 +75,58 @@ describe('renderTabs', () => {
       delete globalThis.homebridge
     }
   })
+
+  // U4: without id/aria-controls/aria-labelledby/role="tabpanel", a screen
+  // reader has no way to tell which pane belongs to which tab button.
+  it('cross-references every button and pane for assistive tech', () => {
+    const { tablist, panes } = renderTabs(doc, ['A', 'B', 'C']) as unknown as {
+      tablist: FakeElement
+      panes: FakeElement[]
+    }
+    const buttons = tablist.children as FakeElement[]
+    buttons.forEach((b, i) => {
+      expect(b.id).toBeTruthy()
+      expect(b.attributes['aria-controls']).toBe(panes[i]!.id)
+    })
+    panes.forEach((p, i) => {
+      expect(p.attributes.role).toBe('tabpanel')
+      expect(p.id).toBeTruthy()
+      expect(p.attributes['aria-labelledby']).toBe(buttons[i]!.id)
+    })
+    // Every id is unique — a duplicate would make aria-controls/aria-labelledby
+    // ambiguous.
+    expect(new Set(buttons.map(b => b.id)).size).toBe(buttons.length)
+    expect(new Set(panes.map(p => p.id)).size).toBe(panes.length)
+  })
+
+  // U4: a roving tabindex keeps the strip a single Tab stop — arrow keys, not
+  // Tab, move between tabs, which is what a tablist's own controls are
+  // supposed to do.
+  it('keeps exactly one button in the Tab order at a time', () => {
+    const { tablist, select } = renderTabs(doc, ['A', 'B', 'C']) as unknown as {
+      tablist: FakeElement
+      select: (index: number) => void
+    }
+    const buttons = tablist.children as FakeElement[]
+    expect(buttons.map(b => b.tabIndex)).toEqual([0, -1, -1])
+    select(2)
+    expect(buttons.map(b => b.tabIndex)).toEqual([-1, -1, 0])
+  })
+
+  // U5: building the shell must not steal focus from wherever the host page
+  // already had it — only a user actually driving the tabs should move focus.
+  it('does not focus a tab merely from being constructed', () => {
+    const { tablist } = renderTabs(doc, ['A', 'B']) as unknown as { tablist: FakeElement }
+    const buttons = tablist.children as FakeElement[]
+    expect(buttons.every(b => b.focusCount === 0)).toBe(true)
+  })
+
+  it('still focuses the tab when selection is keyboard- or click-driven', () => {
+    const { tablist } = renderTabs(doc, ['A', 'B']) as unknown as { tablist: FakeElement }
+    const buttons = tablist.children as FakeElement[]
+    buttons[1]!.dispatch('click')
+    expect(buttons[1]!.focusCount).toBe(1)
+  })
 })
 
 describe('renderDeviceList', () => {
@@ -112,7 +148,13 @@ describe('renderDeviceList', () => {
   it('never lets a hostile device name become an element', () => {
     const hostile = [{ ...DEVICES[0]!, name: '<img src=x onerror=alert(1)>' }]
     const { list } = renderDeviceList(doc, hostile, () => {}) as unknown as { list: FakeElement }
-    expect(findByTag(list, 'IMG')).toBeUndefined()
+    // Load-bearing: `textContent` only returns the raw payload if the row
+    // assigned it via `.textContent =`. An `innerHTML` mutation would have
+    // parsed the string into (fake) child elements and returned '' here —
+    // proven by mutating renderDeviceList and watching this assertion fail
+    // (see the fix-wave report's mutation table). A prior `findByTag(...,
+    // 'IMG')` assertion here could never fail — FakeElement's `innerHTML`
+    // setter never creates child elements — and has been removed.
     expect(list.textContent).toContain('<img src=x onerror=alert(1)>')
   })
 
@@ -143,17 +185,22 @@ describe('renderDetail', () => {
 
   it('never lets a hostile device name become an element in the heading', () => {
     const hostile = { ...DEVICES[0]!, name: '<img src=x onerror=alert(1)>' }
-    const { pane, heading } = renderDetail(doc, hostile) as unknown as { pane: FakeElement, heading: FakeElement }
-    expect(findByTag(pane, 'IMG')).toBeUndefined()
+    const { heading } = renderDetail(doc, hostile) as unknown as { heading: FakeElement }
+    // Load-bearing for the same reason as the device-list test above: this
+    // fails against an innerHTML-based renderer. The former `findByTag(pane,
+    // 'IMG')` companion assertion could never fail and has been removed.
     expect(heading.textContent).toBe('<img src=x onerror=alert(1)>')
   })
 
-  it('makes the heading a programmatic focus target, for selection to move focus to', () => {
+  // U3: two facts tested in isolation (heading is focusable; a spied
+  // `focus()` records a call) don't prove selection actually moves focus
+  // there — the wiring lived only in index.html's untested `showDetail`.
+  // `renderDetail` now focuses its own heading before returning, so the
+  // thing every caller (including selection) triggers IS this call, and this
+  // one test covers both facts genuinely.
+  it('makes the heading a programmatic focus target and focuses it, which is how selection reaches it', () => {
     const { heading } = renderDetail(doc, DEVICES[0]!) as unknown as { heading: FakeElement }
     expect(heading.tabIndex).toBe(-1)
-    const calls: number[] = []
-    heading.focus = () => calls.push(1)
-    heading.focus()
-    expect(calls).toEqual([1])
+    expect(heading.focusCount).toBe(1)
   })
 })

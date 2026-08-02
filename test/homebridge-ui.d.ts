@@ -85,6 +85,7 @@ declare module '*/homebridge-ui/public/config-ops.js' {
   export const DEFAULTS: Defaults
   export const RECORDING_LIMITS: Record<IcloudTier, number>
   export function ensureConfig(raw?: Partial<ConfigShape> | null): ConfigShape
+  export function parseIcloudTier(raw: unknown): IcloudTier
   export function setDeviceSetting(
     config: ConfigShape,
     deviceId: string,
@@ -129,12 +130,13 @@ declare module '*/homebridge-ui/public/config-ops.js' {
   export function defaultFor(config: ConfigShape, key: string): unknown
   export function cameraToggles(
     device: { type?: string, hasMic?: boolean, hasSpeaker?: boolean, hasPackageCamera?: boolean },
-  ): { key: string, label: string, comingLater?: boolean }[]
+  ): { key: string, label: string, comingLater?: boolean, section: 'Live view' | 'Recording' | 'Extra accessories' }[]
 }
 
 declare module '*/homebridge-ui/public/ui-render.js' {
   export interface MinimalDomElement {
     tagName: string
+    id: string
     textContent: string
     className: string
     style: { display: string }
@@ -155,7 +157,7 @@ declare module '*/homebridge-ui/public/ui-render.js' {
     tablist: MinimalDomElement
     panes: MinimalDomElement[]
     buttons: MinimalDomElement[]
-    select: (index: number) => void
+    select: (index: number, options?: { focus?: boolean }) => void
   }
 
   export interface ListedDevice {

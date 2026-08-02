@@ -1,15 +1,24 @@
 import { describe, expect, it } from 'vitest'
-import { cameraToggles, defaultFor, DEFAULTS, ensureConfig, MAX_STREAMS_RANGE, PACKAGE_LABEL, parseMaxStreams, QUALITY_OPTIONS, RECORDING_LIMITS, renderDeviceHeader, renderQualitySelect, renderToggle, setDeviceSetting, setGlobalSetting, shouldOfferPackageCamera } from '../homebridge-ui/public/config-ops.js'
+import { cameraToggles, defaultFor, DEFAULTS, ensureConfig, MAX_STREAMS_RANGE, PACKAGE_LABEL, parseIcloudTier, parseMaxStreams, QUALITY_OPTIONS, RECORDING_LIMITS, renderDeviceHeader, renderQualitySelect, renderToggle, setDeviceSetting, setGlobalSetting, shouldOfferPackageCamera } from '../homebridge-ui/public/config-ops.js'
 import { parseConfig, settingsFor } from '../src/config.js'
 
 // Minimal fake DOM — just enough to prove renderDeviceHeader never turns
 // console-supplied text into markup. The load-bearing assertion is the
 // `textContent` one: it holds only if the payload was assigned via textContent,
 // and fails against an `innerHTML`/template-literal implementation, which would
-// have parsed the string into child elements and left `_text` empty. The
-// `findByTag(..., 'IMG')` check is a cheap belt-and-braces restatement — this
-// FakeElement has no markup parser, so nothing here can synthesise an IMG.
-// No jsdom dependency needed for the one property under test.
+// have parsed the string into child elements and left `_text` empty (see the
+// `innerHTML` setter below). No jsdom dependency needed for the one property
+// under test.
+//
+// An earlier version of these XSS-regression tests also asserted
+// `findByTag(..., 'IMG')` to be null/undefined. That assertion could never
+// fail: FakeElement's `innerHTML` setter stores the string and clears
+// `children` — it never parses markup into child elements — so no mutation
+// of the renderer under test could ever make `findByTag` find an IMG. It has
+// been removed everywhere it was copied (this file and
+// test/ui-render.test.ts); the `textContent`/`outerHTML` assertions beside
+// each removal are the real guard and are proven to fail under mutation (see
+// the fix-wave report).
 export class FakeElement {
   tagName: string
   children: (FakeElement | string)[] = []
@@ -41,8 +50,13 @@ export class FakeElement {
       handler(event)
   }
 
-  /** Real focus has no observable effect in this harness — just a no-op stub. */
-  focus() {}
+  /**
+   * Real focus has no visual effect in this harness, but the call itself is
+   * load-bearing: U3 (selection moves focus to the detail heading) is proven
+   * by counting calls here, not by reading source.
+   */
+  focusCount = 0
+  focus() { this.focusCount++ }
 
   /**
    * Markup, and treated as markup: `outerHTML` emits it RAW and `textContent`
@@ -143,19 +157,6 @@ export function makeDoc() {
 }
 
 const fakeDocument = { createElement: (tag: string) => new FakeElement(tag) }
-
-function findByTag(nodes: (FakeElement | string)[], tagName: string): FakeElement | null {
-  for (const node of nodes) {
-    if (node instanceof FakeElement) {
-      if (node.tagName === tagName)
-        return node
-      const found = findByTag(node.children, tagName)
-      if (found)
-        return found
-    }
-  }
-  return null
-}
 
 describe('ensureConfig', () => {
   it('fills in the shape the UI expects', () => {
@@ -362,8 +363,11 @@ describe('renderQualitySelect', () => {
     const { wrap, select } = renderQualitySelect(fakeDocument, { id: payload }, 'auto') as unknown as { wrap: FakeElement, select: FakeElement }
 
     expect(wrap.attributes.for).toBe(`${payload}-quality`)
+    // The id/for pair is a property assignment (`select.id =`, `setAttribute`),
+    // never markup — this equality check IS the guard: it holds only if the
+    // payload landed as a literal id string, and fails if it were ever
+    // interpolated into a template that parsed it.
     expect(select.id).toBe(`${payload}-quality`)
-    expect(findByTag([wrap], 'IMG')).toBeNull()
   })
 })
 
@@ -438,9 +442,12 @@ describe('renderToggle (XSS regression)', () => {
 
     expect(input.id).toBe(`${payload}-packageCamera`)
     expect(wrap.attributes.for).toBe(`${payload}-packageCamera`)
+    // Load-bearing: textContent only returns the payload if it was assigned
+    // via `.append(text)`/`textContent`, and outerHTML only stays free of a
+    // raw `<img` if nothing here ever assigned `innerHTML`. Both fail under
+    // an innerHTML mutation (see the fix-wave report's mutation table).
     expect(wrap.textContent).toContain(payload)
     expect(wrap.outerHTML).not.toContain('<img')
-    expect(findByTag([wrap], 'IMG')).toBeNull()
   })
 })
 
@@ -458,8 +465,26 @@ describe('renderDeviceHeader (XSS regression)', () => {
     if (!nameEl)
       throw new Error('expected renderDeviceHeader to return a name element')
     expect(nameEl.tagName).toBe('STRONG')
+    // Load-bearing: fails against an innerHTML/template-literal implementation,
+    // which would have parsed the payload and left `_text` empty.
     expect(nameEl.textContent).toBe(payload)
-    expect(findByTag([nameEl], 'IMG')).toBeNull()
+  })
+})
+
+// U2: the toggle-to-section mapping used to live in index.html's untested
+// inline script (`TOGGLE_SECTION`). It now travels with the toggle itself,
+// where `cameraToggles` already has full test coverage.
+describe('cameraToggles sections', () => {
+  const doorbell = { id: 'cam1', type: 'camera', hasMic: true, hasSpeaker: true, hasPackageCamera: true }
+
+  it('files each toggle under the section index.html renders it in', () => {
+    const bySection = Object.fromEntries(cameraToggles(doorbell).map(t => [t.key, t.section]))
+    expect(bySection).toEqual({
+      audio: 'Live view',
+      hksv: 'Recording',
+      talkback: 'Live view',
+      packageCamera: 'Extra accessories',
+    })
   })
 })
 
@@ -482,5 +507,29 @@ describe('iCloud tier recording limits', () => {
     expect(RECORDING_LIMITS['50gb']).toBe(1)
     expect(RECORDING_LIMITS['200gb']).toBe(5)
     expect(RECORDING_LIMITS['2tb']).toBe(Number.POSITIVE_INFINITY)
+  })
+})
+
+// U6: a hand-edited config.json can carry any string. Without validation,
+// ensureConfig would merge it unchanged, the UI would write it straight back
+// on the next save, and `parseConfig` would then refuse to load it — the
+// plugin left dead by a value the settings page itself persisted.
+describe('icloudTier validation', () => {
+  it('rejects a tier outside the three the schema knows, falling back to the default', () => {
+    expect(parseIcloudTier('1tb')).toBe(DEFAULTS.icloudTier)
+    expect(parseIcloudTier(undefined)).toBe(DEFAULTS.icloudTier)
+  })
+
+  it('keeps a recognised tier as-is', () => {
+    for (const tier of Object.keys(RECORDING_LIMITS))
+      expect(parseIcloudTier(tier)).toBe(tier)
+  })
+
+  it('ensureConfig falls back rather than persisting an unrecognised tier from config.json', () => {
+    const config = ensureConfig({ platform: 'UniFiProtect', host: '10.0.0.1', apiKey: 'k', defaults: { icloudTier: '1tb' } })
+    expect(config.defaults.icloudTier).toBe(DEFAULTS.icloudTier)
+    // And the fallback itself is one parseConfig accepts, so the round-trip
+    // this test guards against actually terminates.
+    expect(parseConfig(config).success).toBe(true)
   })
 })

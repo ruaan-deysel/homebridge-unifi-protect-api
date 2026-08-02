@@ -24,9 +24,21 @@ export function ensureConfig(raw) {
     name: config.name ?? 'UniFi Protect',
     host: config.host ?? '',
     apiKey: config.apiKey ?? '',
-    defaults: { ...DEFAULTS, ...(config.defaults ?? {}) },
+    defaults: { ...DEFAULTS, ...(config.defaults ?? {}), icloudTier: parseIcloudTier(config.defaults?.icloudTier) },
     devices: { ...(config.devices ?? {}) },
   }
+}
+
+/**
+ * Falls back to the default tier for anything `RECORDING_LIMITS` does not
+ * recognise. Mirrors `parseMaxStreams`: without this, a hand-edited
+ * `"1tb"` in config.json would be merged unvalidated by `ensureConfig`,
+ * written straight back on the next save, and then fail `parseConfig` at
+ * the next plugin start — the exact "UI wrote a value it can't load back"
+ * failure `parseMaxStreams` already exists to prevent.
+ */
+export function parseIcloudTier(raw) {
+  return Object.hasOwn(RECORDING_LIMITS, raw) ? raw : DEFAULTS.icloudTier
 }
 
 /**
@@ -202,16 +214,21 @@ export function shouldOfferPackageCamera(device) {
  * branch. `comingLater` renders the control inert: the setting exists in the
  * schema but nothing reads it yet — which is now hksv alone. Audio, talkback
  * and the package lens are all live; do not add the flag back to them.
+ *
+ * `section` names the detail-pane section (see `renderDetail`'s `SECTIONS`
+ * in ui-render.js) index.html files the toggle under. It lives here, next
+ * to the decision of which toggles a device gets, rather than in index.html's
+ * untested inline script — same file, same test seam.
  */
 export function cameraToggles(device) {
   const toggles = []
   if (device.hasMic)
-    toggles.push({ key: 'audio', label: AUDIO_LABEL })
-  toggles.push({ key: 'hksv', label: 'HomeKit Secure Video', comingLater: true })
+    toggles.push({ key: 'audio', label: AUDIO_LABEL, section: 'Live view' })
+  toggles.push({ key: 'hksv', label: 'HomeKit Secure Video', comingLater: true, section: 'Recording' })
   if (device.hasSpeaker)
-    toggles.push({ key: 'talkback', label: TALKBACK_LABEL })
+    toggles.push({ key: 'talkback', label: TALKBACK_LABEL, section: 'Live view' })
   if (shouldOfferPackageCamera(device))
-    toggles.push({ key: 'packageCamera', label: PACKAGE_LABEL })
+    toggles.push({ key: 'packageCamera', label: PACKAGE_LABEL, section: 'Extra accessories' })
   return toggles
 }
 
