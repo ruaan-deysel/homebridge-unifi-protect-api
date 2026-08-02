@@ -799,12 +799,17 @@ async function startTalkbackSession({ ipv6, ...overrides }: DelegateOverrides & 
   // The FIRST bind is the socket HomeKit talks to and is held; every later one
   // is the encoder's port reservation, which is closed again immediately.
   let nextPort = 6100
+  const reserved: ReturnType<typeof fakeSocket>[] = []
   const made = makeDelegate({
     talkback: true,
     hasSpeaker: true,
-    bind: async () => (nextPort++ === 6100
-      ? { socket: socket as never, port: 6100 }
-      : { socket: fakeSocket(nextPort - 1) as never, port: nextPort - 1 }),
+    bind: async () => {
+      if (nextPort++ === 6100)
+        return { socket: socket as never, port: 6100 }
+      const spare = fakeSocket(nextPort - 1)
+      reserved.push(spare)
+      return { socket: spare as never, port: nextPort - 1 }
+    },
     spawn: () => {
       const record: ChildRecord = { stdin: '', killed: false }
       children.push(record)
@@ -820,7 +825,7 @@ async function startTalkbackSession({ ipv6, ...overrides }: DelegateOverrides & 
   await new Promise<void>((resolve, reject) => {
     delegate.handleStreamRequest(startRequest(), error => (error ? reject(error) : resolve()))
   })
-  return { ...made, socket, children, prepared, sessionId: 'session-1' }
+  return { ...made, socket, children, prepared, reserved, sessionId: 'session-1' }
 }
 
 /** The port ffmpeg is told to listen on — where the relay must send. */
@@ -916,11 +921,14 @@ describe('talkback', () => {
     delegate.stopSession(sessionId)
   })
 
-  it('uses the v4 loopback for a v4 session', async () => {
-    const { socket, children, delegate, sessionId, bind } = await startTalkbackSession()
+  it('uses the v4 loopback for a v4 session, and frees the port for the encoder', async () => {
+    const { socket, children, delegate, sessionId, bind, reserved } = await startTalkbackSession()
     socket.emit('message', Buffer.from([1]))
     await until(() => socket.send.mock.calls.length > 0)
     expect(bind.mock.calls).toEqual([[false], [false]])
+    // The encoder's port is only RESERVED: ffmpeg binds it itself, and cannot
+    // if this process is still holding it.
+    expect(reserved[0]!.close).toHaveBeenCalled()
     expect(children[1]!.stdin).toContain('c=IN IP4 127.0.0.1')
     expect(socket.send.mock.calls[0]![2]).toBe('127.0.0.1')
     delegate.stopSession(sessionId)
