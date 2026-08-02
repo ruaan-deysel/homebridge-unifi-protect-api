@@ -55,7 +55,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for cameras whose payload reports the lens (`hasPackageCamera`) and whose owner switched
   it on in the settings. It is bridged like every other accessory, is a camera and nothing
   else — the package motion sensor stays on the main accessory, so existing automations are
-  untouched — and it advertises 4:3 resolutions (1600×1200 and 800×600) and no audio.
+  untouched — and it advertises one 4:3 resolution (1600×1200) and no audio. Only the one
+  size is offered because the lens has a single stream and nothing scales it, so a smaller
+  advertised size would be a promise the console cannot keep. Its snapshots come from the
+  package channel, so the tile shows the downward view rather than the main lens.
   Switching the setting off removes it again on the next discovery.
 - The Doorbell's package lens can now be streamed like any other camera. It has one stream
   rather than a choice of substreams, and the console serves it at 1600×1200/2 fps rather
