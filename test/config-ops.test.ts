@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { cameraToggles, defaultFor, DEFAULTS, ensureConfig, MAX_STREAMS_RANGE, PACKAGE_LABEL, parseMaxStreams, QUALITY_OPTIONS, renderDeviceHeader, renderQualitySelect, renderToggle, setDeviceSetting, setGlobalSetting, shouldOfferPackageCamera } from '../homebridge-ui/public/config-ops.js'
+import { cameraToggles, defaultFor, DEFAULTS, ensureConfig, MAX_STREAMS_RANGE, PACKAGE_LABEL, parseMaxStreams, QUALITY_OPTIONS, RECORDING_LIMITS, renderDeviceHeader, renderQualitySelect, renderToggle, setDeviceSetting, setGlobalSetting, shouldOfferPackageCamera } from '../homebridge-ui/public/config-ops.js'
 import { parseConfig, settingsFor } from '../src/config.js'
 
 // Minimal fake DOM — just enough to prove renderDeviceHeader never turns
@@ -243,6 +243,8 @@ describe('the streaming settings the UI now writes', () => {
     // And a camera with no override resolves to audio off on both sides.
     expect(parsed.success && settingsFor(parsed.data, 'cam1').audio).toBe(false)
     expect(setDeviceSetting(ensureConfig({}), 'cam1', 'audio', false).devices.cam1).toBeUndefined()
+    // And the iCloud tier default is available from the UI.
+    expect(defaultFor(ensureConfig(minimal), 'icloudTier')).toBe('200gb')
   })
 })
 
@@ -449,5 +451,13 @@ describe('talkback toggle', () => {
   it('offers no talkback without a speaker', () => {
     const toggles = cameraToggles({ hasSpeaker: false, hasMic: true, hasPackageCamera: false })
     expect(toggles.find(t => t.key === 'talkback')).toBeUndefined()
+  })
+})
+
+describe('iCloud tier recording limits', () => {
+  it('maps each tier to its camera count', () => {
+    expect(RECORDING_LIMITS['50gb']).toBe(1)
+    expect(RECORDING_LIMITS['200gb']).toBe(5)
+    expect(RECORDING_LIMITS['2tb']).toBe(Number.POSITIVE_INFINITY)
   })
 })

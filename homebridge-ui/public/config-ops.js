@@ -3,7 +3,10 @@
 // Must track `defaultsSchema` in src/config.ts: `ensureConfig` writes these into
 // config.json on every UI save, so a stale value here silently overrides the
 // plugin's own default for every user who touches the settings page.
-export const DEFAULTS = { exposeNewDevices: true, quality: 'auto', hksv: false }
+export const DEFAULTS = { exposeNewDevices: true, quality: 'auto', hksv: false, icloudTier: '200gb' }
+
+/** Cameras each iCloud tier permits to record. Apple caps by COUNT, not storage. */
+export const RECORDING_LIMITS = { '50gb': 1, '200gb': 5, '2tb': Number.POSITIVE_INFINITY }
 
 /**
  * Normalises the platform block WITHOUT dropping anything it does not know
@@ -77,6 +80,8 @@ export function defaultFor(config, key) {
     return config.defaults.quality
   if (key === 'hksv')
     return config.defaults.hksv
+  if (key === 'icloudTier')
+    return config.defaults.icloudTier
   if (key === 'smartDetect')
     return undefined
   // Both default off with no global override, exactly as `settingsFor` resolves

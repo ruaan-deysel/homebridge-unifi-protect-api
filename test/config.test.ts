@@ -51,6 +51,7 @@ describe('parseConfig', () => {
       // asks for, and a 2688x1512 transcode for a phone thumbnail is 27x the CPU.
       quality: 'auto',
       hksv: false,
+      icloudTier: '200gb',
     })
   })
 
@@ -64,6 +65,7 @@ describe('parseConfig', () => {
       exposeNewDevices: true,
       quality: 'low',
       hksv: false,
+      icloudTier: '200gb',
     })
 
     const byExpose = parseConfig({ ...minimal, defaults: { exposeNewDevices: false } })
@@ -71,6 +73,7 @@ describe('parseConfig', () => {
       exposeNewDevices: false,
       quality: 'auto',
       hksv: false,
+      icloudTier: '200gb',
     })
 
     const byHksv = parseConfig({ ...minimal, defaults: { hksv: true } })
@@ -78,6 +81,7 @@ describe('parseConfig', () => {
       exposeNewDevices: true,
       quality: 'auto',
       hksv: true,
+      icloudTier: '200gb',
     })
   })
 
@@ -112,6 +116,16 @@ describe('parseConfig', () => {
     expect(parsed.success).toBe(false)
   })
 
+  it('defaults the icloud tier to 200gb', () => {
+    const parsed = parseConfig({ platform: 'UniFiProtect', host: 'h', apiKey: 'k' })
+    expect(parsed.success && parsed.data.defaults.icloudTier).toBe('200gb')
+  })
+
+  it('rejects an unknown tier rather than coercing it', () => {
+    const parsed = parseConfig({ platform: 'UniFiProtect', host: 'h', apiKey: 'k', defaults: { icloudTier: '1tb' } })
+    expect(parsed.success).toBe(false)
+  })
+
   it('accepts the global streaming settings and rejects an out-of-range stream cap', () => {
     const parsed = parseConfig({ ...minimal, maxStreams: 4, ffmpegPath: '/opt/ffmpeg' })
     expect(parsed.success && parsed.data.maxStreams).toBe(4)
@@ -127,7 +141,7 @@ describe('parseConfig', () => {
 describe('settingsFor', () => {
   const config = parseConfig({
     ...minimal,
-    defaults: { exposeNewDevices: true, quality: 'low', hksv: false },
+    defaults: { exposeNewDevices: true, quality: 'low', hksv: false, icloudTier: '200gb' },
     devices: { cam1: { hksv: true, smartDetect: ['person'] } },
   })
   const data = config.success
