@@ -105,6 +105,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only reveals it by answering the package stream request, with a URL if the lens exists
   and a 404 if it does not — so the check asks the console once per camera and remembers
   the answer rather than asking again.
+- New per-camera setting: `packageCamera`, off by default. The settings UI offers it only
+  for a Doorbell where the package lens was detected, and its label states plainly that the
+  console serves that lens at 2 fps — enabling it adds a second HomeKit accessory for one
+  physical device, so nobody should be surprised by either consequence after the fact.
 
 ### Fixed
 - Live view SSRCs are now positive signed 32-bit values. The previous range reached

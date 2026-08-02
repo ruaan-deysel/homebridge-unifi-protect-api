@@ -19,6 +19,12 @@ const deviceSettingsSchema = z.object({
   hksv: z.boolean().optional(),
   smartDetect: z.array(z.string()).optional(),
   talkback: z.boolean().optional(),
+  /**
+   * The Doorbell's downward package lens, as its own accessory. Off by default:
+   * it is a second accessory for one physical device, and the console serves it
+   * at 2 fps, so it should appear only when someone asks for it.
+   */
+  packageCamera: z.boolean().optional(),
 })
 
 const defaultsSchema = z.object({
@@ -66,6 +72,7 @@ export interface ResolvedDeviceSettings {
   hksv: boolean
   smartDetect: string[]
   talkback: boolean
+  packageCamera: boolean
 }
 
 export function parseConfig(raw: unknown) {
@@ -108,5 +115,8 @@ export function settingsFor(config: ProtectPluginConfig, deviceId: string): Reso
     hksv: override?.hksv ?? config.defaults.hksv,
     smartDetect: override?.smartDetect ?? [],
     talkback: override?.talkback ?? false,
+    // No global default, same reasoning as audio: opt-in per camera, since it
+    // creates a second accessory and the console serves it at 2 fps.
+    packageCamera: override?.packageCamera ?? false,
   }
 }

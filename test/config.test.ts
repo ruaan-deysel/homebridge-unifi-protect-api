@@ -172,6 +172,36 @@ describe('settingsFor', () => {
     // ...and only for that camera.
     expect(parsed.success && settingsFor(parsed.data, 'cam2').audio).toBe(false)
   })
+
+  it('defaults packageCamera to false for a camera that does not set it', () => {
+    const parsed = parseConfig({
+      platform: 'UniFiProtect',
+      host: 'h',
+      apiKey: 'k',
+      devices: { cam1: { quality: 'high' } },
+    })
+    expect(parsed.success && settingsFor(parsed.data, 'cam1').packageCamera).toBe(false)
+  })
+
+  it('accepts an explicit packageCamera opt-in', () => {
+    const parsed = parseConfig({
+      platform: 'UniFiProtect',
+      host: 'h',
+      apiKey: 'k',
+      devices: { cam1: { packageCamera: true } },
+    })
+    expect(parsed.success && settingsFor(parsed.data, 'cam1').packageCamera).toBe(true)
+  })
+
+  it('rejects a non-boolean packageCamera', () => {
+    const parsed = parseConfig({
+      platform: 'UniFiProtect',
+      host: 'h',
+      apiKey: 'k',
+      devices: { cam1: { packageCamera: 'yes' } },
+    })
+    expect(parsed.success).toBe(false)
+  })
 })
 
 describe('storeConsoleCert', () => {

@@ -40,7 +40,7 @@
 <div id="devices"></div>
 
 <script type="module">
-  import { AUDIO_LABEL, ensureConfig, parseMaxStreams, renderDeviceHeader, renderQualitySelect, setDeviceSetting, setGlobalSetting } from './config-ops.js'
+  import { AUDIO_LABEL, ensureConfig, PACKAGE_LABEL, parseMaxStreams, renderDeviceHeader, renderQualitySelect, setDeviceSetting, setGlobalSetting, shouldOfferPackageCamera } from './config-ops.js'
 
   const statusEl = document.getElementById('status')
   const trustEl = document.getElementById('trust')
@@ -144,6 +144,8 @@
         toggle('hksv', 'HomeKit Secure Video', config.defaults.hksv, true)
         if (device.hasSpeaker)
           toggle('talkback', 'Two-way audio', false, true)
+        if (shouldOfferPackageCamera(device))
+          toggle('packageCamera', PACKAGE_LABEL, false)
       }
 
       card.append(grid)

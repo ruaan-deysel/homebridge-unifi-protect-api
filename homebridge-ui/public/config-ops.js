@@ -77,7 +77,7 @@ function defaultFor(config, key) {
   // Both default off with no global override, exactly as `settingsFor` resolves
   // them in src/config.ts — audio deliberately has no console-wide default,
   // since whether recording it is legal depends on where each camera points.
-  if (key === 'talkback' || key === 'audio')
+  if (key === 'talkback' || key === 'audio' || key === 'packageCamera')
     return false
   return undefined
 }
@@ -158,6 +158,43 @@ export function renderQualitySelect(doc, device, value) {
   }
   wrap.append(select)
   return { wrap, select }
+}
+
+/**
+ * The package-toggle label. It names the frame rate deliberately: enabling this
+ * creates a second accessory for one physical device, and the console serves
+ * that lens at 2 fps — someone who enables it expecting normal video should be
+ * told first, not surprised after the fact.
+ */
+export const PACKAGE_LABEL = 'Package camera (separate accessory, 2 fps)'
+
+/**
+ * Only cameras, and only where the probe (see src/protect/stream.ts,
+ * `hasPackageCamera`) found the lens — a real Doorbell's `featureFlags` has no
+ * such field, so this must come from the discover payload's probed result, not
+ * from guessing at every camera.
+ */
+export function shouldOfferPackageCamera(device) {
+  return device.type === 'camera' && device.hasPackageCamera === true
+}
+
+/**
+ * Built with DOM APIs only — never `innerHTML`. `device.id` is console-supplied
+ * and therefore attacker-controlled, exactly like the ids in
+ * `renderQualitySelect`; it lands in the `id`/`for` pair as a property
+ * assignment, never as markup.
+ */
+export function renderPackageToggle(doc, device, checked) {
+  const wrap = doc.createElement('div')
+  const input = doc.createElement('input')
+  input.type = 'checkbox'
+  input.id = `package-${device.id}`
+  input.checked = checked === true
+  const label = doc.createElement('label')
+  label.htmlFor = input.id
+  label.textContent = PACKAGE_LABEL
+  wrap.append(input, label)
+  return wrap
 }
 
 /**

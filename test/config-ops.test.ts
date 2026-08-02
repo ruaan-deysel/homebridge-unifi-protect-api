@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { DEFAULTS, ensureConfig, MAX_STREAMS_RANGE, parseMaxStreams, QUALITY_OPTIONS, renderDeviceHeader, renderQualitySelect, setDeviceSetting, setGlobalSetting } from '../homebridge-ui/public/config-ops.js'
+import { DEFAULTS, ensureConfig, MAX_STREAMS_RANGE, PACKAGE_LABEL, parseMaxStreams, QUALITY_OPTIONS, renderDeviceHeader, renderPackageToggle, renderQualitySelect, setDeviceSetting, setGlobalSetting, shouldOfferPackageCamera } from '../homebridge-ui/public/config-ops.js'
 import { parseConfig, settingsFor } from '../src/config.js'
 
 // Minimal fake DOM — just enough to prove renderDeviceHeader never turns
@@ -18,6 +18,8 @@ class FakeElement {
   id = ''
   value = ''
   selected = false
+  type = ''
+  checked = false
   private _text = ''
 
   constructor(tagName: string) {
@@ -43,6 +45,15 @@ class FakeElement {
     return this.attributes.class ?? ''
   }
 
+  /** Mirrors the real DOM's `label.htmlFor`, which reflects the `for` attribute. */
+  set htmlFor(value: string) {
+    this.attributes.for = value
+  }
+
+  get htmlFor(): string {
+    return this.attributes.for ?? ''
+  }
+
   setAttribute(name: string, value: string) {
     this.attributes[name] = value
   }
@@ -50,6 +61,38 @@ class FakeElement {
   append(...nodes: (FakeElement | string)[]) {
     this.children.push(...nodes)
   }
+
+  /**
+   * A minimal serialiser, only detailed enough to prove the markup-injection
+   * regression tests: every property lands as an ESCAPED attribute or escaped
+   * text, never raw. There is no markup parser here — a payload can only ever
+   * come out the other side inert.
+   */
+  get outerHTML(): string {
+    const escape = (raw: string) => raw
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+    const tag = this.tagName.toLowerCase()
+    const attrs: string[] = []
+    if (this.id)
+      attrs.push(`id="${escape(this.id)}"`)
+    if (this.type)
+      attrs.push(`type="${escape(this.type)}"`)
+    if (this.checked)
+      attrs.push('checked')
+    for (const [name, value] of Object.entries(this.attributes))
+      attrs.push(`${name}="${escape(value)}"`)
+    const inner = this.children
+      .map(child => (child instanceof FakeElement ? child.outerHTML : escape(child)))
+      .join('')
+    return `<${tag}${attrs.length ? ` ${attrs.join(' ')}` : ''}>${inner}</${tag}>`
+  }
+}
+
+function makeDoc() {
+  return { createElement: (tag: string) => new FakeElement(tag) }
 }
 
 const fakeDocument = { createElement: (tag: string) => new FakeElement(tag) }
@@ -272,6 +315,26 @@ describe('renderQualitySelect', () => {
     expect(wrap.attributes.for).toBe(`${payload}-quality`)
     expect(select.id).toBe(`${payload}-quality`)
     expect(findByTag([wrap], 'IMG')).toBeNull()
+  })
+})
+
+describe('package camera toggle', () => {
+  it('offers the package toggle only for a camera that has the lens', () => {
+    const doc = makeDoc()
+    expect(shouldOfferPackageCamera({ type: 'camera', hasPackageCamera: true })).toBe(true)
+    expect(shouldOfferPackageCamera({ type: 'camera', hasPackageCamera: false })).toBe(false)
+    expect(shouldOfferPackageCamera({ type: 'chime', hasPackageCamera: true })).toBe(false)
+    void doc
+  })
+
+  it('states the frame rate in the label so nobody expects smooth video', () => {
+    expect(PACKAGE_LABEL).toContain('2 fps')
+  })
+
+  it('never interprets a device name as markup', () => {
+    const doc = makeDoc()
+    const el = renderPackageToggle(doc, { id: '<img src=x onerror=alert(1)>', hasPackageCamera: true }, false) as unknown as FakeElement
+    expect(el.outerHTML).not.toContain('<img')
   })
 })
 
