@@ -1,8 +1,20 @@
+import { readFileSync } from 'node:fs'
 import { inspect } from 'node:util'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { ProtectNotFoundError } from '../src/protect/errors.js'
 import { StreamUrls } from '../src/protect/stream.js'
 
 const URL_HIGH = 'rtsps://192.0.2.1:7441/abc?token=SENTINEL-TOKEN'
+const withPackage = JSON.parse(readFileSync('test/fixtures/package/rtsps-package.json', 'utf8')).body
+
+/**
+ * A camera WITHOUT a package lens does not return a body missing the key — the
+ * console answers 404 (`NOT_FOUND`, entity "quality"), and `send()` turns that
+ * into a rejected ProtectNotFoundError. Captured in rtsps-none.json.
+ */
+function notFound() {
+  return new ProtectNotFoundError('POST /v1/cameras/x/rtsps-stream: not found (404)')
+}
 
 function makeClient(existing: Record<string, string> = {}) {
   return {
@@ -140,5 +152,61 @@ describe('streamUrls', () => {
     expect(error).toBeInstanceOf(Error)
     expect((error as Error).message).toMatch(/low/)
     expect(inspect(error, { depth: 10 })).not.toContain('SENTINEL-TOKEN')
+  })
+})
+
+describe('hasPackageCamera', () => {
+  it('is true when the console returns a package url', async () => {
+    const client = { getRtspsStream: vi.fn(async () => ({})), createRtspsStream: vi.fn(async () => withPackage) }
+    const urls = new StreamUrls(client as never)
+    expect(await urls.hasPackageCamera('cam1')).toBe(true)
+  })
+
+  // The real signal for "no package lens" is a 404, not an absent key.
+  it('is false when the console 404s the package quality', async () => {
+    const client = {
+      getRtspsStream: vi.fn(async () => ({})),
+      createRtspsStream: vi.fn(async () => { throw notFound() }),
+    }
+    const urls = new StreamUrls(client as never)
+    expect(await urls.hasPackageCamera('cam1')).toBe(false)
+  })
+
+  // Belt and braces: a 200 that somehow omits the key must also read as false.
+  it('is false when a 200 omits the package key', async () => {
+    const client = { getRtspsStream: vi.fn(async () => ({})), createRtspsStream: vi.fn(async () => ({})) }
+    const urls = new StreamUrls(client as never)
+    expect(await urls.hasPackageCamera('cam1')).toBe(false)
+  })
+
+  it('is false when the request throws, and swallows the error', async () => {
+    const client = {
+      getRtspsStream: vi.fn(async () => ({})),
+      createRtspsStream: vi.fn(async () => { throw Object.assign(new Error('boom'), { cause: { apiKey: 'SENTINEL-KEY' } }) }),
+    }
+    const urls = new StreamUrls(client as never)
+    await expect(urls.hasPackageCamera('cam1')).resolves.toBe(false)
+  })
+
+  it('caches the answer per device', async () => {
+    const client = { getRtspsStream: vi.fn(async () => ({})), createRtspsStream: vi.fn(async () => withPackage) }
+    const urls = new StreamUrls(client as never)
+    await urls.hasPackageCamera('cam1')
+    await urls.hasPackageCamera('cam1')
+    expect(client.createRtspsStream).toHaveBeenCalledTimes(1)
+  })
+
+  it('caches per device, not globally', async () => {
+    const client = {
+      getRtspsStream: vi.fn(async () => ({})),
+      createRtspsStream: vi.fn(async (id: string) => {
+        if (id !== 'cam1')
+          throw notFound()
+        return withPackage
+      }),
+    }
+    const urls = new StreamUrls(client as never)
+    expect(await urls.hasPackageCamera('cam1')).toBe(true)
+    expect(await urls.hasPackageCamera('cam2')).toBe(false)
   })
 })

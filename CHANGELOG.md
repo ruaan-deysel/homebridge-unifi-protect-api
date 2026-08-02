@@ -94,6 +94,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   teardown so a dropped viewer can never leave a transcode running indefinitely. ffmpeg's
   own failure output is redacted before it is ever logged, since the command line it echoes
   on error contains the RTSPS stream's auth token.
+- The plugin can now tell whether a camera has a downward-facing package lens, ahead of
+  exposing it as its own camera in HomeKit. There is no feature flag for this — Protect
+  only reveals it by answering the package stream request, with a URL if the lens exists
+  and a 404 if it does not — so the check asks the console once per camera and remembers
+  the answer rather than asking again.
 
 ### Fixed
 - Live view SSRCs are now positive signed 32-bit values. The previous range reached
