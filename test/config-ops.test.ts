@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { DEFAULTS, ensureConfig, MAX_STREAMS_RANGE, PACKAGE_LABEL, parseMaxStreams, QUALITY_OPTIONS, renderDeviceHeader, renderPackageToggle, renderQualitySelect, setDeviceSetting, setGlobalSetting, shouldOfferPackageCamera } from '../homebridge-ui/public/config-ops.js'
+import { DEFAULTS, ensureConfig, MAX_STREAMS_RANGE, PACKAGE_LABEL, parseMaxStreams, QUALITY_OPTIONS, renderDeviceHeader, renderQualitySelect, renderToggle, setDeviceSetting, setGlobalSetting, shouldOfferPackageCamera } from '../homebridge-ui/public/config-ops.js'
 import { parseConfig, settingsFor } from '../src/config.js'
 
 // Minimal fake DOM — just enough to prove renderDeviceHeader never turns
@@ -21,6 +21,24 @@ class FakeElement {
   type = ''
   checked = false
   private _text = ''
+  private _html?: string
+
+  /**
+   * Markup, and treated as markup: `outerHTML` emits it RAW and `textContent`
+   * stops returning the assigned string. That is what makes a renderer rewritten
+   * to `innerHTML` with an interpolated payload genuinely fail the tests below —
+   * without this setter the assignment would land as an inert own property that
+   * `outerHTML` never reads, and the guard would pass over a real hole.
+   */
+  set innerHTML(value: string) {
+    this._html = value
+    this._text = ''
+    this.children = []
+  }
+
+  get innerHTML(): string {
+    return this._html ?? ''
+  }
 
   constructor(tagName: string) {
     this.tagName = tagName.toUpperCase()
@@ -32,6 +50,10 @@ class FakeElement {
   }
 
   get textContent(): string {
+    // Markup assigned via innerHTML is NOT text — a real DOM would have parsed
+    // it into elements, so the raw string can never come back out here.
+    if (this._html !== undefined)
+      return ''
     if (this.children.length === 0)
       return this._text
     return this.children.map(c => (c instanceof FakeElement ? c.textContent : c)).join('')
@@ -84,7 +106,9 @@ class FakeElement {
       attrs.push('checked')
     for (const [name, value] of Object.entries(this.attributes))
       attrs.push(`${name}="${escape(value)}"`)
-    const inner = this.children
+    // Raw, deliberately: whatever innerHTML was handed comes back unescaped,
+    // which is exactly the regression the injection assertions must catch.
+    const inner = this._html ?? this.children
       .map(child => (child instanceof FakeElement ? child.outerHTML : escape(child)))
       .join('')
     return `<${tag}${attrs.length ? ` ${attrs.join(' ')}` : ''}>${inner}</${tag}>`
@@ -330,11 +354,22 @@ describe('package camera toggle', () => {
   it('states the frame rate in the label so nobody expects smooth video', () => {
     expect(PACKAGE_LABEL).toContain('2 fps')
   })
+})
 
-  it('never interprets a device name as markup', () => {
-    const doc = makeDoc()
-    const el = renderPackageToggle(doc, { id: '<img src=x onerror=alert(1)>', hasPackageCamera: true }, false) as unknown as FakeElement
-    expect(el.outerHTML).not.toContain('<img')
+// The toggle every per-device checkbox is built from, the package one included
+// — index.html calls exactly this, so an assertion here guards what actually
+// renders rather than a parallel copy of it.
+describe('renderToggle (XSS regression)', () => {
+  const payload = '<img src=x onerror=alert(1)>'
+
+  it('renders a console-supplied device name and id as inert text, never as markup', () => {
+    const { wrap, input } = renderToggle(makeDoc(), `${payload}-packageCamera`, `${payload} ${PACKAGE_LABEL}`) as unknown as { wrap: FakeElement, input: FakeElement }
+
+    expect(input.id).toBe(`${payload}-packageCamera`)
+    expect(wrap.attributes.for).toBe(`${payload}-packageCamera`)
+    expect(wrap.textContent).toContain(payload)
+    expect(wrap.outerHTML).not.toContain('<img')
+    expect(findByTag([wrap], 'IMG')).toBeNull()
   })
 })
 

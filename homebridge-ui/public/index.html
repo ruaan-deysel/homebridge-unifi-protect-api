@@ -40,7 +40,7 @@
 <div id="devices"></div>
 
 <script type="module">
-  import { AUDIO_LABEL, ensureConfig, PACKAGE_LABEL, parseMaxStreams, renderDeviceHeader, renderQualitySelect, setDeviceSetting, setGlobalSetting, shouldOfferPackageCamera } from './config-ops.js'
+  import { AUDIO_LABEL, ensureConfig, PACKAGE_LABEL, parseMaxStreams, renderDeviceHeader, renderQualitySelect, renderToggle, setDeviceSetting, setGlobalSetting, shouldOfferPackageCamera } from './config-ops.js'
 
   const statusEl = document.getElementById('status')
   const trustEl = document.getElementById('trust')
@@ -94,14 +94,9 @@
       grid.className = 'up-grid'
 
       const toggle = (key, label, fallback, comingLater) => {
-        const id = `${device.id}-${key}`
-        const wrap = document.createElement('label')
-        wrap.setAttribute('for', id)
-        // id embeds device.id (console-supplied) — build with DOM APIs, never innerHTML.
-        const input = document.createElement('input')
-        input.type = 'checkbox'
-        input.id = id
-        wrap.append(input, ` ${label}`)
+        // id embeds device.id (console-supplied) — renderToggle builds it with
+        // DOM APIs only, and carries the injection test for this path.
+        const { wrap, input } = renderToggle(document, `${device.id}-${key}`, label)
         input.checked = Boolean(settingOf(device.id, key, fallback))
         if (comingLater) {
           // Shown, but inert and said so plainly. This release has no camera

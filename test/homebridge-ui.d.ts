@@ -115,9 +115,9 @@ declare module '*/homebridge-ui/public/config-ops.js' {
 
   export const PACKAGE_LABEL: string
   export function shouldOfferPackageCamera(device: { type?: string, hasPackageCamera?: boolean }): boolean
-  export function renderPackageToggle(
+  export function renderToggle(
     doc: MinimalDocument,
-    device: { id?: string, hasPackageCamera?: boolean },
-    checked: boolean,
-  ): MinimalDomElement
+    id: string,
+    label: string,
+  ): { wrap: MinimalDomElement, input: MinimalDomElement }
 }

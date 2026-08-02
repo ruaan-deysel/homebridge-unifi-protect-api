@@ -179,22 +179,20 @@ export function shouldOfferPackageCamera(device) {
 }
 
 /**
- * Built with DOM APIs only — never `innerHTML`. `device.id` is console-supplied
- * and therefore attacker-controlled, exactly like the ids in
- * `renderQualitySelect`; it lands in the `id`/`for` pair as a property
- * assignment, never as markup.
+ * The checkbox every per-device toggle is built from, this one included. Lives
+ * here rather than inline in index.html so the injection guard can reach it:
+ * `id` embeds `device.id` and the label can carry console-supplied text, both
+ * attacker-controlled, and both land as property assignments — never markup.
+ * The caller owns `checked`, `disabled` and the change listener.
  */
-export function renderPackageToggle(doc, device, checked) {
-  const wrap = doc.createElement('div')
+export function renderToggle(doc, id, label) {
+  const wrap = doc.createElement('label')
+  wrap.setAttribute('for', id)
   const input = doc.createElement('input')
   input.type = 'checkbox'
-  input.id = `package-${device.id}`
-  input.checked = checked === true
-  const label = doc.createElement('label')
-  label.htmlFor = input.id
-  label.textContent = PACKAGE_LABEL
-  wrap.append(input, label)
-  return wrap
+  input.id = id
+  wrap.append(input, ` ${label}`)
+  return { wrap, input }
 }
 
 /**
