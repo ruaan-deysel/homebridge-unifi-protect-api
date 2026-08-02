@@ -216,6 +216,22 @@ describe('recordingDelegate stream generator', () => {
     expect(rest.at(-1)!.isLast).toBe(true)
   })
 
+  // Without a wake in closeRecordingStream the generator stays parked on a
+  // promise nothing will ever resolve: the stream entry leaks and HAP waits for
+  // a `return` that never comes. Isolated on purpose — every other close in
+  // these tests happens with a fragment still queued, so none of them reaches
+  // the parked path.
+  it('finishes a generator that is parked with an empty queue when the stream closes', async () => {
+    const { delegate, ring, close } = harness()
+    ring.accept('init', Buffer.from('I'))
+    const gen = delegate.handleRecordingStreamRequest(1)
+    await gen.next()
+    const pending = gen.next()
+    await flush()
+    close(1)
+    expect((await pending).done).toBe(true)
+  })
+
   it('yields fragments that arrive live, after the prebuffer is exhausted', async () => {
     const h = await harnessStarted()
     h.proc.stdout.emit('data', init('one'))
