@@ -51,6 +51,11 @@ export class TalkbackRelay {
     this.buffered.push(packet)
     if (this.buffered.length > TALKBACK_BUFFER_LIMIT)
       this.buffered.shift()
+    // `opening` is latched for the life of the session and never cleared, so a
+    // FAILED open is never retried: the console answers a speaker-less camera
+    // with a 503, and retrying per datagram would be a POST every 20 ms for as
+    // long as somebody holds the talk button. Deliberate — the viewer's remedy
+    // is to close the live view and reopen it, which builds a new relay.
     if (this.opening)
       return
     this.opening = true
@@ -89,11 +94,25 @@ export interface TalkbackSdpOptions {
   listenPort: number
   /** HomeKit's chosen payload type, from the start request. */
   payloadType: number
-  /** HomeKit's chosen sample rate in Hz. */
-  sampleRate: number
   /** srtp_key ‖ srtp_salt as HomeKit sent them. */
   key: Buffer
+  /** True when the relay's socket is udp6, so the loopback family must match. */
+  ipv6?: boolean
 }
+
+/**
+ * RFC 7587 §7: the `a=rtpmap` clock rate for Opus MUST be 48000 and the channel
+ * count MUST be 2, whatever rate the stream is actually encoded at — "the RTP
+ * timestamp is incremented with a 48000 Hz clock rate for all modes of Opus and
+ * all sampling rates".
+ *
+ * NOT cosmetic. ffmpeg's SDP parser sets the stream time_base to 1/clock_rate,
+ * so declaring HomeKit's negotiated 16000 makes every 20 ms frame (960 ticks of
+ * a 48 kHz clock) read as 60 ms of media. Every PTS is stretched, and the
+ * re-emitted RTP carries that stretch into the doorbell's jitter buffer. The
+ * decoder outputs 48 kHz regardless, so the symptom is timing, never pitch.
+ */
+const OPUS_CLOCK_RATE = 48000
 
 /**
  * Raw RTP carries no format metadata, so ffmpeg cannot decode an SRTP stream
@@ -102,18 +121,22 @@ export interface TalkbackSdpOptions {
  * and a temp file would put that secret on disk.
  *
  * `RTP/SAVP` and the `a=crypto` line are what make it SRTP rather than RTP.
- * Opus is always declared with two channels in an SDP even when the stream is
- * mono; that is the RFC 7587 convention, not a mistake.
+ *
+ * The connection address follows the RELAY's socket family: on an IPv6 session
+ * the socket is udp6, and `dgram.send` to an IPv4 literal from one fails — so a
+ * v4 loopback here would mean an encoder that spawns, idles and never receives
+ * a single datagram.
  */
 export function talkbackSdp(options: TalkbackSdpOptions): string {
+  const loopback = options.ipv6 ? 'IP6 ::1' : 'IP4 127.0.0.1'
   return [
     'v=0',
-    'o=- 0 0 IN IP4 127.0.0.1',
+    `o=- 0 0 IN ${loopback}`,
     's=Talkback',
-    'c=IN IP4 127.0.0.1',
+    `c=IN ${loopback}`,
     't=0 0',
     `m=audio ${options.listenPort} RTP/SAVP ${options.payloadType}`,
-    `a=rtpmap:${options.payloadType} opus/${options.sampleRate}/2`,
+    `a=rtpmap:${options.payloadType} opus/${OPUS_CLOCK_RATE}/2`,
     `a=fmtp:${options.payloadType} minptime=10;useinbandfec=1`,
     `a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:${options.key.toString('base64')}`,
     '',

@@ -766,15 +766,17 @@ describe('streamingDelegate hap wiring', () => {
 })
 
 /** The socket prepareStream HOLDS for talkback, with everything the relay touches. */
-function fakeSocket(port = 6100) {
+function fakeSocket(port = 6100, family: 'IPv4' | 'IPv6' = 'IPv4') {
   const socket = new EventEmitter() as EventEmitter & {
     send: ReturnType<typeof vi.fn>
     close: ReturnType<typeof vi.fn>
-    address: () => { port: number }
+    address: () => { port: number, family: string }
   }
   socket.send = vi.fn()
   socket.close = vi.fn()
-  socket.address = () => ({ port })
+  // The family is what a real bound socket reports, and the only thing the
+  // delegate can ask about the socket it was handed.
+  socket.address = () => ({ port, family })
   return socket
 }
 
@@ -791,8 +793,8 @@ async function until(condition: () => boolean): Promise<void> {
 /** The srtp material prepareRequest() sends for audio, as one key. */
 const HOMEKIT_AUDIO_KEY = Buffer.concat([Buffer.alloc(16, 3), Buffer.alloc(14, 4)]).toString('base64')
 
-async function startTalkbackSession(overrides: DelegateOverrides = {}) {
-  const socket = fakeSocket()
+async function startTalkbackSession({ ipv6, ...overrides }: DelegateOverrides & { ipv6?: boolean } = {}) {
+  const socket = fakeSocket(6100, ipv6 ? 'IPv6' : 'IPv4')
   const children: ChildRecord[] = []
   const made = makeDelegate({
     talkback: true,
@@ -807,7 +809,8 @@ async function startTalkbackSession(overrides: DelegateOverrides = {}) {
   })
   const { delegate } = made
   const prepared = await new Promise<PrepareStreamResponse>((resolve, reject) => {
-    delegate.prepareStream(prepareRequest(), (error, response) => (response ? resolve(response) : reject(error)))
+    const request = { ...prepareRequest(), ...(ipv6 ? { addressVersion: 'ipv6' as const, targetAddress: '2001:db8::9' } : {}) }
+    delegate.prepareStream(request, (error, response) => (response ? resolve(response) : reject(error)))
   })
   await new Promise<void>((resolve, reject) => {
     delegate.handleStreamRequest(startRequest(), error => (error ? reject(error) : resolve()))
@@ -855,7 +858,9 @@ describe('talkback', () => {
     expect(children[1]!.stdin).toContain('a=crypto:1 AES_CM_128_HMAC_SHA1_80')
     // HomeKit's own key, and its payload type — not a guess.
     expect(children[1]!.stdin).toContain(`inline:${HOMEKIT_AUDIO_KEY}`)
-    expect(children[1]!.stdin).toContain('a=rtpmap:110 opus/16000/2')
+    // startRequest() negotiates 16 kHz; an Opus SDP still declares the 48 kHz
+    // RTP clock, or ffmpeg reads every timestamp three times too long.
+    expect(children[1]!.stdin).toContain('a=rtpmap:110 opus/48000/2')
     delegate.stopSession(sessionId)
   })
 
@@ -879,6 +884,36 @@ describe('talkback', () => {
     const port = sdpListenPort(children[1]!.stdin)
     expect(socket.send.mock.calls[0]![0]).toBe(packet)
     expect(socket.send.mock.calls[0]![1]).toBe(port)
+    expect(socket.send.mock.calls[0]![2]).toBe('127.0.0.1')
+    delegate.stopSession(sessionId)
+  })
+
+  // A udp6 socket cannot send to an IPv4 literal: dgram resolves the
+  // destination as family 6 and errors into the send callback, so an
+  // IPv6 session used to open the console session, spawn ffmpeg, and deliver
+  // nothing at all — silently.
+  it('keeps the sdp, the reserved port and the forward destination in one family on ipv6', async () => {
+    const { spawn, socket, children, delegate, sessionId, bind } = await startTalkbackSession({ ipv6: true })
+    expect(bind).toHaveBeenCalledWith(true)
+    const packet = Buffer.from([1, 2, 3])
+    socket.emit('message', packet)
+    await until(() => socket.send.mock.calls.length > 0)
+    const sdp = children[1]!.stdin
+    expect(sdp).toContain('c=IN IP6 ::1')
+    expect(sdp).not.toContain('127.0.0.1')
+    // The relay sends to the v6 loopback, at the port the SDP names.
+    expect(socket.send.mock.calls[0]![2]).toBe('::1')
+    expect(socket.send.mock.calls[0]![1]).toBe(sdpListenPort(sdp))
+    expect(spawn).toHaveBeenCalledTimes(2)
+    delegate.stopSession(sessionId)
+  })
+
+  it('uses the v4 loopback for a v4 session', async () => {
+    const { socket, children, delegate, sessionId, bind } = await startTalkbackSession()
+    expect(bind).toHaveBeenCalledWith(false)
+    socket.emit('message', Buffer.from([1]))
+    await until(() => socket.send.mock.calls.length > 0)
+    expect(children[1]!.stdin).toContain('c=IN IP4 127.0.0.1')
     expect(socket.send.mock.calls[0]![2]).toBe('127.0.0.1')
     delegate.stopSession(sessionId)
   })

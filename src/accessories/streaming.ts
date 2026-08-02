@@ -708,16 +708,22 @@ export class StreamingDelegate implements CameraStreamingDelegate {
    * talkback session eagerly would light the doorbell's speaker for every live
    * view, whether or not anybody ever speaks.
    */
-  private armTalkback(sessionId: string, socket: Socket, audio: RtpTarget & { sampleRate: number }): void {
+  private armTalkback(sessionId: string, socket: Socket, audio: RtpTarget): void {
+    // The socket's OWN family, not the delegate's opinion of it: a udp6 socket
+    // cannot send to an IPv4 literal (dgram resolves the destination as family
+    // 6 and errors), and the SDP, the reserved port and this destination must
+    // all agree or the encoder idles forever without a single datagram.
+    const ipv6 = socket.address().family === 'IPv6'
+    const loopback = ipv6 ? '::1' : '127.0.0.1'
     // Declared first because the relay's `open` closes over the state, and the
     // state holds the relay. `open` cannot run before the first datagram.
     let state: TalkbackSession
     const relay = new TalkbackRelay({
       socket,
-      open: () => this.openTalkback(state, audio),
+      open: () => this.openTalkback(state, audio, ipv6),
       // The callback swallows send errors: without one, dgram delivers them as
       // an 'error' event, and an unhandled one crashes the whole process.
-      forward: (packet, port) => socket.send(packet, port, '127.0.0.1', () => {}),
+      forward: (packet, port) => socket.send(packet, port, loopback, () => {}),
       log: this.options.log,
     })
     state = { relay, closed: false }
@@ -728,9 +734,11 @@ export class StreamingDelegate implements CameraStreamingDelegate {
    * Opens the console session and starts the encoder, returning the loopback
    * port the relay should forward to. Called at most once, by the relay.
    */
-  private async openTalkback(state: TalkbackSession, audio: RtpTarget & { sampleRate: number }): Promise<number | undefined> {
+  private async openTalkback(state: TalkbackSession, audio: RtpTarget, ipv6: boolean): Promise<number | undefined> {
     const session = await this.options.client.createTalkbackSession(this.options.deviceId)
-    const listenPort = await reservePort(false)
+    // Reserved in the SAME family the relay will send from — a v4 port number is
+    // no use to a udp6 socket.
+    const listenPort = await reservePort(ipv6)
     const proc = new FfmpegProcess({
       path: this.options.caps.path,
       // The rate the CONSOLE asked for, never a constant: the reference doorbell
@@ -740,12 +748,7 @@ export class StreamingDelegate implements CameraStreamingDelegate {
       spawn: this.options.spawn,
       // On stdin, so the session key never touches disk. Nothing here — the SDP
       // or the arguments — may reach a log.
-      stdin: talkbackSdp({
-        listenPort,
-        payloadType: audio.payloadType,
-        sampleRate: audio.sampleRate,
-        key: audio.key,
-      }),
+      stdin: talkbackSdp({ listenPort, payloadType: audio.payloadType, key: audio.key, ipv6 }),
       counted: false,
       onExit: () => {
         if (state.proc === proc)
@@ -869,12 +872,9 @@ export class StreamingDelegate implements CameraStreamingDelegate {
         // prepareStream held the socket — talkback rides alongside a live view,
         // it is never a session of its own.
         if (started && rtp.audioSocket) {
-          this.armTalkback(request.sessionID, rtp.audioSocket, {
-            ...rtp.audio,
-            payloadType: request.audio.pt,
-            // HomeKit reports kHz; an SDP wants Hz.
-            sampleRate: request.audio.sample_rate * 1000,
-          })
+          // No sample rate: an Opus SDP declares 48000 whatever HomeKit
+          // negotiated. See talkbackSdp.
+          this.armTalkback(request.sessionID, rtp.audioSocket, { ...rtp.audio, payloadType: request.audio.pt })
         }
         callback(started ? undefined : new Error(`Could not start a stream for "${this.options.label}".`))
       },

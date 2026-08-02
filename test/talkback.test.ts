@@ -105,10 +105,28 @@ const KEY = Buffer.alloc(30, 7)
 
 describe('talkbackSdp', () => {
   it('describes the inbound srtp stream', () => {
-    const sdp = talkbackSdp({ listenPort: 5000, payloadType: 110, sampleRate: 24000, key: KEY })
+    const sdp = talkbackSdp({ listenPort: 5000, payloadType: 110, key: KEY })
     expect(sdp).toContain('m=audio 5000 RTP/SAVP 110')
-    expect(sdp).toContain('a=rtpmap:110 opus/24000/2')
     expect(sdp).toContain(`a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:${KEY.toString('base64')}`)
+  })
+
+  // RFC 7587 §7: 48000/2 whatever the stream is encoded at. ffmpeg reads the
+  // clock rate as the stream's time_base, so a negotiated 16000 would stretch
+  // every timestamp by three. The session-level proof — that a 16 kHz
+  // negotiation still produces this line — is in test/streaming.test.ts.
+  it('always declares the 48 khz opus clock rate', () => {
+    const sdp = talkbackSdp({ listenPort: 5000, payloadType: 110, key: KEY })
+    expect(sdp.split('\r\n').find(line => line.startsWith('a=rtpmap:'))).toBe('a=rtpmap:110 opus/48000/2')
+  })
+
+  it('matches the loopback family to the relay socket', () => {
+    const v4 = talkbackSdp({ listenPort: 5000, payloadType: 110, key: KEY })
+    expect(v4).toContain('c=IN IP4 127.0.0.1')
+    expect(v4).toContain('o=- 0 0 IN IP4 127.0.0.1')
+    const v6 = talkbackSdp({ listenPort: 5000, payloadType: 110, key: KEY, ipv6: true })
+    expect(v6).toContain('c=IN IP6 ::1')
+    expect(v6).toContain('o=- 0 0 IN IP6 ::1')
+    expect(v6).not.toContain('127.0.0.1')
   })
 })
 
