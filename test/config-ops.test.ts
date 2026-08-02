@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { cameraToggles, defaultFor, DEFAULTS, ensureConfig, MAX_STREAMS_RANGE, PACKAGE_LABEL, parseIcloudTier, parseMaxStreams, QUALITY_OPTIONS, RECORDING_LIMITS, renderDeviceHeader, renderQualitySelect, renderToggle, setDeviceSetting, setGlobalSetting, shouldOfferPackageCamera } from '../homebridge-ui/public/config-ops.js'
+import { cameraToggles, clearDeviceSetting, defaultFor, DEFAULTS, ensureConfig, isOverridden, MAX_STREAMS_RANGE, PACKAGE_LABEL, parseIcloudTier, parseMaxStreams, QUALITY_OPTIONS, RECORDING_LIMITS, renderDeviceHeader, renderQualitySelect, renderToggle, setDeviceSetting, setGlobalSetting, shouldOfferPackageCamera } from '../homebridge-ui/public/config-ops.js'
 import { parseConfig, settingsFor } from '../src/config.js'
 
 // Minimal fake DOM — just enough to prove renderDeviceHeader never turns
@@ -218,6 +218,47 @@ describe('setDeviceSetting', () => {
     const original = ensureConfig({})
     setDeviceSetting(original, 'cam1', 'hksv', true)
     expect(original.devices).toEqual({})
+  })
+})
+
+describe('isOverridden / clearDeviceSetting', () => {
+  const base = ensureConfig({})
+
+  it('reports override state per key, per device', () => {
+    const config = { ...base, devices: { a: { audio: true } } }
+    expect(isOverridden(config, 'a', 'audio')).toBe(true)
+    // Same device, a key it never set — inherited, not overridden.
+    expect(isOverridden(config, 'a', 'quality')).toBe(false)
+    // A different device entirely, same key — no entry at all.
+    expect(isOverridden(config, 'b', 'audio')).toBe(false)
+  })
+
+  it('clears one key and keeps the others', () => {
+    const config = { ...base, devices: { a: { audio: true, quality: 'high' } } }
+    const next = clearDeviceSetting(config, 'a', 'audio')
+    expect(next.devices.a).toEqual({ quality: 'high' })
+  })
+
+  it('removes the device entry when its last override is cleared', () => {
+    const config = { ...base, devices: { a: { audio: true } } }
+    expect(clearDeviceSetting(config, 'a', 'audio').devices.a).toBeUndefined()
+  })
+
+  it('is a no-op when the key was never overridden', () => {
+    const config = { ...base, devices: { a: { audio: true } } }
+    const next = clearDeviceSetting(config, 'a', 'quality')
+    expect(next).toBe(config)
+  })
+
+  it('is a no-op when the device has no overrides at all', () => {
+    const next = clearDeviceSetting(base, 'unknown', 'audio')
+    expect(next).toBe(base)
+  })
+
+  it('does not mutate the input config', () => {
+    const config = { ...base, devices: { a: { audio: true, quality: 'high' } } }
+    clearDeviceSetting(config, 'a', 'audio')
+    expect(config.devices.a).toEqual({ audio: true, quality: 'high' })
   })
 })
 

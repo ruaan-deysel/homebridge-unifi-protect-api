@@ -128,6 +128,8 @@ declare module '*/homebridge-ui/public/config-ops.js' {
   ): { wrap: MinimalDomElement, input: MinimalDomElement }
 
   export function defaultFor(config: ConfigShape, key: string): unknown
+  export function isOverridden(config: ConfigShape, deviceId: string, key: string): boolean
+  export function clearDeviceSetting(config: ConfigShape, deviceId: string, key: string): ConfigShape
   export function cameraToggles(
     device: { type?: string, hasMic?: boolean, hasSpeaker?: boolean, hasPackageCamera?: boolean },
   ): { key: string, label: string, comingLater?: boolean, section: 'Live view' | 'Recording' | 'Extra accessories' }[]
@@ -183,4 +185,10 @@ declare module '*/homebridge-ui/public/ui-render.js' {
     heading: MinimalDomElement
     bodies: Record<'General' | 'Live view' | 'Recording' | 'Extra accessories', MinimalDomElement>
   }
+
+  export function renderBadge(
+    doc: MinimalDocument,
+    overridden: boolean,
+    onReset: () => void,
+  ): { badge: MinimalDomElement, reset: MinimalDomElement | undefined }
 }

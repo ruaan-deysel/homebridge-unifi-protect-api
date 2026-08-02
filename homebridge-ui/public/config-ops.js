@@ -250,6 +250,34 @@ export function renderToggle(doc, id, label) {
 }
 
 /**
+ * True only when this device carries its OWN value for the key — the flat UI
+ * showed just the resolved value, with no way to tell whether it came from
+ * the global default or a per-device override.
+ */
+export function isOverridden(config, deviceId, key) {
+  return config.devices?.[deviceId]?.[key] !== undefined
+}
+
+/**
+ * Drops one override. An emptied device entry is removed rather than left as
+ * `{}`, so config.json does not accumulate husks for devices that are back on
+ * the defaults — the same rule `setDeviceSetting` already applies when a
+ * value is set back to the default.
+ */
+export function clearDeviceSetting(config, deviceId, key) {
+  const current = config.devices?.[deviceId]
+  if (!current || current[key] === undefined)
+    return config
+  const { [key]: _dropped, ...rest } = current
+  const devices = { ...config.devices }
+  if (Object.keys(rest).length === 0)
+    delete devices[deviceId]
+  else
+    devices[deviceId] = rest
+  return { ...config, devices }
+}
+
+/**
  * Writes an override only when it differs from the effective default, so an
  * untouched device contributes nothing to config.json and changing a default
  * actually moves every untouched device.

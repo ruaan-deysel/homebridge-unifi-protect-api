@@ -1,6 +1,6 @@
 import type { FakeElement } from './config-ops.test.js'
 import { describe, expect, it } from 'vitest'
-import { renderDetail, renderDeviceList, renderTabs } from '../homebridge-ui/public/ui-render.js'
+import { renderBadge, renderDetail, renderDeviceList, renderTabs } from '../homebridge-ui/public/ui-render.js'
 import { makeDoc } from './config-ops.test.js'
 
 const doc = makeDoc()
@@ -202,5 +202,27 @@ describe('renderDetail', () => {
     const { heading } = renderDetail(doc, DEVICES[0]!) as unknown as { heading: FakeElement }
     expect(heading.tabIndex).toBe(-1)
     expect(heading.focusCount).toBe(1)
+  })
+})
+
+describe('renderBadge', () => {
+  it('renders a default badge with no reset control when inherited', () => {
+    const { badge, reset } = renderBadge(doc, false, () => {}) as unknown as { badge: FakeElement, reset: FakeElement | undefined }
+    expect(badge.textContent).toBe('default')
+    expect(reset).toBeUndefined()
+  })
+
+  it('renders an overridden badge with a reset control when not inherited', () => {
+    const { badge, reset } = renderBadge(doc, true, () => {}) as unknown as { badge: FakeElement, reset: FakeElement | undefined }
+    expect(badge.textContent).toBe('overridden')
+    expect(reset).toBeDefined()
+    expect(reset?.tagName).toBe('BUTTON')
+  })
+
+  it('the reset control calls back when clicked', () => {
+    const calls: number[] = []
+    const { reset } = renderBadge(doc, true, () => calls.push(1)) as unknown as { reset: FakeElement }
+    reset.dispatch('click')
+    expect(calls).toEqual([1])
   })
 })

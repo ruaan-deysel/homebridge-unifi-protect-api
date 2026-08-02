@@ -116,6 +116,26 @@ export function renderDeviceList(doc, devices, onSelect) {
   return { list, filter, rows: () => rowEls }
 }
 
+/**
+ * Which value a control is showing: the global default, or this device's own.
+ * Making that visible is the point — the flat UI showed only the resulting
+ * value, so there was no way to tell, and no way to get back to the default.
+ * `onReset` is only wired when overridden; there is nothing to reset otherwise.
+ */
+export function renderBadge(doc, overridden, onReset) {
+  const badge = doc.createElement('span')
+  badge.className = overridden ? 'badge text-bg-warning ms-2' : 'badge text-bg-secondary ms-2'
+  badge.textContent = overridden ? 'overridden' : 'default'
+  if (!overridden)
+    return { badge, reset: undefined }
+  const reset = doc.createElement('button')
+  reset.type = 'button'
+  reset.className = 'btn btn-link btn-sm p-0 ms-2'
+  reset.textContent = 'reset'
+  reset.addEventListener('click', () => onReset())
+  return { badge, reset }
+}
+
 const SECTIONS = ['General', 'Live view', 'Recording', 'Extra accessories']
 
 /**
