@@ -66,10 +66,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   2 fps.
 - The Doorbell's package lens can now be streamed like any other camera. It has one stream
   rather than a choice of substreams, and the console serves it at 1600×1200/2 fps rather
-  than 16:9/30 fps like every other lens, so HomeKit is told to expect 15 fps and ffmpeg
-  pads the real 2 fps up to it by duplicating frames — without that, HomeKit can mistake a
-  genuine 2 fps feed for a stalled stream. It never carries audio, since the lens shares its
-  microphone with the main camera and a second identical audio source helps no one.
+  than 16:9/30 fps like every other lens, so ffmpeg duplicates frames up to the rate
+  HomeKit negotiated — without that, HomeKit can mistake a genuine 2 fps feed for a stalled
+  stream. It never carries audio, since the lens shares its microphone with the main camera
+  and a second identical audio source helps no one.
 - Live view can carry audio, sent as its own stream alongside the video and transcoded to
   Opus, which HomeKit accepts and which the hardware-capable ffmpeg can encode. AAC-ELD is
   used instead when a build has `libfdk_aac` but not `libopus`. Audio is **off by default
