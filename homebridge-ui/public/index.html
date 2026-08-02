@@ -40,7 +40,7 @@
 <div id="devices"></div>
 
 <script type="module">
-  import { AUDIO_LABEL, ensureConfig, PACKAGE_LABEL, parseMaxStreams, renderDeviceHeader, renderQualitySelect, renderToggle, setDeviceSetting, setGlobalSetting, shouldOfferPackageCamera } from './config-ops.js'
+  import { cameraToggles, defaultFor, ensureConfig, parseMaxStreams, renderDeviceHeader, renderQualitySelect, renderToggle, setDeviceSetting, setGlobalSetting } from './config-ops.js'
 
   const statusEl = document.getElementById('status')
   const trustEl = document.getElementById('trust')
@@ -93,7 +93,8 @@
       const grid = document.createElement('div')
       grid.className = 'up-grid'
 
-      const toggle = (key, label, fallback, comingLater) => {
+      const toggle = (key, label, comingLater) => {
+        const fallback = defaultFor(config, key)
         // id embeds device.id (console-supplied) — renderToggle builds it with
         // DOM APIs only, and carries the injection test for this path.
         const { wrap, input } = renderToggle(document, `${device.id}-${key}`, label)
@@ -121,7 +122,7 @@
         grid.append(wrap)
       }
 
-      toggle('expose', 'Expose in HomeKit', config.defaults.exposeNewDevices)
+      toggle('expose', 'Expose in HomeKit')
       // Capability-driven: a control is only offered when the hardware can
       // honour it, so the UI never lets someone flip a setting that will
       // silently do nothing.
@@ -134,13 +135,10 @@
           await save()
         })
         grid.append(wrap)
-        if (device.hasMic)
-          toggle('audio', AUDIO_LABEL, false)
-        toggle('hksv', 'HomeKit Secure Video', config.defaults.hksv, true)
-        if (device.hasSpeaker)
-          toggle('talkback', 'Two-way audio', false, true)
-        if (shouldOfferPackageCamera(device))
-          toggle('packageCamera', PACKAGE_LABEL, false)
+        // Which checkboxes a camera gets — including whether the package lens
+        // is offered — is decided in config-ops.js, where a test can reach it.
+        for (const { key, label, comingLater } of cameraToggles(device))
+          toggle(key, label, comingLater)
       }
 
       card.append(grid)

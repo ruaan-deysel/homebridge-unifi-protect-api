@@ -64,8 +64,13 @@ export function setGlobalSetting(config, key, value) {
   return next
 }
 
-/** Per-device defaults, derived from the global defaults. */
-function defaultFor(config, key) {
+/**
+ * Per-device defaults, derived from the global defaults. Exported because
+ * index.html needs the same answer when it renders a checkbox unchecked; a
+ * second copy of this table there would drift and write overrides that equal
+ * the default.
+ */
+export function defaultFor(config, key) {
   if (key === 'expose')
     return config.defaults.exposeNewDevices
   if (key === 'quality')
@@ -176,6 +181,25 @@ export const PACKAGE_LABEL = 'Package camera (separate accessory, 2 fps)'
  */
 export function shouldOfferPackageCamera(device) {
   return device.type === 'camera' && device.hasPackageCamera === true
+}
+
+/**
+ * Which per-device checkboxes a camera gets, in render order — index.html
+ * renders exactly this list and nothing else, so the package toggle's
+ * appearance is decided in tested code rather than in an untestable inline
+ * branch. `comingLater` renders the control inert: the setting exists in the
+ * schema but nothing reads it yet.
+ */
+export function cameraToggles(device) {
+  const toggles = []
+  if (device.hasMic)
+    toggles.push({ key: 'audio', label: AUDIO_LABEL })
+  toggles.push({ key: 'hksv', label: 'HomeKit Secure Video', comingLater: true })
+  if (device.hasSpeaker)
+    toggles.push({ key: 'talkback', label: 'Two-way audio', comingLater: true })
+  if (shouldOfferPackageCamera(device))
+    toggles.push({ key: 'packageCamera', label: PACKAGE_LABEL })
+  return toggles
 }
 
 /**
