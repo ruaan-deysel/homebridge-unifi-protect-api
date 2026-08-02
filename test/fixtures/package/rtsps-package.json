@@ -1,6 +1,0 @@
-{
-  "status": 200,
-  "body": {
-    "package": "rtsps://fake.invalid:7441/fakestream?token=FAKE-TOKEN"
-  }
-}
