@@ -141,9 +141,19 @@ export async function probeFfmpeg(options: ProbeOptions): Promise<FfmpegCapabili
 }
 
 /**
- * Stream URLs AND SRTP keys. ffmpeg echoes its full command line on failure,
- * and our command line contains both an RTSPS URL carrying an auth token and,
- * for talkback, a `-srtp_out_params <key|salt>` — a per-session secret.
+ * Stream URLs AND SRTP keys, in all three shapes a key actually travels in.
+ * ffmpeg echoes its full command line on failure, and it echoes the offending
+ * line of an SDP it cannot parse:
+ *
+ * - `rtsps://…` — the Protect input url, carrying an auth token. Every path.
+ * - `-srtp_out_params <key|salt>` — on the command line of every OUTBOUND
+ *   video and audio stream (see buildFfmpegArgs). Talkback emits neither this
+ *   nor `-srtp_in_params`; its key never reaches argv at all.
+ * - `inline:<base64>` — the `a=crypto` line of the talkback SDP, fed on stdin
+ *   precisely so the key never touches disk. This is the ONLY form the
+ *   talkback path can leak, and it reaches a log through absorb() on a
+ *   non-zero exit.
+ *
  * Redaction happens BEFORE anything is logged — filtering afterwards means the
  * secret has already been formatted into a string somebody may hold a
  * reference to.
@@ -152,6 +162,7 @@ export function redactStreamUrls(text: string): string {
   return text
     .replace(/rtsps?:\/\/\S+/gi, '<stream-url-redacted>')
     .replace(/(-srtp_(?:in|out)_params\s+)\S+/gi, '$1<srtp-key-redacted>')
+    .replace(/(inline:)\S+/gi, '$1<srtp-key-redacted>')
 }
 
 /** How much redacted stderr is kept to explain a failure. */

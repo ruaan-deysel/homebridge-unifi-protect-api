@@ -31,6 +31,29 @@ export interface TalkbackRelayOptions {
  *
  * This never decrypts. It forwards SRTP verbatim; ffmpeg holds the key.
  */
+/**
+ * True only for something that looks like an RTP media packet.
+ *
+ * HAP muxes SRTCP receiver reports onto the SAME port the return audio arrives
+ * on, and it sends them on every live view whether or not anybody ever speaks.
+ * Unfiltered, the first receiver report opens the console session and spawns
+ * the encoder — the doorbell speaker arms every time somebody looks, which is
+ * the entire thing the lazy design exists to avoid. Forwarded, they land in
+ * ffmpeg's SRTP input and fail authentication, because SRTCP derives its keys
+ * differently: a steady stream of decrypt errors for packets that were never
+ * media.
+ *
+ * RFC 5761 §4: with RTP and RTCP muxed, the second byte's payload-type field
+ * (the marker bit masked off) is 72-76 for RTCP. Byte 0's top two bits are the
+ * RTP version, which is 2 for both, and 12 bytes is the fixed RTP header.
+ */
+export function isRtpMedia(packet: Buffer): boolean {
+  if (packet.length < 12 || (packet[0]! & 0xC0) !== 0x80)
+    return false
+  const payloadType = packet[1]! & 0x7F
+  return payloadType < 72 || payloadType > 76
+}
+
 export class TalkbackRelay {
   private buffered: Buffer[] = []
   private target?: number
@@ -42,7 +65,9 @@ export class TalkbackRelay {
   }
 
   private onPacket(packet: Buffer): void {
-    if (this.closed)
+    // Before the buffering AND before the forward: an RTCP packet must neither
+    // trigger the open nor reach ffmpeg. See isRtpMedia.
+    if (this.closed || !isRtpMedia(packet))
       return
     if (this.target !== undefined) {
       this.options.forward(packet, this.target)
@@ -157,6 +182,14 @@ export interface TalkbackArgsOptions {
  * a defect this repo has already shipped once with `-r`.
  */
 export function buildTalkbackArgs(options: TalkbackArgsOptions): string[] {
+  // The console supplies this url and it becomes an ffmpeg OUTPUT. `-f rtp`
+  // does not constrain the protocol and `-protocol_whitelist` is input-side
+  // only, so a `file://` or `http://` value from a spoofed or compromised
+  // console would be a WRITE, not a stream. The generated schema says only
+  // `z.url()`, and it is generated — the guard belongs here, at the one place
+  // the value turns into an argument. The message never quotes the url.
+  if (!/^rtp:\/\//i.test(options.destination))
+    throw new Error('The console answered with a talkback destination that is not an rtp:// url; refusing to run it.')
   return [
     '-hide_banner',
     '-loglevel',

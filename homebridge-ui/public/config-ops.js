@@ -195,7 +195,8 @@ export function shouldOfferPackageCamera(device) {
  * renders exactly this list and nothing else, so the package toggle's
  * appearance is decided in tested code rather than in an untestable inline
  * branch. `comingLater` renders the control inert: the setting exists in the
- * schema but nothing reads it yet.
+ * schema but nothing reads it yet — which is now hksv alone. Audio, talkback
+ * and the package lens are all live; do not add the flag back to them.
  */
 export function cameraToggles(device) {
   const toggles = []

@@ -408,10 +408,18 @@ async function reservePort(ipv6: boolean): Promise<number> {
  */
 async function bindPort(ipv6: boolean): Promise<{ socket: Socket, port: number }> {
   const socket = createSocket(ipv6 ? 'udp6' : 'udp4')
-  await new Promise<void>((resolve, reject) => {
-    socket.on('error', reject)
-    socket.bind(0, resolve)
-  })
+  try {
+    await new Promise<void>((resolve, reject) => {
+      socket.on('error', reject)
+      socket.bind(0, resolve)
+    })
+  }
+  catch (error) {
+    // A rejected bind leaves the handle open and nothing else holds it. Against
+    // a flapping console the caller retries, so one leak per attempt adds up.
+    closeQuietly(socket)
+    throw error
+  }
   return { socket, port: socket.address().port }
 }
 
@@ -431,6 +439,13 @@ export class StreamingDelegate implements CameraStreamingDelegate {
    * talkback encoder must never take a slot from a camera's live view.
    */
   private readonly talkback = new Map<string, TalkbackSession>()
+  /**
+   * Session ids with a startSession still in flight; the value flips to true
+   * when stopSession lands while it is parked on an await. Deliberately NOT
+   * keyed off `prepared` — startSession is called directly, without a
+   * prepareStream, by both hap-nodejs' error paths and the tests.
+   */
+  private readonly starting = new Map<string, boolean>()
   private snapshotCache?: { at: number, jpeg: Buffer }
   private audioCodec?: Promise<AudioCodec | undefined>
   private warnedAboutAudio = false
@@ -522,7 +537,16 @@ export class StreamingDelegate implements CameraStreamingDelegate {
     const codec = await this.probeAudioCodec()
     if (!codec)
       return undefined
-    return { codecs: [audioStreamingCodec(codec)], ...(talkback ? { twoWayAudio: true } : {}) }
+    // OPUS ONLY, and not a preference: talkbackSdp hardcodes `opus/48000/2` and
+    // buildTalkbackArgs decodes Opus, so advertising two-way on an ffmpeg that
+    // chose AAC-ELD would have HomeKit send AAC-ELD into an Opus decoder — the
+    // doorbell speaker plays garbage and nothing anywhere reports an error.
+    // The container's bundled static build is exactly that case (see
+    // AUDIO_CODEC_PREFERENCE), so this is the common path, not a corner.
+    const twoWay = talkback && codec === 'opus'
+    if (!settings.audio && !twoWay)
+      return undefined
+    return { codecs: [audioStreamingCodec(codec)], ...(twoWay ? { twoWayAudio: true } : {}) }
   }
 
   /**
@@ -543,8 +567,19 @@ export class StreamingDelegate implements CameraStreamingDelegate {
     if (!wanted || !request.audio)
       return undefined
     const codec = await this.probeAudioCodec()
-    if (codec)
-      return { ...rtp.audio, ...request.audio, codec }
+    if (codec) {
+      // `localrtcpport` makes ffmpeg BIND that port for its outbound RTCP, and
+      // on a talkback session this process is already holding it — HomeKit
+      // sends the return audio there, so it must stay bound here. ffmpeg would
+      // fail with EADDRINUSE and exit before the stream ever started, taking
+      // the VIDEO down with it. Dropped rather than moved: HAP uses one port
+      // per direction pair, so there is no second port to hand out. The cost is
+      // that ffmpeg's audio RTCP leaves from an ephemeral port instead; the
+      // reports HomeKit sends back were already landing on our socket, where
+      // the relay drops them as non-RTP.
+      const target = rtp.audioSocket ? { ...rtp.audio, localPort: undefined } : rtp.audio
+      return { ...target, ...request.audio, codec }
+    }
     if (!this.warnedAboutAudio) {
       this.warnedAboutAudio = true
       const encoders = AUDIO_CODEC_PREFERENCE.map(c => AUDIO_CODECS[c].encoder).join(' or ')
@@ -566,6 +601,7 @@ export class StreamingDelegate implements CameraStreamingDelegate {
     }
     // Held across every await below, and released once the process is counted.
     reservedSlots++
+    this.starting.set(sessionId, false)
     try {
       const settings = this.options.settings()
       const isPackage = this.options.channel === 'package'
@@ -647,12 +683,22 @@ export class StreamingDelegate implements CameraStreamingDelegate {
         this.options.log.warn(`ffmpeg for "${this.options.label}" exited before the stream started.`)
         return false
       }
+      // A stop that arrived while this was parked on an await never saw this
+      // process. Without this the transcode is put into `sessions` under an
+      // id nothing will ever stop again: a permanently orphaned 4 MP decode
+      // holding a maxStreams slot, and one tap-and-back away on every camera.
+      if (this.starting.get(sessionId)) {
+        proc.stop()
+        this.options.log.debug(`The stream for "${this.options.label}" was stopped while it was starting.`)
+        return false
+      }
       this.sessions.set(sessionId, proc)
       this.options.log.info(`Live view started for "${this.options.label}" (${channel} substream, ${audio ? 'with' : 'no'} audio).`)
       return true
     }
     finally {
       reservedSlots--
+      this.starting.delete(sessionId)
     }
   }
 
@@ -667,6 +713,10 @@ export class StreamingDelegate implements CameraStreamingDelegate {
    * genuinely dies, so nothing lingers forever.
    */
   stopSession(sessionId: string): void {
+    // Latched for a start still parked on an await — it checks this before it
+    // registers its process. See the check at the end of startSession.
+    if (this.starting.has(sessionId))
+      this.starting.set(sessionId, true)
     const proc = this.sessions.get(sessionId)
     if (!proc || proc.stop())
       this.sessions.delete(sessionId)
@@ -709,6 +759,16 @@ export class StreamingDelegate implements CameraStreamingDelegate {
    * view, whether or not anybody ever speaks.
    */
   private armTalkback(sessionId: string, socket: Socket, audio: RtpTarget): void {
+    // HomeKit reuses session ids. A second start on a live id would otherwise
+    // leave the old relay listening on the SHARED socket — double-forwarding
+    // every datagram — with an encoder whose RTP input never EOFs, so it idles
+    // forever, and `counted: false` means activeCount never shows it.
+    const prior = this.talkback.get(sessionId)
+    if (prior) {
+      prior.closed = true
+      prior.relay.close()
+      prior.proc?.stop()
+    }
     // The socket's OWN family, not the delegate's opinion of it: a udp6 socket
     // cannot send to an IPv4 literal (dgram resolves the destination as family
     // 6 and errors), and the SDP, the reserved port and this destination must
@@ -740,9 +800,18 @@ export class StreamingDelegate implements CameraStreamingDelegate {
     // on udp4 says nothing about udp6, and ffmpeg is about to bind it as the v6
     // loopback. bind-and-close rather than reservePort so the family is
     // observable — see the ipv6 test.
+    //
+    // ponytail: only `listenPort` is reserved, and ffmpeg also opens
+    // `listenPort + 1` for RTCP. An explicit SDP port makes a collision there a
+    // hard bind failure, but the blast radius is this one talkback session:
+    // it logs and stays silent, and reopening the live view draws a new port.
+    // Reserve the pair (bind n and n+1, retry on failure) if it ever shows up.
     const reservation = await (this.options.bind ?? bindPort)(ipv6)
     closeQuietly(reservation.socket)
     const listenPort = reservation.port
+    // ponytail: two viewers of the same camera each open their own encoder to
+    // the same rtp://camera:7004, so the doorbell mixes both. Upgrade is a
+    // per-delegate one-at-a-time flag that refuses the second open.
     const proc = new FfmpegProcess({
       path: this.options.caps.path,
       // The rate the CONSOLE asked for, never a constant: the reference doorbell
@@ -872,17 +941,29 @@ export class StreamingDelegate implements CameraStreamingDelegate {
       },
     }, rtp).then(
       (started) => {
-        // Only once the video session is genuinely running, and only when
+        // Only once the video session is genuinely running, only when
         // prepareStream held the socket — talkback rides alongside a live view,
-        // it is never a session of its own.
-        if (started && rtp.audioSocket) {
+        // it is never a session of its own — and only while THIS prepared entry
+        // is still the current one. A stop during the start already closed that
+        // socket, and arming on a closed dgram handle throws
+        // ERR_SOCKET_DGRAM_NOT_RUNNING out of a promise nobody catches.
+        if (started && rtp.audioSocket && this.prepared.get(request.sessionID) === rtp) {
           // No sample rate: an Opus SDP declares 48000 whatever HomeKit
           // negotiated. See talkbackSdp.
           this.armTalkback(request.sessionID, rtp.audioSocket, { ...rtp.audio, payloadType: request.audio.pt })
         }
+        // A failed start leaves the prepared entry — and with talkback a BOUND
+        // socket — held until some later stop. hap-nodejs mints a fresh session
+        // id per attempt, so a viewer retrying against a flapping console
+        // accumulates one file descriptor per tap.
+        if (!started)
+          this.stopSession(request.sessionID)
         callback(started ? undefined : new Error(`Could not start a stream for "${this.options.label}".`))
       },
-      error => callback(new Error(errorMessage(error))),
+      (error) => {
+        this.stopSession(request.sessionID)
+        callback(new Error(errorMessage(error)))
+      },
     )
   }
 }

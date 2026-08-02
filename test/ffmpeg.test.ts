@@ -184,6 +184,19 @@ describe('redactStreamUrls', () => {
     expect(redactStreamUrls(line)).not.toContain('SECRETKEYSECRETKEYSECRETKEY==')
   })
 
+  // The form the TALKBACK key actually travels in. That path emits no
+  // -srtp_in_params/-srtp_out_params at all: the key is on the `a=crypto` line
+  // of an SDP fed on stdin, and ffmpeg echoes the offending SDP line back on
+  // stderr when it cannot parse it — straight into a warn on a non-zero exit.
+  it('redacts the srtp key on an echoed sdp crypto line', () => {
+    const line = 'Failed to parse: a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:U0VDUkVUS0VZU0VDUkVUU0FMVA=='
+    const out = redactStreamUrls(line)
+    expect(out).not.toContain('U0VDUkVUS0VZU0VDUkVUU0FMVA==')
+    expect(out).toContain('inline:<srtp-key-redacted>')
+    // The rest of the diagnostic survives, or the line explains nothing.
+    expect(out).toContain('AES_CM_128_HMAC_SHA1_80')
+  })
+
   it('still redacts stream urls', () => {
     expect(redactStreamUrls('rtsps://host:7441/token')).toBe('<stream-url-redacted>')
   })

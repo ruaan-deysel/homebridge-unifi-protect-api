@@ -253,6 +253,8 @@ interface DelegateOverrides {
   maxStreams?: number
   channel?: 'package'
   bind?: () => Promise<{ socket: never, port: number }>
+  /** Omits the bind seam entirely, so the delegate binds a real UDP socket. */
+  realBind?: boolean
   createTalkbackSession?: () => Promise<{ url: string, codec: string, samplingRate: number, bitsPerSample: number }>
 }
 
@@ -315,7 +317,7 @@ function makeDelegate(overrides: DelegateOverrides = {}) {
     label: 'Driveway',
     log,
     client: { getSnapshot, createTalkbackSession } as never,
-    bind: bind as never,
+    bind: (overrides.realBind ? undefined : bind) as never,
     urls: { get, clear: vi.fn() } as never,
     caps: overrides.caps ?? CAPS_HW,
     settings: () => ({ quality: overrides.quality ?? 'auto', audio: overrides.audio ?? false, talkback: overrides.talkback ?? false }),
@@ -658,6 +660,22 @@ describe('streamingDelegate sessions', () => {
     expect(await delegate.audioStreamingOptions()).toBeUndefined()
   })
 
+  // talkbackSdp hardcodes `opus/48000/2` and buildTalkbackArgs decodes Opus.
+  // On an ffmpeg without libopus the advertisement picks AAC-ELD, HomeKit then
+  // sends AAC-ELD, and the doorbell speaker plays garbage with no error
+  // anywhere. The container's bundled static build is exactly that ffmpeg.
+  it('does not advertise two-way audio when the chosen codec is not opus', async () => {
+    const { delegate } = makeDelegate({ audio: true, talkback: true, hasSpeaker: true, encoders: { aacEld: true } })
+    const options = await delegate.audioStreamingOptions()
+    expect(options?.codecs[0]?.type).toBe('AAC-eld')
+    expect(options?.twoWayAudio).toBeFalsy()
+  })
+
+  it('advertises nothing at all when talkback is the only reason to and opus is missing', async () => {
+    const { delegate } = makeDelegate({ audio: false, talkback: true, hasSpeaker: true, encoders: { aacEld: true } })
+    expect(await delegate.audioStreamingOptions()).toBeUndefined()
+  })
+
   it('does not advertise twoWayAudio when audio is on but talkback is off', async () => {
     const { delegate } = makeDelegate({ audio: true, talkback: false, hasSpeaker: true, encoders: { opus: true } })
     const options = await delegate.audioStreamingOptions()
@@ -796,6 +814,8 @@ const HOMEKIT_AUDIO_KEY = Buffer.concat([Buffer.alloc(16, 3), Buffer.alloc(14, 4
 async function startTalkbackSession({ ipv6, ...overrides }: DelegateOverrides & { ipv6?: boolean } = {}) {
   const socket = fakeSocket(6100, ipv6 ? 'IPv6' : 'IPv4')
   const children: ChildRecord[] = []
+  /** The child objects themselves, so a test can end one by hand. */
+  const procs: ChildProcess[] = []
   // The FIRST bind is the socket HomeKit talks to and is held; every later one
   // is the encoder's port reservation, which is closed again immediately.
   let nextPort = 6100
@@ -813,7 +833,9 @@ async function startTalkbackSession({ ipv6, ...overrides }: DelegateOverrides & 
     spawn: () => {
       const record: ChildRecord = { stdin: '', killed: false }
       children.push(record)
-      return fakeChild(record)
+      const child = fakeChild(record)
+      procs.push(child)
+      return child
     },
     ...overrides,
   })
@@ -825,7 +847,20 @@ async function startTalkbackSession({ ipv6, ...overrides }: DelegateOverrides & 
   await new Promise<void>((resolve, reject) => {
     delegate.handleStreamRequest(startRequest(), error => (error ? reject(error) : resolve()))
   })
-  return { ...made, socket, children, prepared, reserved, sessionId: 'session-1' }
+  return { ...made, socket, children, procs, prepared, reserved, sessionId: 'session-1' }
+}
+
+/**
+ * A minimal RTP voice packet, version 2 and payload type 110 — the relay drops
+ * anything that is not one, because HAP muxes its SRTCP receiver reports onto
+ * the same port. `mark` is the first payload byte, so a test can identify it.
+ */
+function rtp(mark: number): Buffer {
+  const packet = Buffer.alloc(13)
+  packet[0] = 0x80
+  packet[1] = 110
+  packet[12] = mark
+  return packet
 }
 
 /** The port ffmpeg is told to listen on — where the relay must send. */
@@ -850,6 +885,38 @@ describe('talkback', () => {
     expect((prepared.audio as SourceResponse).port).toBeGreaterThan(0)
   })
 
+  // The user's invariant: talkback and `audio` are opposite directions and
+  // INDEPENDENT. Every other test in this suite asserts on the second spawn,
+  // so a gate of `settings.audio || settings.talkback` in startSession — which
+  // would start sending the doorbell's microphone to HomeKit the moment
+  // two-way is enabled — passed the whole suite. This asserts on the FIRST
+  // spawn, the video session, where that mutation shows.
+  it('never sends the camera microphone to homekit just because talkback is on', async () => {
+    const { spawn, delegate, sessionId } = await startTalkbackSession()
+    const args = argvOf(spawn, 0)
+    expect(args).toContain('-an')
+    expect(args).not.toContain('-c:a')
+    // Exactly one outbound stream: video. A second would be the microphone.
+    expect(args.filter(a => a.startsWith('srtp://'))).toHaveLength(1)
+    delegate.stopSession(sessionId)
+  })
+
+  // `localrtcpport` makes ffmpeg BIND that port, and on a talkback session this
+  // process holds it for the return audio: EADDRINUSE, the audio output never
+  // opens, and ffmpeg exits taking the video with it. Live view was broken
+  // outright for anyone with both settings on.
+  it('does not ask ffmpeg to bind the port the return audio arrives on', async () => {
+    const { spawn, delegate, sessionId } = await startTalkbackSession({ audio: true, encoders: { opus: true } })
+    const outputs = argvOf(spawn, 0).filter(a => a.startsWith('srtp://'))
+    expect(outputs).toHaveLength(2)
+    const [video, audio] = outputs as [string, string]
+    // The video stream keeps its own local RTCP port — it is not held here.
+    expect(video).toContain('localrtcpport=')
+    expect(audio).toContain(':5002?')
+    expect(audio).not.toContain('localrtcpport')
+    delegate.stopSession(sessionId)
+  })
+
   it('does not touch the console or spawn an encoder until return audio arrives', async () => {
     const { createTalkbackSession, spawn, delegate, sessionId } = await startTalkbackSession()
     expect(createTalkbackSession).not.toHaveBeenCalled()
@@ -860,8 +927,8 @@ describe('talkback', () => {
 
   it('opens one console session and one encoder on the first datagram', async () => {
     const { createTalkbackSession, spawn, socket, children, delegate, sessionId } = await startTalkbackSession()
-    socket.emit('message', Buffer.from([1]))
-    socket.emit('message', Buffer.from([2]))
+    socket.emit('message', rtp(1))
+    socket.emit('message', rtp(2))
     await until(() => spawn.mock.calls.length === 2)
     expect(createTalkbackSession).toHaveBeenCalledTimes(1)
     expect(createTalkbackSession).toHaveBeenCalledWith('cam1')
@@ -878,7 +945,7 @@ describe('talkback', () => {
     const { spawn, socket, delegate, sessionId } = await startTalkbackSession({
       createTalkbackSession: async () => ({ ...TALKBACK_SESSION, samplingRate: 8000 }),
     })
-    socket.emit('message', Buffer.from([1]))
+    socket.emit('message', rtp(1))
     await until(() => spawn.mock.calls.length === 2)
     const args = argvOf(spawn, 1)
     expect(args[args.indexOf('-ar') + 1]).toBe('8000')
@@ -888,7 +955,7 @@ describe('talkback', () => {
 
   it('forwards the buffered datagrams to the port the encoder listens on', async () => {
     const { socket, children, delegate, sessionId } = await startTalkbackSession()
-    const packet = Buffer.from([1, 2, 3])
+    const packet = rtp(3)
     socket.emit('message', packet)
     await until(() => socket.send.mock.calls.length > 0)
     const port = sdpListenPort(children[1]!.stdin)
@@ -904,7 +971,7 @@ describe('talkback', () => {
   // nothing at all — silently.
   it('keeps the sdp, the reserved port and the forward destination in one family on ipv6', async () => {
     const { spawn, socket, children, delegate, sessionId, bind } = await startTalkbackSession({ ipv6: true })
-    const packet = Buffer.from([1, 2, 3])
+    const packet = rtp(3)
     socket.emit('message', packet)
     await until(() => socket.send.mock.calls.length > 0)
     // BOTH binds — the held socket and the encoder's port reservation — asked
@@ -923,7 +990,7 @@ describe('talkback', () => {
 
   it('uses the v4 loopback for a v4 session, and frees the port for the encoder', async () => {
     const { socket, children, delegate, sessionId, bind, reserved } = await startTalkbackSession()
-    socket.emit('message', Buffer.from([1]))
+    socket.emit('message', rtp(1))
     await until(() => socket.send.mock.calls.length > 0)
     expect(bind.mock.calls).toEqual([[false], [false]])
     // The encoder's port is only RESERVED: ffmpeg binds it itself, and cannot
@@ -936,7 +1003,7 @@ describe('talkback', () => {
 
   it('does not count talkback against the transcode cap', async () => {
     const { spawn, socket, delegate, sessionId } = await startTalkbackSession()
-    socket.emit('message', Buffer.from([1]))
+    socket.emit('message', rtp(1))
     await until(() => spawn.mock.calls.length === 2)
     // Both the per-camera map and the host-wide counter the cap actually reads.
     expect(delegate.activeCount).toBe(1)
@@ -946,20 +1013,20 @@ describe('talkback', () => {
 
   it('kills the encoder and closes the socket on stop', async () => {
     const { spawn, socket, children, delegate, sessionId } = await startTalkbackSession()
-    socket.emit('message', Buffer.from([1]))
+    socket.emit('message', rtp(1))
     await until(() => spawn.mock.calls.length === 2)
     delegate.stopSession(sessionId)
     expect(children[1]!.killed).toBe(true)
     expect(socket.close).toHaveBeenCalled()
     // Nothing is forwarded after the teardown.
     const forwarded = socket.send.mock.calls.length
-    socket.emit('message', Buffer.from([9]))
+    socket.emit('message', rtp(9))
     expect(socket.send.mock.calls.length).toBe(forwarded)
   })
 
   it('kills the encoder and closes the socket on stopAll', async () => {
     const { spawn, socket, children, delegate } = await startTalkbackSession()
-    socket.emit('message', Buffer.from([1]))
+    socket.emit('message', rtp(1))
     await until(() => spawn.mock.calls.length === 2)
     delegate.stopAll()
     expect(children[1]!.killed).toBe(true)
@@ -982,7 +1049,7 @@ describe('talkback', () => {
         release = () => resolve(TALKBACK_SESSION)
       }),
     })
-    socket.emit('message', Buffer.from([1]))
+    socket.emit('message', rtp(1))
     await until(() => createTalkbackSession.mock.calls.length === 1)
     delegate.stopSession(sessionId)
     release()
@@ -995,7 +1062,7 @@ describe('talkback', () => {
   // secret never reaches disk; a log line would undo that.
   it('never logs the sdp, the key or the talkback arguments', async () => {
     const { spawn, socket, delegate, sessionId, log } = await startTalkbackSession()
-    socket.emit('message', Buffer.from([1]))
+    socket.emit('message', rtp(1))
     await until(() => spawn.mock.calls.length === 2)
     delegate.stopSession(sessionId)
     const logged = [...log.info.mock.calls, ...log.warn.mock.calls, ...log.debug.mock.calls].map(call => inspect(call)).join(' ')
@@ -1007,13 +1074,123 @@ describe('talkback', () => {
     expect(argvOf(spawn, 1).join(' ')).not.toContain(HOMEKIT_AUDIO_KEY)
   })
 
+  // Tapping away while the stream url is still in flight. stopSession is
+  // synchronous and closes the held socket, but startSession was parked: it
+  // came back, spawned, registered under an already-stopped id and armed the
+  // relay on a CLOSED dgram handle. Three failures at once — an unhandled
+  // ERR_SOCKET_DGRAM_NOT_RUNNING, HAP's callback never firing, and a 4 MP
+  // transcode nothing can ever stop, holding a maxStreams slot for good.
+  it('neither arms talkback nor orphans the transcode when the viewer taps away mid-start', async () => {
+    const socket = fakeSocket()
+    const children: ChildRecord[] = []
+    let release: (url: string) => void = () => {}
+    const { delegate, spawn, get, createTalkbackSession } = makeDelegate({
+      talkback: true,
+      hasSpeaker: true,
+      bind: async () => ({ socket: socket as never, port: 6100 }),
+      url: () => new Promise<string>((resolve) => {
+        release = resolve
+      }),
+      spawn: () => {
+        const record: ChildRecord = { stdin: '', killed: false }
+        children.push(record)
+        return fakeChild(record)
+      },
+    })
+    await new Promise<PrepareStreamResponse>((resolve, reject) => {
+      delegate.prepareStream(prepareRequest(), (error, response) => (response ? resolve(response) : reject(error)))
+    })
+    const outcome = new Promise<unknown>(resolve => delegate.handleStreamRequest(startRequest(), resolve))
+    await until(() => get.mock.calls.length === 1)
+    delegate.stopSession('session-1')
+    release(URL)
+
+    // HAP is answered at all — the bug left this promise pending forever.
+    expect(await outcome).toBeInstanceOf(Error)
+    // The transcode that started anyway is stopped, not left in the map.
+    expect(spawn).toHaveBeenCalledTimes(1)
+    expect(children[0]!.killed).toBe(true)
+    expect(delegate.activeCount).toBe(0)
+    expect(FfmpegProcess.activeCount).toBe(0)
+    expect(socket.close).toHaveBeenCalled()
+    // And nothing was armed on the socket that stopSession already closed.
+    socket.emit('message', rtp(1))
+    await new Promise(resolve => setTimeout(resolve, 5))
+    expect(createTalkbackSession).not.toHaveBeenCalled()
+    expect(spawn).toHaveBeenCalledTimes(1)
+  })
+
+  // hap-nodejs mints a fresh session id per attempt, so against a flapping
+  // console every retry used to leave one more bound socket behind.
+  it('releases the held socket when the start fails', async () => {
+    const socket = fakeSocket()
+    const { delegate } = makeDelegate({
+      talkback: true,
+      hasSpeaker: true,
+      bind: async () => ({ socket: socket as never, port: 6100 }),
+      url: failingUrl,
+    })
+    await new Promise<PrepareStreamResponse>((resolve, reject) => {
+      delegate.prepareStream(prepareRequest(), (error, response) => (response ? resolve(response) : reject(error)))
+    })
+    const error = await new Promise<unknown>(resolve => delegate.handleStreamRequest(startRequest(), resolve))
+    expect(error).toBeInstanceOf(Error)
+    expect(socket.close).toHaveBeenCalled()
+  })
+
+  // HomeKit reuses session ids. The old relay keeps its listener on the SHARED
+  // socket, so it double-forwards, and its encoder's RTP input never EOFs —
+  // `counted: false` means activeCount never shows it either.
+  it('takes down the previous relay when a start repeats on one session id', async () => {
+    const { spawn, socket, children, procs, delegate, sessionId } = await startTalkbackSession()
+    socket.emit('message', rtp(1))
+    await until(() => spawn.mock.calls.length === 2)
+    const firstEncoder = children[1]!
+
+    await new Promise<void>((resolve, reject) => {
+      delegate.handleStreamRequest(startRequest(), error => (error ? reject(error) : resolve()))
+    })
+    expect(firstEncoder.killed).toBe(true)
+
+    // One forward per packet, not two, and it goes to the NEW encoder.
+    const before = socket.send.mock.calls.length
+    socket.emit('message', rtp(2))
+    await until(() => spawn.mock.calls.length === 4)
+    await until(() => socket.send.mock.calls.length > before)
+    await new Promise(resolve => setTimeout(resolve, 5))
+    expect(socket.send.mock.calls.length - before).toBe(1)
+    expect(socket.send.mock.calls.at(-1)![1]).toBe(sdpListenPort(children[3]!.stdin))
+
+    delegate.stopSession(sessionId)
+    // The first start's VIDEO process is the documented orphan of the video
+    // path (see the onExit comment in startSession) — released by hand so the
+    // suite-wide active-count guard measures what this test is about.
+    ;(procs[0] as unknown as EventEmitter).emit('close', 0)
+    expect(FfmpegProcess.activeCount).toBe(0)
+  })
+
+  // Every other test injects the bind seam, which leaves socket.address().port
+  // and the on('error') wiring — the two lines the whole path stands on —
+  // never executed at all.
+  it('binds a real udp socket when nothing is injected', async () => {
+    const { delegate } = makeDelegate({ talkback: true, hasSpeaker: true, realBind: true })
+    const prepared = await new Promise<PrepareStreamResponse>((resolve, reject) => {
+      delegate.prepareStream(prepareRequest(), (error, response) => (response ? resolve(response) : reject(error)))
+    })
+    const port = (prepared.audio as SourceResponse).port
+    expect(port).toBeGreaterThan(0)
+    expect(Number.isInteger(port)).toBe(true)
+    // Releases the real socket; a leak here would show as an open handle.
+    delegate.stopSession('session-1')
+  })
+
   it('warns without leaking when the console refuses the talkback session', async () => {
     const { spawn, socket, delegate, sessionId, log } = await startTalkbackSession({
       createTalkbackSession: async () => {
         throw Object.assign(new Error('503 DOWNSTREAM_ERROR'), { cause: { apiKey: 'SECRET-KEY' } })
       },
     })
-    socket.emit('message', Buffer.from([1]))
+    socket.emit('message', rtp(1))
     await until(() => log.warn.mock.calls.length > 0)
     expect(inspect(log.warn.mock.calls)).toContain('503 DOWNSTREAM_ERROR')
     expect(inspect(log.warn.mock.calls)).not.toContain('SECRET-KEY')
