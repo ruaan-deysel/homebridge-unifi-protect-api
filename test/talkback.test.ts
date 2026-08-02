@@ -129,6 +129,8 @@ describe('buildTalkbackArgs', () => {
     expect(outputFormatFlag).toBeLessThan(args.indexOf('rtp://192.168.10.9:7004'))
     expect(args.indexOf('-c:a')).toBeLessThan(outputFormatFlag)
     expect(args.indexOf('-ar')).toBeLessThan(outputFormatFlag)
+    expect(args.indexOf('-ac')).toBeLessThan(outputFormatFlag)
+    expect(args.indexOf('-application')).toBeLessThan(outputFormatFlag)
   })
 
   it('whitelists the protocols the sdp refers to', () => {
