@@ -50,7 +50,7 @@ describe('prepareStream when a port cannot be reserved', () => {
       client: {} as never,
       urls: {} as never,
       caps: { path: '/usr/bin/ffmpeg', encoder: 'libx264' },
-      settings: () => ({ quality: 'auto', audio: false }),
+      settings: () => ({ quality: 'auto', audio: false, talkback: false }),
     })
 
     // A 1s race, not an unbounded await: the bug under test is a promise that

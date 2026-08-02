@@ -282,6 +282,7 @@ export function buildFfmpegArgs(caps: FfmpegCapabilities, s: StreamArgs): string
 export interface CameraStreamSettings {
   quality: QualityPreference
   audio: boolean
+  talkback: boolean
 }
 
 interface DelegateOptions {
@@ -302,6 +303,13 @@ interface DelegateOptions {
    * selection does not apply and `selectQuality` is never consulted.
    */
   channel?: 'package'
+  /**
+   * Whether the camera has a speaker, from `featureFlags.hasSpeaker`. Talkback
+   * is meaningless without one, and the console answers its talkback endpoint
+   * with a 503 DOWNSTREAM_ERROR rather than a clean 404 for such a camera — so
+   * this must come from the payload, never from probing.
+   */
+  hasSpeaker?: boolean
 }
 
 /** What prepareStream knows. The payload types only arrive with the start request. */
@@ -453,10 +461,19 @@ export class StreamingDelegate implements CameraStreamingDelegate {
     // this guard is deliberately redundant with it, not a leftover to prune.)
     if (this.options.channel === 'package')
       return undefined
-    if (!this.options.settings().audio)
+    const settings = this.options.settings()
+    const talkback = settings.talkback && this.options.hasSpeaker === true
+    // Talkback needs codecs advertised even when the microphone stays off: with
+    // no codecs hap-nodejs marks the stream videoOnly and disables the very
+    // audio machinery two-way depends on. The two directions are independent —
+    // advertising is not sending, and audioFor() still refuses to send the
+    // camera's microphone unless `audio` is on.
+    if (!settings.audio && !talkback)
       return undefined
     const codec = await this.probeAudioCodec()
-    return codec ? { codecs: [audioStreamingCodec(codec)] } : undefined
+    if (!codec)
+      return undefined
+    return { codecs: [audioStreamingCodec(codec)], ...(talkback ? { twoWayAudio: true } : {}) }
   }
 
   /**

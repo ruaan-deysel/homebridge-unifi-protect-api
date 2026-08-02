@@ -227,6 +227,8 @@ interface DelegateOverrides {
   getSnapshot?: () => Promise<Buffer>
   url?: () => Promise<string>
   audio?: boolean
+  talkback?: boolean
+  hasSpeaker?: boolean
   encoders?: { opus?: boolean, aacEld?: boolean }
   run?: () => Promise<string>
   spawn?: () => ChildProcess
@@ -291,11 +293,12 @@ function makeDelegate(overrides: DelegateOverrides = {}) {
     client: { getSnapshot } as never,
     urls: { get, clear: vi.fn() } as never,
     caps: overrides.caps ?? CAPS_HW,
-    settings: () => ({ quality: overrides.quality ?? 'auto', audio: overrides.audio ?? false }),
+    settings: () => ({ quality: overrides.quality ?? 'auto', audio: overrides.audio ?? false, talkback: overrides.talkback ?? false }),
     spawn,
     run,
     maxStreams: overrides.maxStreams,
     channel: overrides.channel,
+    hasSpeaker: overrides.hasSpeaker,
   })
   return { delegate, getSnapshot, get, spawn, run, log }
 }
@@ -417,7 +420,7 @@ describe('streamingDelegate sessions', () => {
         return URL
       } } as never,
       caps: CAPS_SW,
-      settings: () => ({ quality: 'auto', audio: false }),
+      settings: () => ({ quality: 'auto', audio: false, talkback: false }),
       spawn,
       maxStreams: 1,
     })
@@ -544,7 +547,7 @@ describe('streamingDelegate sessions', () => {
       client: {} as never,
       urls: { get: parkedUrl } as never,
       caps: CAPS_SW,
-      settings: () => ({ quality: 'auto', audio: false }),
+      settings: () => ({ quality: 'auto', audio: false, talkback: false }),
       spawn,
       maxStreams: 1,
     })
@@ -601,6 +604,39 @@ describe('streamingDelegate sessions', () => {
   it('advertises nothing when the camera has audio switched off', async () => {
     const { delegate } = makeDelegate({ encoders: { opus: true } })
     expect(await delegate.audioStreamingOptions()).toBeUndefined()
+  })
+
+  // Talkback and `audio` are opposite directions and independent settings.
+  // Codecs (and twoWayAudio) must be advertised for talkback even with the
+  // microphone left off — hap-nodejs sets a stream video-only, disabling the
+  // audio machinery talkback needs, when no codec is advertised at all.
+  // Sending the microphone itself stays gated by `audio` in startSession.
+  it('advertises two-way audio when talkback is on and audio is off', async () => {
+    const { delegate } = makeDelegate({ audio: false, talkback: true, hasSpeaker: true, encoders: { opus: true } })
+    const options = await delegate.audioStreamingOptions()
+    expect(options?.twoWayAudio).toBe(true)
+    expect(options?.codecs.length).toBeGreaterThan(0)
+  })
+
+  it('stays silent when neither audio nor talkback is on', async () => {
+    const { delegate } = makeDelegate({ audio: false, talkback: false, hasSpeaker: true, encoders: { opus: true } })
+    expect(await delegate.audioStreamingOptions()).toBeUndefined()
+  })
+
+  it('does not advertise two-way audio without a speaker', async () => {
+    const { delegate } = makeDelegate({ audio: false, talkback: true, hasSpeaker: false, encoders: { opus: true } })
+    expect(await delegate.audioStreamingOptions()).toBeUndefined()
+  })
+
+  it('never advertises two-way audio on the package lens', async () => {
+    const { delegate } = makeDelegate({ audio: true, talkback: true, hasSpeaker: true, channel: 'package', encoders: { opus: true } })
+    expect(await delegate.audioStreamingOptions()).toBeUndefined()
+  })
+
+  it('does not advertise twoWayAudio when audio is on but talkback is off', async () => {
+    const { delegate } = makeDelegate({ audio: true, talkback: false, hasSpeaker: true, encoders: { opus: true } })
+    const options = await delegate.audioStreamingOptions()
+    expect(options?.twoWayAudio).toBeFalsy()
   })
 
   it('falls back to video-only, with a warning, when ffmpeg has neither audio encoder', async () => {
@@ -728,7 +764,7 @@ describe('package channel', () => {
       urls: urls as never,
       caps: PKG_CAPS,
       channel,
-      settings: () => ({ quality: 'auto', audio: true }),
+      settings: () => ({ quality: 'auto', audio: true, talkback: false }),
       spawn: spawn as never,
     })
     return { delegate, urls, getSnapshot }
