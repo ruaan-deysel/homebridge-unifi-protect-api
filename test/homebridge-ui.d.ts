@@ -131,3 +131,27 @@ declare module '*/homebridge-ui/public/config-ops.js' {
     device: { type?: string, hasMic?: boolean, hasSpeaker?: boolean, hasPackageCamera?: boolean },
   ): { key: string, label: string, comingLater?: boolean }[]
 }
+
+declare module '*/homebridge-ui/public/ui-render.js' {
+  export interface MinimalDomElement {
+    tagName: string
+    textContent: string
+    className: string
+    style: { display: string }
+    attributes: Record<string, string>
+    setAttribute: (name: string, value: string) => void
+    addEventListener: (type: 'click' | 'keydown', handler: (event: { key?: string }) => void) => void
+  }
+  export interface MinimalDocument {
+    createElement: (tag: string) => MinimalDomElement
+  }
+  export function renderTabs(
+    doc: MinimalDocument,
+    labels: string[],
+  ): {
+    tablist: MinimalDomElement
+    panes: MinimalDomElement[]
+    buttons: MinimalDomElement[]
+    select: (index: number) => void
+  }
+}

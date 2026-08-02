@@ -107,7 +107,7 @@ export function renderDeviceHeader(doc, device) {
   const nameEl = doc.createElement('strong')
   nameEl.textContent = device.name ?? ''
   const typeEl = doc.createElement('span')
-  typeEl.className = 'up-muted'
+  typeEl.className = 'text-body-secondary small'
   typeEl.textContent = device.type ?? ''
   return [nameEl, ' ', typeEl]
 }

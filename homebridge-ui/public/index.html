@@ -1,46 +1,67 @@
-<style>
-  .up-row { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; margin-bottom: .5rem; }
-  .up-card { border: 1px solid rgba(128,128,128,.3); border-radius: 6px; padding: .75rem; margin-bottom: .5rem; }
-  .up-muted { opacity: .7; font-size: .85rem; }
-  .up-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: .25rem .75rem; }
-  .up-warn { border-color: #b23; }
-  .up-fp { font-family: monospace; font-size: .8rem; word-break: break-all; }
-</style>
+<div id="connection-pane">
+  <div class="d-flex align-items-center gap-2 mb-2">
+    <label for="host">Console</label>
+    <input class="form-control" id="host" placeholder="192.168.1.1" style="max-width: 14rem">
+    <label for="apiKey">API Key</label>
+    <input class="form-control" id="apiKey" type="password" style="max-width: 20rem">
+    <button class="btn btn-primary" id="test" type="button">Test Connection</button>
+  </div>
 
-<div class="up-row">
-  <label for="host">Console</label>
-  <input class="form-control" id="host" placeholder="192.168.1.1" style="max-width: 14rem">
-  <label for="apiKey">API Key</label>
-  <input class="form-control" id="apiKey" type="password" style="max-width: 20rem">
-  <button class="btn btn-primary" id="test" type="button">Test Connection</button>
+  <div class="d-flex align-items-center gap-2 mb-2 text-body-secondary small" id="status" aria-live="polite"></div>
+  <div id="trust" aria-live="polite"></div>
 </div>
 
-<div class="up-row up-muted" id="status" aria-live="polite"></div>
-<div id="trust" aria-live="polite"></div>
-
-<!--
-  Host-wide settings, as opposed to the per-camera ones on each device card
-  below. Static markup only: every value here is typed by the user or read back
-  from their own config, never supplied by the console.
--->
-<div class="up-card">
-  <div><strong>Live view</strong> <span class="up-muted">applies to the whole host</span></div>
-  <div class="up-row">
-    <label for="maxStreams">Maximum concurrent live views</label>
-    <input class="form-control" id="maxStreams" type="number" min="1" max="16" step="1" placeholder="auto" style="max-width: 6rem">
-    <span class="up-muted">Blank picks from the encoder found: 6 with hardware, 2 with software.</span>
-  </div>
-  <div class="up-row">
-    <label for="ffmpegPath">ffmpeg path</label>
-    <input class="form-control" id="ffmpegPath" placeholder="auto-detect" style="max-width: 20rem">
-    <span class="up-muted">Blank searches /usr/bin, /usr/local/bin, then PATH.</span>
+<div id="defaults-pane">
+  <!--
+    Host-wide settings, as opposed to the per-camera ones on each device card
+    below. Static markup only: every value here is typed by the user or read back
+    from their own config, never supplied by the console.
+  -->
+  <div class="card card-body mb-2">
+    <div><strong>Live view</strong> <span class="text-body-secondary small">applies to the whole host</span></div>
+    <div class="d-flex align-items-center gap-2 mb-2">
+      <label for="maxStreams">Maximum concurrent live views</label>
+      <input class="form-control" id="maxStreams" type="number" min="1" max="16" step="1" placeholder="auto" style="max-width: 6rem">
+      <span class="text-body-secondary small">Blank picks from the encoder found: 6 with hardware, 2 with software.</span>
+    </div>
+    <div class="d-flex align-items-center gap-2 mb-2">
+      <label for="ffmpegPath">ffmpeg path</label>
+      <input class="form-control" id="ffmpegPath" placeholder="auto-detect" style="max-width: 20rem">
+      <span class="text-body-secondary small">Blank searches /usr/bin, /usr/local/bin, then PATH.</span>
+    </div>
   </div>
 </div>
 
-<div id="devices"></div>
+<div id="devices-pane">
+  <div id="devices"></div>
+</div>
+
+<div id="help-pane">
+  <p>UniFi Protect (API) talks to your console over its official Integration API using an API key — no username or password is stored.</p>
+  <p><strong>Connection</strong> — point the plugin at your console and verify its certificate before the API key is ever sent.</p>
+  <p><strong>Defaults</strong> — settings that apply host-wide, such as the concurrent live view cap and the ffmpeg binary to use.</p>
+  <p><strong>Devices</strong> — per-camera overrides, discovered after a successful connection test.</p>
+</div>
+
+<div id="tab-root"></div>
 
 <script type="module">
   import { cameraToggles, defaultFor, ensureConfig, parseMaxStreams, renderDeviceHeader, renderQualitySelect, renderToggle, setDeviceSetting, setGlobalSetting } from './config-ops.js'
+  import { renderTabs } from './ui-render.js'
+
+  // Build the tab shell, then move each pane's static markup into the empty
+  // pane element renderTabs created for it — the DOM nodes themselves are
+  // relocated (appendChild moves, it does not clone), so every id below
+  // still resolves exactly once.
+  const { tablist, panes } = renderTabs(document, ['Connection', 'Defaults', 'Devices', 'Help'])
+  const [connectionPane, defaultsPane, devicesPane, helpPane] = panes
+  const tabRoot = document.getElementById('tab-root')
+  tabRoot.before(tablist, ...panes)
+  tabRoot.remove()
+  connectionPane.append(document.getElementById('connection-pane'))
+  defaultsPane.append(document.getElementById('defaults-pane'))
+  devicesPane.append(document.getElementById('devices-pane'))
+  helpPane.append(document.getElementById('help-pane'))
 
   const statusEl = document.getElementById('status')
   const trustEl = document.getElementById('trust')
@@ -86,12 +107,12 @@
     devicesEl.replaceChildren()
     for (const device of devices) {
       const card = document.createElement('div')
-      card.className = 'up-card'
+      card.className = 'card card-body mb-2'
       // device.name/device.type are console-supplied — never innerHTML them.
       card.append(...renderDeviceHeader(document, device))
 
       const grid = document.createElement('div')
-      grid.className = 'up-grid'
+      grid.className = 'd-flex flex-wrap gap-3'
 
       const toggle = (key, label, comingLater) => {
         const fallback = defaultFor(config, key)
@@ -110,7 +131,7 @@
           // be cleared here — harmless while nothing reads it, but it must not
           // outlive this release.
           input.disabled = true
-          wrap.className = 'up-muted'
+          wrap.className = 'text-body-secondary small'
           wrap.append(' — arriving in a later release')
         }
         else {
@@ -157,11 +178,11 @@
     if (lines.length === 0)
       return
     const card = document.createElement('div')
-    card.className = warn ? 'up-card up-warn' : 'up-card up-muted'
+    card.className = warn ? 'card card-body mb-2 border-danger' : 'card card-body mb-2 text-body-secondary small'
     for (const line of lines) {
       const p = document.createElement('div')
       if (line.fingerprint)
-        p.className = 'up-fp'
+        p.className = 'font-monospace small text-break'
       p.textContent = line.text
       card.append(p)
     }

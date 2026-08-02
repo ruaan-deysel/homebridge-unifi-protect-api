@@ -10,7 +10,7 @@ import { parseConfig, settingsFor } from '../src/config.js'
 // `findByTag(..., 'IMG')` check is a cheap belt-and-braces restatement — this
 // FakeElement has no markup parser, so nothing here can synthesise an IMG.
 // No jsdom dependency needed for the one property under test.
-class FakeElement {
+export class FakeElement {
   tagName: string
   children: (FakeElement | string)[] = []
   attributes: Record<string, string> = {}
@@ -20,8 +20,26 @@ class FakeElement {
   selected = false
   type = ''
   checked = false
+  /** Only the one CSS property ui-render.js touches. */
+  style: { display: string } = { display: '' }
+  private listeners = new Map<string, ((event: Record<string, unknown>) => void)[]>()
   private _text = ''
   private _html?: string
+
+  addEventListener(type: string, handler: (event: Record<string, unknown>) => void) {
+    const forType = this.listeners.get(type) ?? []
+    forType.push(handler)
+    this.listeners.set(type, forType)
+  }
+
+  /** Fires a synthetic event at every listener registered for `type`. */
+  dispatch(type: string, event: Record<string, unknown> = {}) {
+    for (const handler of this.listeners.get(type) ?? [])
+      handler(event)
+  }
+
+  /** Real focus has no observable effect in this harness — just a no-op stub. */
+  focus() {}
 
   /**
    * Markup, and treated as markup: `outerHTML` emits it RAW and `textContent`
@@ -115,7 +133,9 @@ class FakeElement {
   }
 }
 
-function makeDoc() {
+// Exported so test/ui-render.test.ts reuses this harness rather than building
+// a second one — it is what makes an innerHTML regression there fail too.
+export function makeDoc() {
   return { createElement: (tag: string) => new FakeElement(tag) }
 }
 
