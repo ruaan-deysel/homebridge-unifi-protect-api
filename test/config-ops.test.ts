@@ -1,5 +1,6 @@
+import type { DeviceOverride, IcloudTier } from '../homebridge-ui/public/config-ops.js'
 import { describe, expect, it, vi } from 'vitest'
-import { cameraToggles, clearDeviceSetting, debounce, defaultFor, DEFAULTS, ensureConfig, isOverridden, MAX_STREAMS_RANGE, NEEDS_RESTART, PACKAGE_LABEL, parseIcloudTier, parseMaxStreams, QUALITY_OPTIONS, recordingCount, RECORDING_LIMITS, renderDeviceHeader, renderQualitySelect, renderToggle, SAVE_DEBOUNCE_MS, setDeviceSetting, setGlobalSetting, shouldOfferPackageCamera, tierWarning } from '../homebridge-ui/public/config-ops.js'
+import { cameraToggles, clearDeviceSetting, debounce, defaultFor, DEFAULTS, ensureConfig, isOverridden, MAX_STREAMS_RANGE, NEEDS_RESTART, PACKAGE_LABEL, parseIcloudTier, parseMaxStreams, QUALITY_OPTIONS, RECORDING_LIMITS, recordingCount, renderDeviceHeader, renderQualitySelect, renderToggle, SAVE_DEBOUNCE_MS, setDeviceSetting, setGlobalSetting, shouldOfferPackageCamera, tierWarning } from '../homebridge-ui/public/config-ops.js'
 import { parseConfig, settingsFor } from '../src/config.js'
 
 // Minimal fake DOM — just enough to prove renderDeviceHeader never turns
@@ -586,8 +587,8 @@ describe('icloudTier validation', () => {
 // double-count instead of trusting a possibly-stale config.json flag.
 describe('recordingCount / tierWarning', () => {
   const base = ensureConfig({})
-  const devices = (ids) => ids.map(id => ({ id, hasPackageCamera: true }))
-  const withDevices = (deviceConfig, tier = '200gb') =>
+  const devices = (ids: string[]) => ids.map(id => ({ id, hasPackageCamera: true }))
+  const withDevices = (deviceConfig: Record<string, DeviceOverride>, tier: IcloudTier = '200gb') =>
     ({ ...base, defaults: { ...base.defaults, icloudTier: tier }, devices: deviceConfig })
 
   it('counts the package accessory as its own recording camera', () => {
@@ -601,7 +602,8 @@ describe('recordingCount / tierWarning', () => {
   })
 
   it('counts a device with no override entry when defaults.hksv is on — the gap a literal config.devices scan misses', () => {
-    const config = { ...base, defaults: { ...base.defaults, hksv: true, icloudTier: '200gb' }, devices: {} }
+    const config = withDevices({}, '200gb')
+    config.defaults.hksv = true
     expect(recordingCount(config, devices(['a', 'b']))).toBe(2)
   })
 
@@ -626,7 +628,7 @@ describe('recordingCount / tierWarning', () => {
   it('is advisory only — the config it warns about is returned unchanged, never blocked or reverted', () => {
     const config = withDevices({ a: { hksv: true, packageCamera: true }, b: { hksv: true }, c: { hksv: true }, d: { hksv: true }, e: { hksv: true } })
     expect(tierWarning(config, devices(['a', 'b', 'c', 'd', 'e']))).toBeDefined()
-    expect(config.devices.a.hksv).toBe(true)
+    expect(config.devices.a?.hksv).toBe(true)
   })
 })
 

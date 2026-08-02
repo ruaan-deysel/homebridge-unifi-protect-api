@@ -54,8 +54,8 @@
 <div id="tab-root"></div>
 
 <script type="module">
-  import { cameraToggles, debounce, defaultFor, ensureConfig, NEEDS_RESTART, parseMaxStreams, renderQualitySelect, renderToggle, SAVE_DEBOUNCE_MS, setDeviceSetting, setGlobalSetting } from './config-ops.js'
-  import { renderDetail, renderDeviceList, renderTabs } from './ui-render.js'
+  import { cameraToggles, clearDeviceSetting, debounce, defaultFor, ensureConfig, isOverridden, NEEDS_RESTART, parseMaxStreams, renderQualitySelect, renderToggle, SAVE_DEBOUNCE_MS, setDeviceSetting, setGlobalSetting, tierWarning } from './config-ops.js'
+  import { renderBadge, renderDetail, renderDeviceList, renderTabs } from './ui-render.js'
 
   // Build the tab shell, then move each pane's static markup into the empty
   // pane element renderTabs created for it — the DOM nodes themselves are
@@ -92,9 +92,28 @@
   // write.
   const debouncedSavePluginConfig = debounce(() => { homebridge.savePluginConfig() }, SAVE_DEBOUNCE_MS)
 
+  // All discovered devices, kept around so the tier warning can count
+  // recording accessories host-wide, not just the one currently shown.
+  let allDevices = []
+  // The banner currently in the detail pane, if the selected device is a
+  // camera — `null` otherwise, so a stale/detached element from a previously
+  // selected device is never updated by mistake.
+  let tierWarningEl = null
+
+  const updateTierWarning = () => {
+    if (!tierWarningEl)
+      return
+    const message = tierWarning(config, allDevices)
+    tierWarningEl.textContent = message ?? ''
+    tierWarningEl.style.display = message ? '' : 'none'
+  }
+
   const save = async () => {
     await homebridge.updatePluginConfig([config])
     debouncedSavePluginConfig()
+    // Any device's recording setting can push the tier count over the edge,
+    // not just the one being edited — recompute whenever config changes.
+    updateTierWarning()
   }
 
   const settingOf = (id, key, fallback) => config.devices[id]?.[key] ?? fallback
@@ -130,6 +149,30 @@
    */
   function showDetail(device) {
     const { pane, bodies } = renderDetail(document, device)
+    tierWarningEl = null
+
+    // Appends a badge (default/overridden) plus, when overridden, a reset
+    // button to `wrap` — and keeps it live across changes by tearing down
+    // and rebuilding it rather than mutating in place, since `renderBadge`
+    // owns both the label and whether a reset button exists at all.
+    const attachBadge = (wrap, key, applyValue) => {
+      let current
+      const refresh = () => {
+        current?.badge.remove()
+        current?.reset?.remove()
+        current = renderBadge(document, isOverridden(config, device.id, key), async () => {
+          config = clearDeviceSetting(config, device.id, key)
+          applyValue(defaultFor(config, key))
+          await save()
+          refresh()
+        })
+        wrap.append(current.badge)
+        if (current.reset)
+          wrap.append(current.reset)
+      }
+      refresh()
+      return refresh
+    }
 
     const toggle = (body, key, label, comingLater) => {
       const fallback = defaultFor(config, key)
@@ -146,15 +189,22 @@
         // the settings stay permanently unreachable. Note also that a
         // hand-edited `hksv: true` renders checked-but-disabled and cannot
         // be cleared here — harmless while nothing reads it, but it must not
-        // outlive this release.
+        // outlive this release. No badge either: there is nothing a reset
+        // button could meaningfully do to a disabled control.
         input.disabled = true
         wrap.className = 'text-body-secondary small'
         wrap.append(' — arriving in a later release')
       }
       else {
+        // Defaults vs overrides were otherwise invisible — the flat UI only
+        // ever showed the resolved value. `refreshBadge` re-reads
+        // `isOverridden` after every change, so the badge and the checkbox
+        // never disagree.
+        const refreshBadge = attachBadge(wrap, key, value => { input.checked = Boolean(value) })
         input.addEventListener('change', async () => {
           config = setDeviceSetting(config, device.id, key, input.checked)
           await save()
+          refreshBadge()
         })
       }
       body.append(wrap)
@@ -170,11 +220,23 @@
       // these genuinely work now, so a disabled control would be the
       // dishonest one. Only hksv still carries `comingLater`.
       const { wrap, select } = renderQualitySelect(document, device, settingOf(device.id, 'quality', config.defaults.quality))
+      const refreshQualityBadge = attachBadge(wrap, 'quality', value => { select.value = value })
       select.addEventListener('change', async () => {
         config = setDeviceSetting(config, device.id, 'quality', select.value)
         await save()
+        refreshQualityBadge()
       })
       bodies['Live view'].append(wrap)
+
+      // Advisory only (see tierWarning) — shown beside the recording toggle
+      // it is about, not buried in Help, since this is where the decision to
+      // turn recording on actually gets made.
+      tierWarningEl = document.createElement('div')
+      tierWarningEl.className = 'alert alert-warning small mb-2'
+      tierWarningEl.setAttribute('role', 'status')
+      bodies.Recording.append(tierWarningEl)
+      updateTierWarning()
+
       // Which checkboxes a camera gets, and which section each files under
       // — including whether the package lens is offered — is decided in
       // config-ops.js, where a test can reach it.
@@ -186,6 +248,7 @@
   }
 
   function render(devices) {
+    allDevices = devices
     const { list, filter } = renderDeviceList(document, devices, (id) => {
       const device = devices.find(d => d.id === id)
       if (device)
@@ -194,6 +257,7 @@
     deviceListEl.replaceChildren(list)
     deviceFilterEl.value = ''
     deviceFilterEl.oninput = () => filter(deviceFilterEl.value)
+    updateTierWarning()
   }
 
   /**
