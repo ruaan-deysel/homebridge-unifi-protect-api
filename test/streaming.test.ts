@@ -254,6 +254,11 @@ function throwingSpawn(): ChildProcess {
   throw new Error('ENOENT')
 }
 
+/** A spawn rejection whose message happens to carry a stream url. */
+function throwingSpawnWithUrl(): ChildProcess {
+  throw new Error(`spawn failed for ${URL}`)
+}
+
 /**
  * A child that is already gone by the time FfmpegProcess finishes wiring it up:
  * its `close` listener fires the moment it is registered. That is what a spawn
@@ -437,6 +442,21 @@ describe('streamingDelegate sessions', () => {
     const good = makeDelegate({ caps: CAPS_SW, maxStreams: 1 })
     expect(await good.delegate.startSession('b', REQUEST, RTP)).toBe(true)
     good.delegate.stopAll()
+    delegate.stopAll()
+  })
+
+  // Every sibling error path on this window redacts before logging; a spawn
+  // rejection is the only shape whose message could plausibly carry the url
+  // (a real Node ENOENT carries only the binary path, not argv, but nothing
+  // should rely on that).
+  it('redacts a stream url that ends up in a spawn failure message', async () => {
+    const { delegate, log } = makeDelegate({ spawn: throwingSpawnWithUrl, caps: CAPS_SW, maxStreams: 1 })
+    expect(await delegate.startSession('a', REQUEST, RTP)).toBe(false)
+
+    const warned = log.warn.mock.calls.map(call => String(call[0])).join(' ')
+    expect(warned).toContain('Could not start ffmpeg')
+    expect(warned).not.toContain(URL)
+    expect(warned).not.toContain('SENTINEL')
     delegate.stopAll()
   })
 

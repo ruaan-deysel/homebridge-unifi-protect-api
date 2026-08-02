@@ -18,7 +18,7 @@ import type { Quality, QualityPreference } from './quality.js'
 import { Buffer } from 'node:buffer'
 import { createSocket } from 'node:dgram'
 import { errorMessage } from '../protect/errors.js'
-import { FfmpegProcess, hasEncoder, runFfmpeg } from '../protect/ffmpeg.js'
+import { FfmpegProcess, hasEncoder, redactStreamUrls, runFfmpeg } from '../protect/ffmpeg.js'
 import { selectQuality } from './quality.js'
 
 /**
@@ -478,14 +478,20 @@ export class StreamingDelegate implements CameraStreamingDelegate {
 
       // Re-checked after every await above: stopAll() drains the session map,
       // so a process spawned after it is in no map and nothing will ever kill
-      // it — it holds a 4 MP HEVC decode for as long as the host is up.
+      // it — it holds a 4 MP HEVC decode for as long as the host is up. This
+      // must run after streamUrlFor's await to catch a stopAll() landing
+      // during it, so it necessarily sits inside the no-logging window below
+      // rather than above the URL fetch. It is safe there because it logs
+      // only this.options.label, never url, channel, or args.
       if (this.shuttingDown) {
         this.options.log.debug(`Not starting a stream for "${this.options.label}": the plugin is shutting down.`)
         return false
       }
 
-      // NOTHING may be logged between here and the spawn: `url` carries an auth
-      // token. If an invocation ever needs logging, log redactStreamUrls(args.join(' ')).
+      // The no-logging window starts where `url` is bound above (streamUrlFor's
+      // await), not here: nothing from there to the ffmpeg spawn may log `url`
+      // or `args`. If an invocation ever needs logging, log
+      // redactStreamUrls(args.join(' ')).
       const args = buildFfmpegArgs(this.options.caps, {
         url,
         bitrate: request.bitrate,
@@ -509,7 +515,7 @@ export class StreamingDelegate implements CameraStreamingDelegate {
         proc.start()
       }
       catch (error) {
-        this.options.log.warn(`Could not start ffmpeg for "${this.options.label}": ${errorMessage(error)}`)
+        this.options.log.warn(`Could not start ffmpeg for "${this.options.label}": ${redactStreamUrls(errorMessage(error))}`)
         return false
       }
       // Tracked only once it is genuinely running: a spawn that throws must not
