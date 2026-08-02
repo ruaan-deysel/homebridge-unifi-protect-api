@@ -238,16 +238,53 @@ export function cameraToggles(device) {
  * `id` embeds `device.id` and the label can carry console-supplied text, both
  * attacker-controlled, and both land as property assignments — never markup.
  * The caller owns `checked`, `disabled` and the change listener.
+ *
+ * `needsRestart` renders an actual marker element (never baked into `label`
+ * text), so the signal survives even for a control whose label does not
+ * mention "restart" — pass `NEEDS_RESTART.has(key)`, not a guess.
  */
-export function renderToggle(doc, id, label) {
+export function renderToggle(doc, id, label, needsRestart = false) {
   const wrap = doc.createElement('label')
   wrap.setAttribute('for', id)
   const input = doc.createElement('input')
   input.type = 'checkbox'
   input.id = id
   wrap.append(input, ` ${label}`)
+  if (needsRestart) {
+    const marker = doc.createElement('span')
+    marker.className = 'badge text-bg-warning ms-2'
+    marker.textContent = 'restart required'
+    wrap.append(marker)
+  }
   return { wrap, input }
 }
+
+/**
+ * Homebridge offers a restart whenever config.json changes, so writing on every
+ * click made that banner appear for settings that take effect immediately.
+ * Each control still writes on change — losing an edit to a stray navigation
+ * would be worse — but the disk write collapses.
+ */
+export function debounce(fn, ms) {
+  let timer
+  return (...args) => {
+    clearTimeout(timer)
+    timer = setTimeout(fn, ms, ...args)
+  }
+}
+
+export const SAVE_DEBOUNCE_MS = 1000
+
+/**
+ * HAP fixes a camera's advertised codecs, two-way capability and recording
+ * options when the controller is configured, and `CameraController.streamingOptions`
+ * is private and read-only afterwards — so turning any of these ON needs a
+ * restart before it reaches HomeKit. Turning one OFF applies to the next
+ * session. `renderToggle`'s marker is driven off this set rather than off
+ * label text, so the signal is honest even for a toggle (like `hksv`) whose
+ * label does not spell out "restart" itself.
+ */
+export const NEEDS_RESTART = new Set(['audio', 'talkback', 'hksv'])
 
 /**
  * True only when this device carries its OWN value for the key — the flat UI

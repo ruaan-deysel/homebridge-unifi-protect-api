@@ -54,7 +54,7 @@
 <div id="tab-root"></div>
 
 <script type="module">
-  import { cameraToggles, defaultFor, ensureConfig, parseMaxStreams, renderQualitySelect, renderToggle, setDeviceSetting, setGlobalSetting } from './config-ops.js'
+  import { cameraToggles, debounce, defaultFor, ensureConfig, NEEDS_RESTART, parseMaxStreams, renderQualitySelect, renderToggle, SAVE_DEBOUNCE_MS, setDeviceSetting, setGlobalSetting } from './config-ops.js'
   import { renderDetail, renderDeviceList, renderTabs } from './ui-render.js'
 
   // Build the tab shell, then move each pane's static markup into the empty
@@ -83,9 +83,18 @@
   hostEl.value = config.host
   keyEl.value = config.apiKey
 
+  // savePluginConfig() writes config.json, and Homebridge's own chrome then
+  // offers a restart for every write — so a burst of clicks (or dragging a
+  // slider) does not need one disk write per click. updatePluginConfig stays
+  // synchronous with every change instead of being debounced too: it only
+  // updates the in-memory config the UI runtime holds, and losing an edit to
+  // a stray navigation before the debounce fires would be worse than an extra
+  // write.
+  const debouncedSavePluginConfig = debounce(() => { homebridge.savePluginConfig() }, SAVE_DEBOUNCE_MS)
+
   const save = async () => {
     await homebridge.updatePluginConfig([config])
-    await homebridge.savePluginConfig()
+    debouncedSavePluginConfig()
   }
 
   const settingOf = (id, key, fallback) => config.devices[id]?.[key] ?? fallback
@@ -126,7 +135,7 @@
       const fallback = defaultFor(config, key)
       // id embeds device.id (console-supplied) — renderToggle builds it with
       // DOM APIs only, and carries the injection test for this path.
-      const { wrap, input } = renderToggle(document, `${device.id}-${key}`, label)
+      const { wrap, input } = renderToggle(document, `${device.id}-${key}`, label, NEEDS_RESTART.has(key))
       input.checked = Boolean(settingOf(device.id, key, fallback))
       if (comingLater) {
         // Shown, but inert and said so plainly. This release has no camera

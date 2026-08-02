@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest'
-import { cameraToggles, clearDeviceSetting, defaultFor, DEFAULTS, ensureConfig, isOverridden, MAX_STREAMS_RANGE, PACKAGE_LABEL, parseIcloudTier, parseMaxStreams, QUALITY_OPTIONS, RECORDING_LIMITS, renderDeviceHeader, renderQualitySelect, renderToggle, setDeviceSetting, setGlobalSetting, shouldOfferPackageCamera } from '../homebridge-ui/public/config-ops.js'
+import { describe, expect, it, vi } from 'vitest'
+import { cameraToggles, clearDeviceSetting, debounce, defaultFor, DEFAULTS, ensureConfig, isOverridden, MAX_STREAMS_RANGE, NEEDS_RESTART, PACKAGE_LABEL, parseIcloudTier, parseMaxStreams, QUALITY_OPTIONS, RECORDING_LIMITS, renderDeviceHeader, renderQualitySelect, renderToggle, SAVE_DEBOUNCE_MS, setDeviceSetting, setGlobalSetting, shouldOfferPackageCamera } from '../homebridge-ui/public/config-ops.js'
 import { parseConfig, settingsFor } from '../src/config.js'
 
 // Minimal fake DOM — just enough to prove renderDeviceHeader never turns
@@ -576,5 +576,86 @@ describe('icloudTier validation', () => {
     // And the fallback itself is one parseConfig accepts, so the round-trip
     // this test guards against actually terminates.
     expect(parseConfig(config).success).toBe(true)
+  })
+})
+
+describe('debounce', () => {
+  it('collapses a burst into one call', () => {
+    vi.useFakeTimers()
+    let calls = 0
+    const save = debounce(() => calls++, 1000)
+    save()
+    save()
+    save()
+    expect(calls).toBe(0)
+    vi.advanceTimersByTime(1000)
+    expect(calls).toBe(1)
+    vi.useRealTimers()
+  })
+
+  it('calls again after the window elapses', () => {
+    vi.useFakeTimers()
+    let calls = 0
+    const save = debounce(() => calls++, 1000)
+    save()
+    vi.advanceTimersByTime(1000)
+    save()
+    vi.advanceTimersByTime(1000)
+    expect(calls).toBe(2)
+    vi.useRealTimers()
+  })
+
+  // Isolates the collapsing behaviour from `clearTimeout` specifically: a
+  // mutant that drops the `clearTimeout(timer)` call still schedules a new
+  // timer per call, so without this a three-call burst would fire three
+  // times instead of once — exactly the regression the "collapses a burst"
+  // test above already catches, restated here so a review of this test alone
+  // proves the mechanism, not just the outcome.
+  it('resets the pending timer on every call rather than queuing one per call', () => {
+    vi.useFakeTimers()
+    let calls = 0
+    const save = debounce(() => calls++, 1000)
+    save()
+    vi.advanceTimersByTime(500)
+    save()
+    vi.advanceTimersByTime(500)
+    // Still short of 1000ms since the second call, because the first call's
+    // timer must have been cleared rather than left running.
+    expect(calls).toBe(0)
+    vi.advanceTimersByTime(500)
+    expect(calls).toBe(1)
+    vi.useRealTimers()
+  })
+})
+
+describe('save debounce window', () => {
+  it('is one second, matching what a human click-burst needs collapsed', () => {
+    expect(SAVE_DEBOUNCE_MS).toBe(1000)
+  })
+})
+
+describe('settings that need a restart', () => {
+  it('names exactly the settings that need a restart', () => {
+    expect([...NEEDS_RESTART].sort()).toEqual(['audio', 'hksv', 'talkback'])
+  })
+})
+
+describe('renderToggle restart marker', () => {
+  // A generic label, deliberately free of the word "restart" itself, so this
+  // isolates the marker `renderToggle` renders from `needsRestart` — not text
+  // an unrelated label happens to already contain.
+  it('renders a marker for a restart-requiring setting', () => {
+    const { wrap } = renderToggle(makeDoc(), 'cam1-hksv', 'Some setting', true) as unknown as { wrap: FakeElement }
+    expect(wrap.textContent).toContain('restart')
+  })
+
+  it('renders no marker for a setting that takes effect immediately', () => {
+    const { wrap } = renderToggle(makeDoc(), 'cam1-expose', 'Some setting', false) as unknown as { wrap: FakeElement }
+    expect(wrap.textContent).not.toContain('restart')
+  })
+
+  it('renders no marker by default when the caller does not say', () => {
+    const { wrap } = renderToggle(makeDoc(), 'cam1-quality', 'Some setting') as unknown as { wrap: FakeElement }
+    expect(wrap.textContent).not.toContain('restart')
   })
 })

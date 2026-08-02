@@ -125,7 +125,12 @@ declare module '*/homebridge-ui/public/config-ops.js' {
     doc: MinimalDocument,
     id: string,
     label: string,
+    needsRestart?: boolean,
   ): { wrap: MinimalDomElement, input: MinimalDomElement }
+
+  export function debounce<T extends (...args: never[]) => void>(fn: T, ms: number): (...args: Parameters<T>) => void
+  export const SAVE_DEBOUNCE_MS: number
+  export const NEEDS_RESTART: ReadonlySet<'audio' | 'talkback' | 'hksv'>
 
   export function defaultFor(config: ConfigShape, key: string): unknown
   export function isOverridden(config: ConfigShape, deviceId: string, key: string): boolean
