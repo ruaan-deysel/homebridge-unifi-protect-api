@@ -1,0 +1,9 @@
+{
+  "status": 404,
+  "body": {
+    "error": "Entity 'quality' not found",
+    "name": "NOT_FOUND",
+    "entity": "quality",
+    "id": "package"
+  }
+}
