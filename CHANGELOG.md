@@ -112,6 +112,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   physical device, so nobody should be surprised by either consequence after the fact.
 
 ### Fixed
+- A package camera already in HomeKit is no longer unregistered when the plugin starts
+  without a usable ffmpeg. It used to be removed immediately — not after the usual
+  confirmation window — so a single restart with ffmpeg temporarily missing permanently
+  lost the accessory's room, scenes and automations. It is now kept without live view,
+  exactly as the main cameras already were. Switching the setting off, or the lens
+  genuinely disappearing, still removes it at once.
+- The package camera reports its manufacturer, model and serial number to HomeKit
+  instead of showing the placeholder values on its tile. Its serial is distinct from the
+  main camera's, since the two are separate accessories for one physical device.
 - Live view SSRCs are now positive signed 32-bit values. The previous range reached
   0x100000000, which HomeKit and ffmpeg both reject, so a fraction of streams simply never
   loaded — intermittently, and with nothing in the log to explain it.
