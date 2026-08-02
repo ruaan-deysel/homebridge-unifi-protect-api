@@ -149,7 +149,7 @@ export interface RecordingDelegateOptions {
 /** How long after an unexpected exit the encoder is restarted. */
 export const RESTART_DELAY_MS = 10_000
 /** An encoder that lived at least this long counts as having worked. */
-const HEALTHY_RUN_MS = 60_000
+export const HEALTHY_RUN_MS = 60_000
 /**
  * Consecutive short-lived runs before the retry drops to the slow cadence. Five
  * fast tries spans about a minute, which covers a stream that dropped once; a
@@ -402,6 +402,15 @@ export class RecordingDelegate implements CameraRecordingDelegate {
    * recording that fails silently — so the fragments go, and only the fragments.
    * `PrebufferRing.accept` deliberately does not do this itself: its contract is
    * that an init segment is never dropped.
+   *
+   * What this does NOT do is close open streams, and the guarantee that covers
+   * that is narrower than it looks. Across a process boundary it is `teardown()`
+   * that closes them, on the exit — by the time a new process emits its init
+   * there are no open streams left. Within ONE process a second init would leave
+   * an open stream holding the old init while receiving fragments encoded against
+   * the new one, and nothing here prevents it: it is merely unreachable, because
+   * `-movflags frag_keyframe+empty_moov` emits exactly one `ftyp+moov` per ffmpeg
+   * run. If that ever stops being true, this needs the teardown treatment too.
    */
   private onPiece(kind: Fmp4Piece, data: Buffer): void {
     if (kind === 'init' && this.ring.snapshot() !== undefined)

@@ -4,7 +4,7 @@ import type { FfmpegCapabilities, SpawnFn } from '../src/protect/ffmpeg.js'
 import { Buffer } from 'node:buffer'
 import { EventEmitter } from 'node:events'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { MAX_RESTARTS, PREBUFFER_FRAGMENTS, PrebufferRing, recordingArgs, RecordingDelegate, RESTART_DELAY_MS, SLOW_RESTART_DELAY_MS } from '../src/accessories/recording.js'
+import { HEALTHY_RUN_MS, MAX_RESTARTS, PREBUFFER_FRAGMENTS, PrebufferRing, recordingArgs, RecordingDelegate, RESTART_DELAY_MS, SLOW_RESTART_DELAY_MS } from '../src/accessories/recording.js'
 import { FfmpegProcess } from '../src/protect/ffmpeg.js'
 
 // setTimeout only: `flush` below rides on setImmediate, and faking that would
@@ -491,16 +491,29 @@ describe('recordingDelegate encoder', () => {
     expect(await drain(h.delegate.handleRecordingStreamRequest(1))).toEqual([])
   })
 
+  // Never awaited: the point is what the generator YIELDS once the new encoder
+  // is producing, and awaiting the drain first would let a regression be
+  // "detected" by a test timeout instead of by this assertion.
   it('does not hand a stream opened before the restart the new encoder fragments', async () => {
     const h = await harnessStarted()
     h.proc.stdout.emit('data', init('one'))
     h.proc.emit('close', 0)
-    const packets = await drain(h.delegate.handleRecordingStreamRequest(1))
+    const packets: RecordingPacket[] = []
+    const gen = h.delegate.handleRecordingStreamRequest(1)
+    void (async () => {
+      for await (const packet of gen)
+        packets.push(packet)
+    })()
     await vi.advanceTimersByTimeAsync(RESTART_DELAY_MS)
     await flush()
     h.proc.stdout.emit('data', init('two'))
     h.proc.stdout.emit('data', fragment('b'))
-    expect(packets).toEqual([])
+    // Two fragments, so a generator holding the dead encoder's init would have
+    // released it rather than sitting on the lookahead.
+    h.proc.stdout.emit('data', fragment('c'))
+    await flush()
+    expect(packets.map(p => p.data.toString('latin1'))).toEqual([])
+    h.close(1)
   })
 
   it('ends a clip whose consumer falls more than the prebuffer depth behind, rather than queueing without limit', async () => {
@@ -571,6 +584,36 @@ describe('recordingDelegate encoder', () => {
     await vi.advanceTimersByTimeAsync(SLOW_RESTART_DELAY_MS)
     await flush()
     expect(h.spawn.mock.calls.length).toBe(spawns + 1)
+    expect(h.delegate.encoding).toBe(true)
+  })
+
+  // The single load-bearing claim of "slow down, never stop": without this
+  // reset a camera that comes back stays on the ten-minute cadence for the life
+  // of the process, which is worse than the fast loop it replaced. Untestable
+  // under this file's default fake timers, because the tally compares real
+  // timestamps — hence Date is faked here and nowhere else.
+  it('returns to the fast retry after a run that actually lasted', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    const h = await harnessStarted()
+    for (let i = 0; i <= MAX_RESTARTS; i++) {
+      h.proc.emit('close', 1)
+      await vi.advanceTimersByTimeAsync(RESTART_DELAY_MS)
+      await flush()
+    }
+    // On the slow cadence now: the fast interval above bought nothing.
+    const beforeSlow = h.spawn.mock.calls.length
+    await vi.advanceTimersByTimeAsync(SLOW_RESTART_DELAY_MS)
+    await flush()
+    expect(h.spawn.mock.calls.length).toBe(beforeSlow + 1)
+
+    // A run that lasted, then a failure: the tally is cleared, so the retry is
+    // fast again rather than ten minutes away.
+    await vi.advanceTimersByTimeAsync(HEALTHY_RUN_MS)
+    const healthy = h.spawn.mock.calls.length
+    h.proc.emit('close', 1)
+    await vi.advanceTimersByTimeAsync(RESTART_DELAY_MS)
+    await flush()
+    expect(h.spawn.mock.calls.length).toBe(healthy + 1)
     expect(h.delegate.encoding).toBe(true)
   })
 
