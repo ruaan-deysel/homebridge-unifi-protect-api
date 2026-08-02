@@ -849,6 +849,11 @@ export class StreamingDelegate implements CameraStreamingDelegate {
       return undefined
     }
     state.proc = proc
+    // Talkback otherwise logs only on failure, which cannot tell a working
+    // session from a silent no-op — see startSession's "Live view started"
+    // for the same reasoning. Label only: the console URL carries the
+    // camera's IP and port, and the SDP carries the session key.
+    this.options.log.info(`Talkback started for "${this.options.label}" (${session.samplingRate} Hz).`)
     return listenPort
   }
 

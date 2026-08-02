@@ -1302,6 +1302,38 @@ describe('talkback', () => {
     expect(socket.send).not.toHaveBeenCalled()
     delegate.stopSession(sessionId)
   })
+
+  // Talkback used to log only on failure: a working session and a silent
+  // no-op were indistinguishable in the log, which is exactly what made the
+  // hardware gate impossible to diagnose from logs alone. This is the
+  // positive line, and it must name the camera only — never the console's
+  // talkback endpoint (its IP and port) or anything from the SDP.
+  it('logs when talkback actually starts, naming the camera and not the endpoint', async () => {
+    const { socket, delegate, sessionId, log } = await startTalkbackSession()
+    socket.emit('message', rtp(1))
+    await until(() => log.info.mock.calls.some(call => String(call[0]).includes('Talkback started')))
+    const line = log.info.mock.calls.map(call => String(call[0])).find(m => m.includes('Talkback started'))!
+    expect(line).toBe('Talkback started for "Driveway" (24000 Hz).')
+    expect(line).not.toContain('192.168.10.9')
+    expect(line).not.toContain('7004')
+    delegate.stopSession(sessionId)
+  })
+
+  it('does not log a talkback start when the encoder fails to start', async () => {
+    let calls = 0
+    const { socket, delegate, sessionId, log } = await startTalkbackSession({
+      spawn: () => {
+        calls++
+        // First spawn is the video session and must succeed so the talkback
+        // relay arms; the second is the encoder, which dies before running.
+        return calls === 1 ? fakeChild() : deadSpawn()
+      },
+    })
+    socket.emit('message', rtp(1))
+    await until(() => calls === 2)
+    expect(log.info.mock.calls.some(call => String(call[0]).includes('Talkback started'))).toBe(false)
+    delegate.stopSession(sessionId)
+  })
 })
 
 const PKG_CAPS = { path: '/usr/bin/ffmpeg', encoder: 'h264_vaapi' as const, hwaccel: 'vaapi' as const }
