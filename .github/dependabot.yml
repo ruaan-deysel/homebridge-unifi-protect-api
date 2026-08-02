@@ -43,6 +43,13 @@ updates:
       - dependency-name: typescript
         update-types:
           - version-update:semver-major
+      # The type definitions must describe the Node this plugin SUPPORTS, not the
+      # newest Node published. `engines.node` is ^22 || ^24; a newer @types/node
+      # lets code call an API those runtimes lack, typecheck clean, and fail for
+      # users at runtime — nothing in CI would catch it. Revisit when engines move.
+      - dependency-name: "@types/node"
+        update-types:
+          - version-update:semver-major
 
   # Actions pinned in workflows go stale silently and are a real supply-chain
   # surface — a compromised action runs with repository credentials.
