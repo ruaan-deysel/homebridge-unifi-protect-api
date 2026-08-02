@@ -775,11 +775,73 @@ describe('streamingDelegate hap wiring', () => {
     expect(delegate.activeCount).toBe(0)
   })
 
+  // hap-nodejs's _handleSelectedStreamConfigurationWrite dispatches
+  // START_SESSION with no duplicate guard, so a retried characteristic write
+  // calls handleStreamRequest('start') twice on one session id. Without a
+  // guard, the second `sessions.set` overwrites the first process in the map:
+  // it is left in NO map, nothing ever stops it, and it holds a maxStreams
+  // slot forever.
+  it('stops the previous process instead of orphaning it when a start repeats on one session id', async () => {
+    const children: ChildRecord[] = []
+    const { delegate } = makeDelegate({
+      spawn: () => {
+        const record: ChildRecord = { stdin: '', killed: false }
+        children.push(record)
+        return fakeChild(record)
+      },
+    })
+    await new Promise<void>((resolve, reject) => {
+      delegate.prepareStream(prepareRequest(), error => (error ? reject(error) : resolve()))
+    })
+    await new Promise<void>((resolve, reject) => {
+      delegate.handleStreamRequest(startRequest(), error => (error ? reject(error) : resolve()))
+    })
+    expect(delegate.activeCount).toBe(1)
+
+    await new Promise<void>((resolve, reject) => {
+      delegate.handleStreamRequest(startRequest(), error => (error ? reject(error) : resolve()))
+    })
+
+    expect(children[0]!.killed).toBe(true)
+    expect(delegate.activeCount).toBe(1)
+    expect(FfmpegProcess.activeCount).toBe(1)
+
+    delegate.stopAll()
+    expect(FfmpegProcess.activeCount).toBe(0)
+  })
+
   it('errors instead of spawning when a start arrives with no prepared session', async () => {
     const { delegate, spawn } = makeDelegate()
     const error = await new Promise(resolve => delegate.handleStreamRequest(startRequest(), resolve))
     expect(error).toBeInstanceOf(Error)
     expect(spawn).not.toHaveBeenCalled()
+  })
+
+  // hap-nodejs's BUSY guard currently refuses a second prepareStream on a
+  // live session, so this path is not reachable today — kept as a defensive
+  // guard, same reasoning as the `prepared` cleanup elsewhere. Without it, a
+  // re-prepare on one session id would overwrite the entry and leak the
+  // first talkback socket, which nothing else holds a handle to.
+  it('closes the previous held socket when a session is re-prepared', async () => {
+    const sockets = [fakeSocket(6100), fakeSocket(6101)]
+    let calls = 0
+    const { delegate } = makeDelegate({
+      talkback: true,
+      hasSpeaker: true,
+      bind: async () => ({ socket: sockets[calls]! as never, port: 6100 + calls++ }),
+    })
+    await new Promise<void>((resolve, reject) => {
+      delegate.prepareStream(prepareRequest(), error => (error ? reject(error) : resolve()))
+    })
+    expect(sockets[0]!.close).not.toHaveBeenCalled()
+
+    await new Promise<void>((resolve, reject) => {
+      delegate.prepareStream(prepareRequest(), error => (error ? reject(error) : resolve()))
+    })
+    expect(sockets[0]!.close).toHaveBeenCalled()
+    expect(sockets[1]!.close).not.toHaveBeenCalled()
+
+    delegate.stopSession('session-1')
   })
 })
 
@@ -1182,7 +1244,7 @@ describe('talkback', () => {
   // socket, so it double-forwards, and its encoder's RTP input never EOFs —
   // `counted: false` means activeCount never shows it either.
   it('takes down the previous relay when a start repeats on one session id', async () => {
-    const { spawn, socket, children, procs, delegate, sessionId } = await startTalkbackSession()
+    const { spawn, socket, children, delegate, sessionId } = await startTalkbackSession()
     socket.emit('message', rtp(1))
     await until(() => spawn.mock.calls.length === 2)
     const firstEncoder = children[1]!
@@ -1201,11 +1263,12 @@ describe('talkback', () => {
     expect(socket.send.mock.calls.length - before).toBe(1)
     expect(socket.send.mock.calls.at(-1)![1]).toBe(sdpListenPort(children[3]!.stdin))
 
+    // The first start's VIDEO process must itself have been stopped by the
+    // repeat start above — not left orphaned in no map. See the guard in
+    // startSession just before `this.sessions.set(sessionId, proc)`.
+    expect(children[0]!.killed).toBe(true)
+
     delegate.stopSession(sessionId)
-    // The first start's VIDEO process is the documented orphan of the video
-    // path (see the onExit comment in startSession) — released by hand so the
-    // suite-wide active-count guard measures what this test is about.
-    ;(procs[0] as unknown as EventEmitter).emit('close', 0)
     expect(FfmpegProcess.activeCount).toBe(0)
   })
 

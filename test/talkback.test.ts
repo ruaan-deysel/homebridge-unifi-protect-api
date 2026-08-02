@@ -18,8 +18,9 @@ function rtp(mark: number): Buffer {
 
 /**
  * An RTCP packet of the given type — 200 SR, 201 RR, 202 SDES, 203 BYE, 204
- * APP. Masking off the marker bit puts these at 72-76, the range RFC 5761
- * reserves so muxed RTCP can be told apart from RTP.
+ * APP, 205 RTPFB, 206 PSFB, 207 XR. Masking off the marker bit puts these at
+ * 72-79, the range RFC 5761 reserves so muxed RTCP can be told apart from
+ * RTP.
  */
 function rtcp(type: number): Buffer {
   const packet = Buffer.alloc(32)
@@ -159,7 +160,11 @@ describe('isRtpMedia', () => {
   })
 
   it('rejects every muxed rtcp type', () => {
-    for (const type of [200, 201, 202, 203, 204])
+    // 205 RTPFB, 206 PSFB and 207 XR mask to 77-79, past the old cutoff of
+    // 76 — HAP controllers are not observed sending them, but nothing stops
+    // one from opening the console session and spawning the encoder if the
+    // filter does not also reject them.
+    for (const type of [200, 201, 202, 203, 204, 205, 206, 207])
       expect(isRtpMedia(rtcp(type))).toBe(false)
   })
 

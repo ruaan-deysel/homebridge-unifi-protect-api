@@ -692,6 +692,12 @@ export class StreamingDelegate implements CameraStreamingDelegate {
         this.options.log.debug(`The stream for "${this.options.label}" was stopped while it was starting.`)
         return false
       }
+      // HomeKit reuses session ids. A retried START on one already live here
+      // would otherwise overwrite the entry in `sessions` — the prior process
+      // ends up in NO map, nothing ever stops it, and it keeps a maxStreams
+      // slot for the life of the plugin. Same class of leak as the talkback
+      // path above (see armTalkback); stop it before the overwrite.
+      this.sessions.get(sessionId)?.stop()
       this.sessions.set(sessionId, proc)
       this.options.log.info(`Live view started for "${this.options.label}" (${channel} substream, ${audio ? 'with' : 'no'} audio).`)
       return true
@@ -883,6 +889,11 @@ export class StreamingDelegate implements CameraStreamingDelegate {
           },
           audioSocket: audio.socket,
         }
+        // Defensive: hap-nodejs's BUSY guard currently refuses a second
+        // prepareStream on a live session, so this overwrite path is not
+        // reachable today. Kept for the same reason the guard above it is —
+        // an unguarded overwrite would leak the previous bound audio socket.
+        closeQuietly(this.prepared.get(request.sessionID)?.audioSocket)
         this.prepared.set(request.sessionID, rtp)
         callback(undefined, {
           video: {

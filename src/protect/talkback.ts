@@ -44,14 +44,19 @@ export interface TalkbackRelayOptions {
  * media.
  *
  * RFC 5761 §4: with RTP and RTCP muxed, the second byte's payload-type field
- * (the marker bit masked off) is 72-76 for RTCP. Byte 0's top two bits are the
- * RTP version, which is 2 for both, and 12 bytes is the fixed RTP header.
+ * (the marker bit masked off) is 72-76 for SR/RR/SDES/BYE/APP, and RTPFB(205)/
+ * PSFB(206)/XR(207) mask to 77-79 — also RTCP, and rejected for the same
+ * reason even though HAP controllers are not observed sending them. RFC 5761
+ * reserves the full 64-95 range from dynamic RTP payload types (96-127), so
+ * widening to 72-79 costs no legitimate Opus payload type. Byte 0's top two
+ * bits are the RTP version, which is 2 for both, and 12 bytes is the fixed
+ * RTP header.
  */
 export function isRtpMedia(packet: Buffer): boolean {
   if (packet.length < 12 || (packet[0]! & 0xC0) !== 0x80)
     return false
   const payloadType = packet[1]! & 0x7F
-  return payloadType < 72 || payloadType > 76
+  return payloadType < 72 || payloadType > 79
 }
 
 export class TalkbackRelay {
