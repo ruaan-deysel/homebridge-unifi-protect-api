@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { cameraToggles, clearDeviceSetting, debounce, defaultFor, DEFAULTS, ensureConfig, isOverridden, MAX_STREAMS_RANGE, NEEDS_RESTART, PACKAGE_LABEL, parseIcloudTier, parseMaxStreams, QUALITY_OPTIONS, RECORDING_LIMITS, renderDeviceHeader, renderQualitySelect, renderToggle, SAVE_DEBOUNCE_MS, setDeviceSetting, setGlobalSetting, shouldOfferPackageCamera } from '../homebridge-ui/public/config-ops.js'
+import { cameraToggles, clearDeviceSetting, debounce, defaultFor, DEFAULTS, ensureConfig, isOverridden, MAX_STREAMS_RANGE, NEEDS_RESTART, PACKAGE_LABEL, parseIcloudTier, parseMaxStreams, QUALITY_OPTIONS, recordingCount, RECORDING_LIMITS, renderDeviceHeader, renderQualitySelect, renderToggle, SAVE_DEBOUNCE_MS, setDeviceSetting, setGlobalSetting, shouldOfferPackageCamera, tierWarning } from '../homebridge-ui/public/config-ops.js'
 import { parseConfig, settingsFor } from '../src/config.js'
 
 // Minimal fake DOM — just enough to prove renderDeviceHeader never turns
@@ -576,6 +576,57 @@ describe('icloudTier validation', () => {
     // And the fallback itself is one parseConfig accepts, so the round-trip
     // this test guards against actually terminates.
     expect(parseConfig(config).success).toBe(true)
+  })
+})
+
+// Apple caps HKSV by camera COUNT, not storage. `recordingCount` takes the
+// discovered device list (not just `config.devices`) so a device with no
+// override entry — inheriting `defaults.hksv` — is still counted, and so
+// `hasPackageCamera` (a device-list-only fact) gates the package-lens
+// double-count instead of trusting a possibly-stale config.json flag.
+describe('recordingCount / tierWarning', () => {
+  const base = ensureConfig({})
+  const devices = (ids) => ids.map(id => ({ id, hasPackageCamera: true }))
+  const withDevices = (deviceConfig, tier = '200gb') =>
+    ({ ...base, defaults: { ...base.defaults, icloudTier: tier }, devices: deviceConfig })
+
+  it('counts the package accessory as its own recording camera', () => {
+    const config = withDevices({ a: { hksv: true, packageCamera: true } })
+    expect(recordingCount(config, devices(['a']))).toBe(2)
+  })
+
+  it('does not count a package-camera override for a device without the lens', () => {
+    const config = withDevices({ a: { hksv: true, packageCamera: true } })
+    expect(recordingCount(config, [{ id: 'a', hasPackageCamera: false }])).toBe(1)
+  })
+
+  it('counts a device with no override entry when defaults.hksv is on — the gap a literal config.devices scan misses', () => {
+    const config = { ...base, defaults: { ...base.defaults, hksv: true, icloudTier: '200gb' }, devices: {} }
+    expect(recordingCount(config, devices(['a', 'b']))).toBe(2)
+  })
+
+  it('does not warn at the limit', () => {
+    const config = withDevices({ a: { hksv: true }, b: { hksv: true }, c: { hksv: true }, d: { hksv: true }, e: { hksv: true } })
+    expect(tierWarning(config, devices(['a', 'b', 'c', 'd', 'e']))).toBeUndefined()
+  })
+
+  it('warns above the limit, naming the count and the limit', () => {
+    const config = withDevices({ a: { hksv: true, packageCamera: true }, b: { hksv: true }, c: { hksv: true }, d: { hksv: true }, e: { hksv: true } })
+    const message = tierWarning(config, devices(['a', 'b', 'c', 'd', 'e']))
+    expect(message).toContain('6')
+    expect(message).toContain('5')
+  })
+
+  it('never warns on the unlimited tier', () => {
+    const ids = Array.from({ length: 20 }, (_, i) => String(i))
+    const many = Object.fromEntries(ids.map(id => [id, { hksv: true }]))
+    expect(tierWarning(withDevices(many, '2tb'), devices(ids))).toBeUndefined()
+  })
+
+  it('is advisory only — the config it warns about is returned unchanged, never blocked or reverted', () => {
+    const config = withDevices({ a: { hksv: true, packageCamera: true }, b: { hksv: true }, c: { hksv: true }, d: { hksv: true }, e: { hksv: true } })
+    expect(tierWarning(config, devices(['a', 'b', 'c', 'd', 'e']))).toBeDefined()
+    expect(config.devices.a.hksv).toBe(true)
   })
 })
 

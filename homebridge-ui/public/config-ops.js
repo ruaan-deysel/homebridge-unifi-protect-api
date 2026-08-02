@@ -287,6 +287,46 @@ export const SAVE_DEBOUNCE_MS = 1000
 export const NEEDS_RESTART = new Set(['audio', 'talkback', 'hksv'])
 
 /**
+ * Accessories that would record, not cameras — the package lens is a SEPARATE
+ * HomeKit accessory, so a doorbell with both recording and the package camera
+ * on consumes two of the tier's slots.
+ *
+ * Takes the discovered device list, not just `config.devices`: a device with
+ * no override entry still inherits `defaults.hksv`, and counting only the
+ * entries that happen to exist in config.json would miss every camera
+ * relying on the default (e.g. a user who flips `defaults.hksv` on). The
+ * device list is also the only place `hasPackageCamera` lives — config.json
+ * can carry a stale `packageCamera: true` left over from a lens that is no
+ * longer there, and that would not create a second accessory.
+ */
+export function recordingCount(config, devices) {
+  let count = 0
+  for (const device of devices) {
+    const settings = config.devices?.[device.id]
+    if (!(settings?.hksv ?? defaultFor(config, 'hksv')))
+      continue
+    const packageCamera = (settings?.packageCamera ?? false) && device.hasPackageCamera
+    count += packageCamera ? 2 : 1
+  }
+  return count
+}
+
+/**
+ * Advisory, never enforcement: the plugin cannot see the user's iCloud
+ * subscription, and refusing a setting on a guess would be worse than a
+ * warning the user can ignore. Apple caps HKSV by camera COUNT, not
+ * storage — footage never touches the quota.
+ */
+export function tierWarning(config, devices) {
+  const tier = config.defaults?.icloudTier ?? DEFAULTS.icloudTier
+  const limit = RECORDING_LIMITS[tier]
+  const count = recordingCount(config, devices)
+  if (count <= limit)
+    return undefined
+  return `${count} accessories are set to record, but your iCloud+ plan supports ${limit} on the ${tier} tier. HomeKit will refuse the extras — this is a heads-up, not a block.`
+}
+
+/**
  * True only when this device carries its OWN value for the key — the flat UI
  * showed just the resolved value, with no way to tell whether it came from
  * the global default or a per-device override.

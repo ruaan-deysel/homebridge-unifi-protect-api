@@ -132,6 +132,13 @@ declare module '*/homebridge-ui/public/config-ops.js' {
   export const SAVE_DEBOUNCE_MS: number
   export const NEEDS_RESTART: ReadonlySet<'audio' | 'talkback' | 'hksv'>
 
+  export interface RecordingDevice {
+    id: string
+    hasPackageCamera?: boolean
+  }
+  export function recordingCount(config: ConfigShape, devices: RecordingDevice[]): number
+  export function tierWarning(config: ConfigShape, devices: RecordingDevice[]): string | undefined
+
   export function defaultFor(config: ConfigShape, key: string): unknown
   export function isOverridden(config: ConfigShape, deviceId: string, key: string): boolean
   export function clearDeviceSetting(config: ConfigShape, deviceId: string, key: string): ConfigShape
