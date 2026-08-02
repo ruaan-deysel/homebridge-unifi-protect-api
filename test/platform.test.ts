@@ -1,5 +1,6 @@
 import type { StreamingDelegate } from '../src/accessories/streaming.js'
 import type { ProtectPluginConfig } from '../src/config.js'
+import { Buffer } from 'node:buffer'
 import { EventEmitter } from 'node:events'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -9,6 +10,7 @@ import { AUDIO_LABEL } from '../homebridge-ui/public/config-ops.js'
 import { UniFiProtectPlatform } from '../src/platform.js'
 import { fingerprintOf } from '../src/protect/cert.js'
 import { ProtectAuthError, ProtectUnavailableError } from '../src/protect/errors.js'
+import { FfmpegProcess } from '../src/protect/ffmpeg.js'
 import { C, FakeAccessory, FakeDoorbellController, hap, S } from './fake-hap.js'
 import { makeSelfSigned } from './support/tls.js'
 
@@ -69,6 +71,14 @@ function makeClient(devices: unknown[]) {
     getChimes: vi.fn(async () => of('chime')),
     getViewers: vi.fn(async () => of('viewer')),
     patchCamera: vi.fn(async () => ({})),
+    /**
+     * Present so a call during discovery is VISIBLE, not so one is expected:
+     * this is a POST that creates a stream on the console, and discovery must
+     * never make it. Live view calls it when a viewer actually opens.
+     */
+    createRtspsStream: vi.fn(async (id: string, qualities: string[]) =>
+      Object.fromEntries(qualities.map(q => [q, `rtsps://10.0.0.1:7441/${id}-${q}?token=SECRET`]))),
+    getRtspsStream: vi.fn(async () => ({})),
   }
 }
 
@@ -1076,6 +1086,40 @@ describe('uniFiProtectPlatform', () => {
   const delegateOf = (accessory: FakePlatformAccessory) =>
     controllerOf(accessory).options.delegate as StreamingDelegate
 
+  /**
+   * Starts a genuine session on `delegate` with a stand-in child process, so a
+   * teardown assertion can check what happened to the ffmpeg — a spy on
+   * stopAll() alone stays green even when stopAll() kills nothing. Returns the
+   * child; `killed` records that a signal was actually delivered.
+   */
+  async function startFakeSession(delegate: StreamingDelegate, id = 'session-1') {
+    const child = new EventEmitter() as EventEmitter & { stderr: EventEmitter, kill: () => boolean, killed: boolean }
+    child.stderr = new EventEmitter()
+    child.killed = false
+    child.kill = () => {
+      child.killed = true
+      // The real child emits `close` after a kill; without it the process-wide
+      // active count would never be released.
+      child.emit('close', 0)
+      return true
+    }
+    ;(delegate as unknown as { options: { spawn: unknown } }).options.spawn = () => child
+    const started = await delegate.startSession(id, {
+      width: 1280,
+      height: 960,
+      fps: 30,
+      bitrate: 800,
+      videoPayloadType: 99,
+    }, {
+      address: '192.0.2.9',
+      video: { port: 5000, ssrc: 7, key: Buffer.alloc(30), localPort: 5001 },
+      audio: { port: 5002, ssrc: 8, key: Buffer.alloc(30), localPort: 5003 },
+    })
+    if (!started)
+      throw new Error('expected the faked session to start')
+    return child
+  }
+
   // Two execs per probe. Per camera that is ten on a five-camera console, and
   // it repeats on every resync — while the answer is a property of the host.
   it('probes ffmpeg once, not once per camera and not once per discovery', async () => {
@@ -1330,6 +1374,388 @@ describe('uniFiProtectPlatform', () => {
     live.devices[DOORBELL] = { quality: 'high', audio: true }
 
     expect(settings()).toEqual({ quality: 'high', audio: true })
+  })
+
+  // -------------------------------------------------------------------------
+  // The package lens, as a second bridged accessory of its own.
+  // -------------------------------------------------------------------------
+
+  /** Only the Doorbell has the lens; Backyard is the control. */
+  const BACKYARD = camera('Backyard').id as string
+  const packageOn = (id: string) => ({ ...validConfig, devices: { [id]: { packageCamera: true } } })
+  const PACKAGE_LABEL = 'Doorbell Package Camera'
+  const packageOf = (accessories: FakePlatformAccessory[]) =>
+    accessories.find(a => a.displayName === PACKAGE_LABEL)
+  /** The accessories handed to a (un)register call, flattened out of the batches. */
+  const registered = (fn: unknown) => (fn as { mock: { calls: unknown[][] } }).mock.calls.flat(2)
+
+  it('adds a package accessory when the lens exists and the user opted in', async () => {
+    const { api, accessories } = await withCameras(cameras, { config: packageOn(DOORBELL) })
+    const pkg = packageOf(accessories)
+
+    expect(pkg).toBeDefined()
+    // Derived from the device id plus a suffix, so it can never collide with
+    // the main accessory's — two accessories sharing a UUID is one accessory.
+    expect(pkg!.UUID).toBe(`uuid-${DOORBELL}-package`)
+    expect(pkg!.UUID).not.toBe(`uuid-${DOORBELL}`)
+    expect(new Set(accessories.map(a => a.UUID)).size).toBe(accessories.length)
+    // Bridged like everything else. An external accessory is a separate
+    // pairing the user would have to add by hand.
+    expect(api.publishExternalAccessories).not.toHaveBeenCalled()
+    expect(registered(api.registerPlatformAccessories)).toContain(pkg)
+    expect(pkg!.controllers).toHaveLength(1)
+  })
+
+  it('adds none when the lens exists but the setting is off', async () => {
+    const { accessories } = await withCameras()
+
+    expect(packageOf(accessories)).toBeUndefined()
+    expect(accessories).toHaveLength(5)
+  })
+
+  it('adds none when the camera has no package lens, whatever the setting says', async () => {
+    // The gate the whole feature rests on. Asserted on the fixture first, so a
+    // green result cannot come from the fixture having drifted.
+    expect(camera('Backyard').hasPackageCamera).toBe(false)
+
+    const { accessories } = await withCameras(cameras, { config: packageOn(BACKYARD) })
+
+    expect(accessories.map(a => a.displayName)).not.toContain('Backyard Package Camera')
+    expect(accessories).toHaveLength(5)
+  })
+
+  // `ProtectClient` returns the RAW payload when cameraSchema validation fails,
+  // so a Ubiquiti field rename is a real production input — and an absent flag
+  // must read as "no lens", never as "assume yes".
+  it('adds none when a degraded payload carries no lens flag at all', async () => {
+    const degraded = cameras.map(c => ({ id: c.id, name: c.name, modelKey: 'camera' }))
+    const { accessories } = await withCameras(degraded, { config: packageOn(DOORBELL) })
+
+    expect(packageOf(accessories)).toBeUndefined()
+  })
+
+  // A camera and nothing else. The "Doorbell Package" motion sensor in
+  // particular must stay on the MAIN accessory: moving a service between
+  // accessories reads to HomeKit as the old one disappearing, which silently
+  // breaks every automation built on it.
+  it('adds no sensors, doorbell or led switch to the package accessory', async () => {
+    const { accessories } = await withCameras(cameras, { config: packageOn(DOORBELL) })
+    const pkg = packageOf(accessories)!
+
+    expect(pkg.services.filter(s => s.type === S.MotionSensor)).toHaveLength(0)
+    expect(pkg.services.filter(s => s.type === S.Doorbell)).toHaveLength(0)
+    expect(pkg.services.filter(s => s.type === S.Switch)).toHaveLength(0)
+    // Only what the CameraController itself brought.
+    expect(sensorSubtypes(pkg)).toEqual([])
+    // And the package motion sensor is still where it always was.
+    expect(doorbellOf(accessories).getServiceById(S.MotionSensor, 'detect-package')).toBeDefined()
+  })
+
+  // Otherwise Home.app shows Default-Manufacturer/Model/Serial on its tile.
+  it('populates AccessoryInformation on the package accessory, with its own serial', async () => {
+    const { accessories } = await withCameras(cameras, { config: packageOn(DOORBELL) })
+    const pkg = packageOf(accessories)!
+    const main = doorbellOf(accessories)
+    const info = pkg.getService(S.AccessoryInformation)!
+
+    expect(info.valueOf_(C.Manufacturer)).toBe('Ubiquiti')
+    expect(info.valueOf_(C.Model)).toBe('camera')
+    expect(info.valueOf_(C.SerialNumber)).toBe(`${camera('Doorbell').mac}-package`)
+    // Two bridged accessories sharing a serial is one accessory as far as
+    // HomeKit's identity tracking is concerned.
+    expect(info.valueOf_(C.SerialNumber)).not.toBe(main.getService(S.AccessoryInformation)!.valueOf_(C.SerialNumber))
+  })
+
+  // A degraded payload has no `mac` — writing a serial derived from the id
+  // instead would make HomeKit treat the accessory as new the moment a real
+  // payload arrives.
+  it('does not set AccessoryInformation on the package accessory from a degraded payload', async () => {
+    const degraded = cameras.map(c => ({ id: c.id, name: c.name, modelKey: 'camera', hasPackageCamera: true }))
+    const { accessories } = await withCameras(degraded, { config: packageOn(DOORBELL) })
+    const pkg = packageOf(accessories)!
+
+    expect(pkg.getService(S.AccessoryInformation)).toBeUndefined()
+  })
+
+  // The lens is 1600x1200 — 4:3, unlike every other stream this plugin serves.
+  // Advertising a 16:9 size would promise a frame it cannot produce.
+  it('advertises 4:3 resolutions and no audio for the package lens', async () => {
+    const config = { ...validConfig, devices: { [DOORBELL]: { packageCamera: true, audio: true } } }
+    const { accessories } = await withCameras(cameras, { config })
+    const pkg = packageOf(accessories)!
+    const streaming = controllerOf(pkg).options.streamingOptions as {
+      audio?: unknown
+      video: { resolutions: number[][] }
+    }
+
+    // The exact ladder, not merely "some 4:3 sizes". A single non-conformant
+    // entry made iOS refuse to negotiate at all, silently — hap-nodejs
+    // validates neither the 24 fps floor nor the legal sizes.
+    expect(streaming.video.resolutions).toEqual([
+      [1600, 1200, 30],
+      [1280, 960, 30],
+      [1024, 768, 30],
+      [640, 480, 30],
+      [480, 360, 30],
+      [320, 240, 30],
+    ])
+    for (const [width, height, fps] of streaming.video.resolutions) {
+      expect(width! / height!).toBeCloseTo(4 / 3)
+      // HAP R2 11.8.1: every advertised stream must offer at least 24 fps.
+      expect(fps!).toBeGreaterThanOrEqual(24)
+    }
+    // No audio even though this camera opted in: the lens shares the main
+    // camera's microphone, so HAP must not create a Microphone service here.
+    expect(streaming.audio).toBeUndefined()
+    expect(pkg.services.some(s => s.type === S.Microphone)).toBe(false)
+    // The main accessory still gets its audio — the package path must not
+    // switch audio off for the camera itself.
+    expect((controllerOf(doorbellOf(accessories)).options.streamingOptions as { audio?: unknown }).audio).toBeDefined()
+  })
+
+  it('streams the package channel, not a quality tier', async () => {
+    const { accessories } = await withCameras(cameras, { config: packageOn(DOORBELL) })
+    const options = (delegateOf(packageOf(accessories)!) as unknown as {
+      options: { channel?: string, deviceId: string }
+    }).options
+
+    expect(options.channel).toBe('package')
+    expect(options.deviceId).toBe(DOORBELL)
+    // The main lens is untouched.
+    expect((delegateOf(doorbellOf(accessories)) as unknown as { options: { channel?: string } }).options.channel)
+      .toBeUndefined()
+  })
+
+  // A stranded ffmpeg holds a decode open for as long as the host is up. The
+  // session is REAL (with a stand-in child) rather than a spy on stopAll():
+  // asserting only that stopAll() was called stays green even if it kills
+  // nothing at all.
+  it('stops the package delegate on shutdown too', async () => {
+    const { api, accessories } = await withCameras(cameras, { config: packageOn(DOORBELL) })
+    const delegate = delegateOf(packageOf(accessories)!)
+    const child = await startFakeSession(delegate)
+    expect(delegate.activeCount).toBe(1)
+    expect(FfmpegProcess.activeCount).toBe(1)
+
+    api.emit('shutdown')
+
+    expect(child.killed).toBe(true)
+    expect(delegate.activeCount).toBe(0)
+    // The host-wide slot is back, or the cap fills with corpses over an uptime.
+    expect(FfmpegProcess.activeCount).toBe(0)
+  })
+
+  // The regression this design exists to prevent. Detecting the lens by asking
+  // the console means `POST /cameras/{id}/rtsps-stream {qualities:["package"]}`,
+  // which CREATES a stream — a state-changing request against every camera on
+  // every startup, to learn something the inventory payload already carries.
+  it('makes no console request to detect the package lens', async () => {
+    const config = { ...validConfig, devices: Object.fromEntries(cameras.map(c => [c.id as string, { packageCamera: true }])) }
+    const { platform, accessories } = await withCameras(cameras, { config })
+    const client = (platform as unknown as { client: ReturnType<typeof makeClient> }).client
+
+    // The Doorbell still got its accessory, so this is not passing by doing
+    // nothing at all.
+    expect(packageOf(accessories)).toBeDefined()
+    expect(client.createRtspsStream).not.toHaveBeenCalled()
+    expect(client.getRtspsStream).not.toHaveBeenCalled()
+
+    await platform.discover()
+
+    expect(client.createRtspsStream).not.toHaveBeenCalled()
+    // And still exactly one controller on the package accessory — a second
+    // would duplicate every stream management service on it.
+    expect(packageOf(accessories)!.controllers).toHaveLength(1)
+  })
+
+  // Nothing in the console inventory carries the package UUID, so the removal
+  // sweep sees it as a device that vanished — and unregistering is
+  // irreversible: HomeKit rooms, scenes and automations do not come back.
+  it('keeps the package accessory across later discoveries', async () => {
+    const { api, platform, accessories } = await withCameras(cameras, { config: packageOn(DOORBELL) })
+    const pkg = packageOf(accessories)!
+    platform.confirmRemovalAfterMs = 0
+
+    await platform.discover()
+    await platform.discover()
+
+    expect(platform.accessories.get(pkg.UUID)).toBe(pkg)
+    expect(api.unregisterPlatformAccessories).not.toHaveBeenCalled()
+  })
+
+  // A transient outage (ffmpeg missing at startup) must not cost an
+  // already-registered package accessory its HomeKit room/scene/automation
+  // membership. Main camera accessories get the same treatment in this
+  // situation — they just end up controller-less.
+  it('keeps an already-registered package accessory across a startup with no usable ffmpeg, controller-less', async () => {
+    const config = packageOn(DOORBELL)
+    const { accessories } = await withCameras(cameras, { config })
+    const pkg = packageOf(accessories)!
+    expect(pkg.controllers).toHaveLength(1)
+
+    // A fresh platform models the next startup: the accessory cache already
+    // has the package accessory (Homebridge restores it from its own cache
+    // on disk), but this run's ffmpeg probe fails.
+    const probe = vi.fn(async () => {
+      throw new Error('no usable ffmpeg')
+    })
+    const restarted = makePlatform(config, cameras)
+    restarted.platform.probeFfmpeg = probe as never
+    restarted.platform.accessories.set(pkg.UUID, pkg as never)
+
+    await restarted.platform.discover()
+
+    expect(restarted.platform.accessories.has(pkg.UUID)).toBe(true)
+    expect(restarted.api.unregisterPlatformAccessories).not.toHaveBeenCalled()
+    // No second controller wired on top of the one already there.
+    expect(pkg.controllers).toHaveLength(1)
+  })
+
+  /** The same "next startup, ffmpeg gone" model, with the accessory restored. */
+  async function restartWithoutFfmpeg(config: unknown, devices: unknown[], pkg: FakePlatformAccessory) {
+    const restarted = makePlatform(config, devices)
+    restarted.platform.probeFfmpeg = (async () => {
+      throw new Error('no usable ffmpeg')
+    }) as never
+    restarted.platform.accessories.set(pkg.UUID, pkg as never)
+    await restarted.platform.discover()
+    return restarted
+  }
+
+  // The retention guard above must never outrank the opt-out: unticking the
+  // toggle is the user's explicit instruction, and a missing ffmpeg is no
+  // reason to keep an accessory they asked to be rid of.
+  it('removes the package accessory when the setting is off, even with ffmpeg unusable', async () => {
+    const { accessories } = await withCameras(cameras, { config: packageOn(DOORBELL) })
+    const pkg = packageOf(accessories)!
+
+    const off = { ...validConfig, devices: { [DOORBELL]: { packageCamera: false } } }
+    const restarted = await restartWithoutFfmpeg(off, cameras, pkg)
+
+    expect(restarted.platform.accessories.has(pkg.UUID)).toBe(false)
+    expect(registered(restarted.api.unregisterPlatformAccessories)).toContain(pkg)
+  })
+
+  // And the same for the lens genuinely being gone from the console's answer.
+  it('removes the package accessory when hasPackageCamera flips to false, even with ffmpeg unusable', async () => {
+    const config = packageOn(DOORBELL)
+    const { accessories } = await withCameras(cameras, { config })
+    const pkg = packageOf(accessories)!
+
+    const lensGone = cameras.map(c => (c.id === DOORBELL ? { ...c, hasPackageCamera: false } : c))
+    const restarted = await restartWithoutFfmpeg(config, lensGone, pkg)
+
+    expect(restarted.platform.accessories.has(pkg.UUID)).toBe(false)
+    expect(registered(restarted.api.unregisterPlatformAccessories)).toContain(pkg)
+  })
+
+  // Renaming the camera in Protect must not leave the package accessory behind
+  // under the old name — it is a separate accessory with its own displayName.
+  it('renames the package accessory when the parent camera is renamed', async () => {
+    const config = packageOn(DOORBELL)
+    const { api, platform, accessories } = await withCameras(cameras, { config })
+    const pkg = packageOf(accessories)!
+    expect(pkg.displayName).toBe('Doorbell Package Camera')
+
+    const client = (platform as unknown as { client: ReturnType<typeof makeClient> }).client
+    client.getCameras.mockResolvedValueOnce(cameras.map(c => (c.id === DOORBELL ? { ...c, name: 'Front Door' } : c)))
+    await platform.discover()
+
+    expect(pkg.displayName).toBe('Front Door Package Camera')
+    expect(registered(api.updatePlatformAccessories)).toContain(pkg)
+  })
+
+  // No pre-existing accessory and no usable ffmpeg: there is nothing to keep
+  // and nothing worth creating controller-less.
+  it('registers no package accessory when ffmpeg is unusable and none existed yet', async () => {
+    const probe = vi.fn(async () => {
+      throw new Error('no usable ffmpeg')
+    })
+    const { accessories } = await withCameras(cameras, { config: packageOn(DOORBELL), probeFfmpeg: probe })
+
+    expect(packageOf(accessories)).toBeUndefined()
+  })
+
+  // The user's own explicit instruction, exactly like `expose: false` — so it
+  // takes effect now rather than waiting out the confirmation window meant for
+  // a console answering mid-reboot.
+  it('removes the package accessory and stops its ffmpeg when the setting is switched off', async () => {
+    const { api, platform, accessories } = await withCameras(cameras, { config: packageOn(DOORBELL) })
+    const pkg = packageOf(accessories)!
+    const delegate = delegateOf(pkg)
+    // A live session, so this asserts the transcode actually died rather than
+    // that a method was called on the way past.
+    const child = await startFakeSession(delegate)
+
+    const live = (platform as unknown as { config: ProtectPluginConfig }).config
+    live.devices[DOORBELL] = { packageCamera: false }
+    await platform.discover()
+
+    expect(platform.accessories.has(pkg.UUID)).toBe(false)
+    expect(registered(api.unregisterPlatformAccessories)).toContain(pkg)
+    expect(child.killed).toBe(true)
+    expect(delegate.activeCount).toBe(0)
+    expect(FfmpegProcess.activeCount).toBe(0)
+  })
+
+  // A genuine removal, unlike the no-ffmpeg case above: the lens itself is
+  // gone from the console's answer, present ffmpeg or not, and must not wait
+  // out the confirmation window.
+  it('removes the package accessory when hasPackageCamera flips to false, even with ffmpeg present', async () => {
+    const config = packageOn(DOORBELL)
+    const { api, platform, accessories } = await withCameras(cameras, { config })
+    const pkg = packageOf(accessories)!
+    const stop = vi.spyOn(delegateOf(pkg), 'stopAll')
+
+    const client = (platform as unknown as { client: ReturnType<typeof makeClient> }).client
+    client.getCameras.mockResolvedValueOnce(cameras.map(c => (c.id === DOORBELL ? { ...c, hasPackageCamera: false } : c)))
+    await platform.discover()
+
+    expect(platform.accessories.has(pkg.UUID)).toBe(false)
+    expect(registered(api.unregisterPlatformAccessories)).toContain(pkg)
+    expect(stop).toHaveBeenCalledTimes(1)
+  })
+
+  // One camera failing must not abort discovery for every other device.
+  it('keeps discovering when the package accessory cannot be wired up', async () => {
+    const config = { ...validConfig, devices: Object.fromEntries(cameras.map(c => [c.id as string, { packageCamera: true }])) }
+    const { platform, api } = makePlatform(config, cameras)
+    const boom = Object.assign(new Error('controller refused'), { cause: { apiKey: 'sk-live-DO-NOT-LOG' } })
+    class Exploding extends FakePlatformAccessory {
+      configureController(controller: never) {
+        if (this.displayName.endsWith('Package Camera'))
+          throw boom
+        super.configureController(controller)
+      }
+    }
+    api.platformAccessory = Exploding
+
+    await platform.discover()
+
+    // The load-bearing half of the `return uuid` after the catch: the package
+    // accessory is registered and SURVIVES the removal sweep controller-less.
+    // Nothing in the console inventory carries its UUID, so without that return
+    // the sweep would unregister it over a transient wiring failure.
+    const pkg = [...platform.accessories.values()].find(a => a.displayName === 'Doorbell Package Camera')!
+    expect(pkg).toBeDefined()
+    expect((pkg as unknown as FakeAccessory).controllers).toHaveLength(0)
+    platform.confirmRemovalAfterMs = 0
+    await platform.discover()
+    await platform.discover()
+    expect(platform.accessories.has(pkg.UUID)).toBe(true)
+    expect(api.unregisterPlatformAccessories).not.toHaveBeenCalled()
+
+    // Every camera still reached HomeKit, controller and all.
+    expect(platform.accessories.get(`uuid-${DOORBELL}`)).toBeDefined()
+    expect((platform.accessories.get(`uuid-${DRIVEWAY}`) as unknown as FakeAccessory).controllers).toHaveLength(1)
+    expect(log.warn.mock.calls.flat().join(' ')).toContain('controller refused')
+    // The credential on `cause` nowhere near the log — log.error(err) runs
+    // util.inspect, which walks it.
+    for (const call of log.warn.mock.calls) {
+      for (const arg of call)
+        expect(typeof arg).toBe('string')
+      expect(call.join(' ')).not.toContain('sk-live-DO-NOT-LOG')
+    }
   })
 })
 

@@ -276,13 +276,21 @@ export class FfmpegProcess {
     this.options.onExit?.()
   }
 
-  stop(): void {
-    if (this.killed || !this.child)
-      return
+  /**
+   * True when this process needs no further attention: it has exited, it was
+   * never started, or the kill signal was actually delivered. FALSE means an
+   * orphan — kill() failed, the process is still running, and it still holds
+   * its slot in the host-wide cap. The caller must keep its handle and retry,
+   * because nothing else can.
+   */
+  stop(): boolean {
+    if (this.ended || this.killed || !this.child)
+      return true
     // Only treat the process as stopped once the signal was actually
     // delivered — a failed kill() must not make `running` lie, and must not
     // stop a future stop() call from retrying.
     if (this.child.kill('SIGKILL'))
       this.killed = true
+    return this.killed
   }
 }

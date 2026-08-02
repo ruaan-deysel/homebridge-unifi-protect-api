@@ -232,6 +232,7 @@ interface DelegateOverrides {
   spawn?: () => ChildProcess
   quality?: 'auto' | 'low' | 'medium' | 'high'
   maxStreams?: number
+  channel?: 'package'
 }
 
 const jpeg = Buffer.from('jpeg-bytes')
@@ -251,6 +252,11 @@ async function failingProbe(): Promise<string> {
 
 function throwingSpawn(): ChildProcess {
   throw new Error('ENOENT')
+}
+
+/** A spawn rejection whose message happens to carry a stream url. */
+function throwingSpawnWithUrl(): ChildProcess {
+  throw new Error(`spawn failed for ${URL}`)
 }
 
 /**
@@ -289,6 +295,7 @@ function makeDelegate(overrides: DelegateOverrides = {}) {
     spawn,
     run,
     maxStreams: overrides.maxStreams,
+    channel: overrides.channel,
   })
   return { delegate, getSnapshot, get, spawn, run, log }
 }
@@ -435,6 +442,21 @@ describe('streamingDelegate sessions', () => {
     const good = makeDelegate({ caps: CAPS_SW, maxStreams: 1 })
     expect(await good.delegate.startSession('b', REQUEST, RTP)).toBe(true)
     good.delegate.stopAll()
+    delegate.stopAll()
+  })
+
+  // Every sibling error path on this window redacts before logging; a spawn
+  // rejection is the only shape whose message could plausibly carry the url
+  // (a real Node ENOENT carries only the binary path, not argv, but nothing
+  // should rely on that).
+  it('redacts a stream url that ends up in a spawn failure message', async () => {
+    const { delegate, log } = makeDelegate({ spawn: throwingSpawnWithUrl, caps: CAPS_SW, maxStreams: 1 })
+    expect(await delegate.startSession('a', REQUEST, RTP)).toBe(false)
+
+    const warned = log.warn.mock.calls.map(call => String(call[0])).join(' ')
+    expect(warned).toContain('Could not start ffmpeg')
+    expect(warned).not.toContain(URL)
+    expect(warned).not.toContain('SENTINEL')
     delegate.stopAll()
   })
 
@@ -679,5 +701,368 @@ describe('streamingDelegate hap wiring', () => {
     const error = await new Promise(resolve => delegate.handleStreamRequest(startRequest(), resolve))
     expect(error).toBeInstanceOf(Error)
     expect(spawn).not.toHaveBeenCalled()
+  })
+})
+
+const PKG_CAPS = { path: '/usr/bin/ffmpeg', encoder: 'h264_vaapi' as const, hwaccel: 'vaapi' as const }
+const PKG_URL = 'rtsps://192.0.2.1:7441/pkg?token=SENTINEL'
+
+function pkgTarget() {
+  return { port: 5000, ssrc: 1, payloadType: 99, key: Buffer.alloc(30), localPort: 6000 }
+}
+
+describe('package channel', () => {
+  const log = { info: vi.fn(), warn: vi.fn(), debug: vi.fn() }
+
+  function makeDelegate(channel?: 'package') {
+    const urls = { get: vi.fn(async () => PKG_URL) }
+    const getSnapshot = vi.fn(async () => Buffer.from(channel ?? 'main'))
+    const spawn = vi.fn(() => {
+      throw new Error('should not spawn in this test')
+    })
+    const delegate = new StreamingDelegate({
+      deviceId: 'cam1',
+      label: 'Doorbell Package Camera',
+      log,
+      client: { getSnapshot } as never,
+      urls: urls as never,
+      caps: PKG_CAPS,
+      channel,
+      settings: () => ({ quality: 'auto', audio: true }),
+      spawn: spawn as never,
+    })
+    return { delegate, urls, getSnapshot }
+  }
+
+  it('requests the package channel rather than a selected substream', async () => {
+    const { delegate, urls } = makeDelegate('package')
+    const resolved = await delegate.streamUrlFor({ width: 1920, height: 1080 })
+    expect(urls.get).toHaveBeenCalledWith('cam1', 'package')
+    // Returned alongside the URL, and it is what the session logs: reading the
+    // settings again later would name a channel this session is not streaming.
+    expect(resolved.channel).toBe('package')
+  })
+
+  it('still selects a substream when no channel is given', async () => {
+    const { delegate, urls } = makeDelegate()
+    const resolved = await delegate.streamUrlFor({ width: 1280, height: 720 })
+    expect(urls.get).toHaveBeenCalledWith('cam1', 'medium')
+    expect(resolved.channel).toBe('medium')
+  })
+
+  // Without the channel the console answers with the MAIN lens, so the package
+  // accessory's tile in Home.app shows the wrong camera entirely.
+  it('asks the console for the package lens when snapshotting a package delegate', async () => {
+    const { delegate, getSnapshot } = makeDelegate('package')
+    await delegate.snapshot()
+    expect(getSnapshot).toHaveBeenCalledWith('cam1', { channel: 'package' })
+  })
+
+  it('asks for no channel at all on an ordinary camera', async () => {
+    const { delegate, getSnapshot } = makeDelegate()
+    await delegate.snapshot()
+    expect(getSnapshot).toHaveBeenCalledWith('cam1', {})
+  })
+
+  // The 2s cache lives on the delegate, and each lens has its own delegate.
+  it('does not let one lens serve the other lens image from cache', async () => {
+    const main = makeDelegate()
+    const pkg = makeDelegate('package')
+    expect((await main.delegate.snapshot()).toString()).toBe('main')
+    expect((await pkg.delegate.snapshot()).toString()).toBe('package')
+  })
+
+  it('never requests audio on a package delegate, even when the camera opted in', async () => {
+    const { delegate } = makeDelegate('package')
+    expect(await delegate.audioStreamingOptions()).toBeUndefined()
+  })
+})
+
+describe('buildFfmpegArgs frame-rate padding', () => {
+  const base = { url: PKG_URL, bitrate: 800, address: '192.0.2.9', video: pkgTarget() }
+
+  it('emits -r when an fps is supplied', () => {
+    const args = buildFfmpegArgs(PKG_CAPS, { ...base, fps: 15 })
+    expect(args).toContain('-r')
+    expect(args[args.indexOf('-r') + 1]).toBe('15')
+  })
+
+  it('places -r before -f rtp, so it applies to the output that follows it', () => {
+    // Position, not presence: ffmpeg applies an output option to the output
+    // that comes AFTER it, so `-r` appended past the output URL is dangling
+    // and never reaches the encoder — the defect this guards against.
+    const args = buildFfmpegArgs(PKG_CAPS, { ...base, fps: 15 })
+    expect(args.indexOf('-r')).toBeLessThan(args.indexOf('-f'))
+  })
+
+  it('omits -r when no fps is supplied', () => {
+    expect(buildFfmpegArgs(PKG_CAPS, base)).not.toContain('-r')
+  })
+})
+
+describe('buildFfmpegArgs scaling', () => {
+  const base = { url: PKG_URL, bitrate: 800, address: '192.0.2.9', video: pkgTarget() }
+  const scale = { width: 1280, height: 960 }
+
+  const QSV_CAPS = { path: '/usr/bin/ffmpeg', encoder: 'h264_qsv' as const, hwaccel: 'qsv' as const }
+
+  // Software decode, software scale, upload for a hardware encode. In-GPU
+  // scaling (`scale_vaapi`) fails on the reference hardware with "Cannot
+  // allocate memory"; this form is the one measured working there.
+  const expected = [
+    { name: 'vaapi', caps: PKG_CAPS, filter: 'scale=1280:960,format=nv12,hwupload' },
+    { name: 'qsv', caps: QSV_CAPS, filter: 'scale=1280:960,format=nv12,hwupload=extra_hw_frames=64' },
+    { name: 'software', caps: { path: '/usr/bin/ffmpeg', encoder: 'libx264' as const }, filter: 'scale=1280:960' },
+  ]
+
+  for (const { name, caps, filter } of expected) {
+    it(`uses the ${name} scale filter with the negotiated size`, () => {
+      const args = buildFfmpegArgs(caps, { ...base, scale })
+      expect(args).toContain('-vf')
+      expect(args[args.indexOf('-vf') + 1]).toBe(filter)
+    })
+  }
+
+  it('follows the negotiated size rather than a constant', () => {
+    const args = buildFfmpegArgs(PKG_CAPS, { ...base, scale: { width: 640, height: 480 } })
+    expect(args[args.indexOf('-vf') + 1]).toBe('scale=640:480,format=nv12,hwupload')
+  })
+
+  it('drops hardware DECODE when scaling, keeping the hardware encoder', () => {
+    // The whole point of the change: hwaccel decode plus a filter is what blew
+    // up on the real console. The encoder must still be the hardware one.
+    const args = buildFfmpegArgs(PKG_CAPS, { ...base, scale })
+    expect(args).not.toContain('-hwaccel')
+    expect(args).not.toContain('-hwaccel_output_format')
+    expect(args[args.indexOf('-c:v') + 1]).toBe(PKG_CAPS.encoder)
+  })
+
+  it('initialises the encode device before the input, per encoder', () => {
+    const vaapi = buildFfmpegArgs(PKG_CAPS, { ...base, scale })
+    expect(vaapi[vaapi.indexOf('-vaapi_device') + 1]).toBe('/dev/dri/renderD128')
+    expect(vaapi.indexOf('-vaapi_device')).toBeLessThan(vaapi.indexOf('-i'))
+
+    const qsv = buildFfmpegArgs(QSV_CAPS, { ...base, scale })
+    expect(qsv[qsv.indexOf('-init_hw_device') + 1]).toBe('qsv=hw')
+    expect(qsv[qsv.indexOf('-filter_hw_device') + 1]).toBe('hw')
+    expect(qsv.indexOf('-init_hw_device')).toBeLessThan(qsv.indexOf('-i'))
+    expect(qsv).not.toContain('-hwaccel')
+
+    // Software encoder needs no device at all.
+    const sw = buildFfmpegArgs(CAPS_SW, { ...base, scale })
+    expect(sw).not.toContain('-vaapi_device')
+    expect(sw).not.toContain('-init_hw_device')
+  })
+
+  it('keeps hardware decode on the unscaled main-camera path', () => {
+    const args = buildFfmpegArgs(PKG_CAPS, base)
+    expect(args[args.indexOf('-hwaccel') + 1]).toBe('vaapi')
+    expect(args[args.indexOf('-hwaccel_output_format') + 1]).toBe('vaapi')
+    expect(args).not.toContain('-vaapi_device')
+  })
+
+  it('places -vf before -f rtp and the output url, so it applies to that output', () => {
+    // Position, not presence: an output option after the output URL dangles and
+    // never reaches the encoder. `-r` shipped broken that way once already.
+    const args = buildFfmpegArgs(PKG_CAPS, { ...base, scale })
+    expect(args.indexOf('-vf')).toBeLessThan(args.indexOf('-f'))
+    expect(args.indexOf('-vf')).toBeLessThan(args.findIndex(a => a.startsWith('srtp://')))
+    // And after the input, not among the input options — an input-side -vf is
+    // not a thing ffmpeg accepts.
+    expect(args.indexOf('-vf')).toBeGreaterThan(args.indexOf('-i'))
+  })
+
+  it('adds no filter when no size is given, leaving the main-camera path alone', () => {
+    expect(buildFfmpegArgs(PKG_CAPS, base)).not.toContain('-vf')
+    expect(buildFfmpegArgs(CAPS_SW, base)).not.toContain('-vf')
+  })
+})
+
+/**
+ * hap-nodejs does not check a paired controller's selection against the ladder
+ * the accessory advertised, so every number here reaches ffmpeg verbatim unless
+ * something clamps it. `-r 0` makes ffmpeg refuse to start at all.
+ */
+describe('buildFfmpegArgs clamps the negotiated parameters', () => {
+  const base = { url: PKG_URL, bitrate: 800, address: '192.0.2.9', video: pkgTarget(), scale: { width: 1280, height: 960 } }
+  const rate = (fps: number) => {
+    const args = buildFfmpegArgs(PKG_CAPS, { ...base, fps })
+    return args[args.indexOf('-r') + 1]
+  }
+  const filter = (scale: { width: number, height: number }) => {
+    const args = buildFfmpegArgs(PKG_CAPS, { ...base, scale, fps: 30 })
+    return args[args.indexOf('-vf') + 1]
+  }
+
+  for (const fps of [0, -1, -30, Number.NaN, Number.POSITIVE_INFINITY, 0.4]) {
+    it(`turns a negotiated fps of ${fps} into the advertised rate, never -r 0`, () => {
+      expect(rate(fps)).toBe('30')
+    })
+  }
+
+  it('rounds a fractional rate rather than handing ffmpeg a decimal', () => {
+    expect(rate(23.6)).toBe('24')
+  })
+
+  it('caps a rate above anything advertised', () => {
+    expect(rate(240)).toBe('30')
+  })
+
+  it('leaves a rate the ladder actually offers alone', () => {
+    expect(rate(24)).toBe('24')
+  })
+
+  it('bounds absurd dimensions by the largest advertised size', () => {
+    expect(filter({ width: 1_000_000_000, height: 1_000_000_000 })).toBe('scale=1600:1200,format=nv12,hwupload')
+  })
+
+  for (const [name, scale] of [
+    ['zero', { width: 0, height: 0 }],
+    ['negative', { width: -1280, height: -960 }],
+    ['nan', { width: Number.NaN, height: Number.NaN }],
+    ['infinite', { width: Number.POSITIVE_INFINITY, height: Number.POSITIVE_INFINITY }],
+  ] as const) {
+    it(`falls back to the native size for a ${name} dimension`, () => {
+      expect(filter(scale)).toBe('scale=1600:1200,format=nv12,hwupload')
+    })
+  }
+
+  // 4:2:0 chroma has no half-pixels; an odd size fails the encoder outright.
+  it('rounds a made-up size down to an even one', () => {
+    expect(filter({ width: 641, height: 481 })).toBe('scale=640:480,format=nv12,hwupload')
+  })
+
+  it('leaves a size the ladder actually offers alone', () => {
+    expect(filter({ width: 1024, height: 768 })).toBe('scale=1024:768,format=nv12,hwupload')
+  })
+
+  // The main camera negotiates the same numbers but supplies neither field, so
+  // nothing here may start emitting one for it.
+  it('adds neither -r nor -vf to the main-camera path', () => {
+    const args = buildFfmpegArgs(CAPS_HW, { url: PKG_URL, bitrate: 800, address: '192.0.2.9', video: pkgTarget() })
+    expect(args).not.toContain('-r')
+    expect(args).not.toContain('-vf')
+  })
+})
+
+describe('package session honours what homekit negotiated', () => {
+  // 1024x768@24 — neither the lens's native size nor the old hardcoded 15 fps,
+  // so a constant anywhere in the path shows up here.
+  const negotiated = { ...REQUEST, width: 1024, height: 768, fps: 24 }
+
+  it('scales to and pads to the negotiated size and rate', async () => {
+    const { delegate, spawn } = makeDelegate({ channel: 'package' })
+    expect(await delegate.startSession('a', negotiated, RTP)).toBe(true)
+    const args = argvOf(spawn)
+    // Torn down BEFORE the assertions: a failing expect would otherwise leave
+    // the process-wide count non-zero and fail every later test with it.
+    delegate.stopAll()
+    expect(args[args.indexOf('-vf') + 1]).toBe('scale=1024:768,format=nv12,hwupload')
+    expect(args[args.indexOf('-r') + 1]).toBe('24')
+  })
+
+  it('leaves the main-camera path with neither a filter nor a forced rate', async () => {
+    const { delegate, spawn } = makeDelegate()
+    expect(await delegate.startSession('a', negotiated, RTP)).toBe(true)
+    const args = argvOf(spawn)
+    delegate.stopAll()
+    expect(args).not.toContain('-vf')
+    expect(args).not.toContain('-r')
+  })
+})
+
+/**
+ * A `kill()` that returns false means the signal was NOT delivered and the
+ * process is still running — still decoding, and still holding one of the
+ * host-wide stream slots that only its exit releases. Dropping it from the
+ * session map at that point leaves nobody holding a handle to retry.
+ */
+describe('a session whose kill does not land', () => {
+  /** Refuses SIGKILL until `allow()` is called, then behaves like fakeChild. */
+  function stubbornChild() {
+    const child = new EventEmitter() as EventEmitter & { stderr: EventEmitter, kill: () => boolean }
+    child.stderr = new EventEmitter()
+    let killable = false
+    child.kill = () => {
+      if (!killable)
+        return false
+      child.emit('close', 0)
+      return true
+    }
+    return { child: child as unknown as ChildProcess, allow: () => {
+      killable = true
+    } }
+  }
+
+  it('stays tracked and keeps holding its slot, and a retry kills it', async () => {
+    const { child, allow } = stubbornChild()
+    const { delegate } = makeDelegate({ spawn: () => child })
+    expect(await delegate.startSession('a', REQUEST, RTP)).toBe(true)
+
+    delegate.stopAll()
+
+    // Both counts are the point: the orphan is still ours to retry, and it
+    // still counts against the cap because it is genuinely still running.
+    expect(delegate.activeCount).toBe(1)
+    expect(FfmpegProcess.activeCount).toBe(1)
+
+    allow()
+    delegate.stopAll()
+
+    expect(delegate.activeCount).toBe(0)
+    expect(FfmpegProcess.activeCount).toBe(0)
+  })
+
+  it('is retried by stopSession too, not only by the shutdown drain', async () => {
+    const { child, allow } = stubbornChild()
+    const { delegate } = makeDelegate({ spawn: () => child })
+    await delegate.startSession('a', REQUEST, RTP)
+
+    delegate.stopSession('a')
+    expect(delegate.activeCount).toBe(1)
+
+    allow()
+    delegate.stopSession('a')
+    expect(delegate.activeCount).toBe(0)
+    expect(FfmpegProcess.activeCount).toBe(0)
+  })
+
+  it('drops a process that exits on its own and releases its slot', async () => {
+    const child = fakeChild()
+    const { delegate } = makeDelegate({ spawn: () => child })
+    await delegate.startSession('a', REQUEST, RTP)
+    expect(delegate.activeCount).toBe(1)
+
+    // ffmpeg died by itself — nothing called stop(), so only onExit can clear
+    // the entry. A map that only shrinks on stop() would grow without bound.
+    ;(child as unknown as EventEmitter).emit('close', 0)
+
+    expect(delegate.activeCount).toBe(0)
+    expect(FfmpegProcess.activeCount).toBe(0)
+  })
+})
+
+// HomeKit reuses session ids, so a retained orphan and a fresh session can end
+// up sharing one. The orphan's exit must not evict the live session with it.
+describe('a late exit from an orphaned process', () => {
+  it('does not untrack the session that reused its id', async () => {
+    const orphan = new EventEmitter() as EventEmitter & { stderr: EventEmitter, kill: () => boolean }
+    orphan.stderr = new EventEmitter()
+    orphan.kill = () => false
+    const live = fakeChild()
+    const children = [orphan as unknown as ChildProcess, live]
+    const { delegate } = makeDelegate({ spawn: () => children.shift()! })
+
+    await delegate.startSession('a', REQUEST, RTP)
+    delegate.stopSession('a')
+    await delegate.startSession('a', REQUEST, RTP)
+
+    ;(orphan as EventEmitter).emit('close', 0)
+
+    // The live session is still there — and still the one a stop request kills.
+    expect(delegate.activeCount).toBe(1)
+    delegate.stopAll()
+    expect(delegate.activeCount).toBe(0)
+    expect(FfmpegProcess.activeCount).toBe(0)
   })
 })

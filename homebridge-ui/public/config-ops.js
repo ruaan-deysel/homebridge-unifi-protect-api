@@ -64,8 +64,13 @@ export function setGlobalSetting(config, key, value) {
   return next
 }
 
-/** Per-device defaults, derived from the global defaults. */
-function defaultFor(config, key) {
+/**
+ * Per-device defaults, derived from the global defaults. Exported because
+ * index.html needs the same answer when it renders a checkbox unchecked; a
+ * second copy of this table there would drift and write overrides that equal
+ * the default.
+ */
+export function defaultFor(config, key) {
   if (key === 'expose')
     return config.defaults.exposeNewDevices
   if (key === 'quality')
@@ -77,7 +82,7 @@ function defaultFor(config, key) {
   // Both default off with no global override, exactly as `settingsFor` resolves
   // them in src/config.ts — audio deliberately has no console-wide default,
   // since whether recording it is legal depends on where each camera points.
-  if (key === 'talkback' || key === 'audio')
+  if (key === 'talkback' || key === 'audio' || key === 'packageCamera')
     return false
   return undefined
 }
@@ -158,6 +163,60 @@ export function renderQualitySelect(doc, device, value) {
   }
   wrap.append(select)
   return { wrap, select }
+}
+
+/**
+ * The package-toggle label. It names the frame rate deliberately: enabling this
+ * creates a second accessory for one physical device, and the console serves
+ * that lens at 2 fps — someone who enables it expecting normal video should be
+ * told first, not surprised after the fact.
+ */
+export const PACKAGE_LABEL = 'Package camera (separate accessory, 2 fps)'
+
+/**
+ * Only cameras, and only where `hasPackageCamera` is `true` on the device
+ * itself — a TOP-LEVEL field on the discover payload (not under
+ * `featureFlags`), read straight off what the console already sent. No probe:
+ * nothing here makes a request to learn whether the lens exists.
+ */
+export function shouldOfferPackageCamera(device) {
+  return device.type === 'camera' && device.hasPackageCamera === true
+}
+
+/**
+ * Which per-device checkboxes a camera gets, in render order — index.html
+ * renders exactly this list and nothing else, so the package toggle's
+ * appearance is decided in tested code rather than in an untestable inline
+ * branch. `comingLater` renders the control inert: the setting exists in the
+ * schema but nothing reads it yet.
+ */
+export function cameraToggles(device) {
+  const toggles = []
+  if (device.hasMic)
+    toggles.push({ key: 'audio', label: AUDIO_LABEL })
+  toggles.push({ key: 'hksv', label: 'HomeKit Secure Video', comingLater: true })
+  if (device.hasSpeaker)
+    toggles.push({ key: 'talkback', label: 'Two-way audio', comingLater: true })
+  if (shouldOfferPackageCamera(device))
+    toggles.push({ key: 'packageCamera', label: PACKAGE_LABEL })
+  return toggles
+}
+
+/**
+ * The checkbox every per-device toggle is built from, this one included. Lives
+ * here rather than inline in index.html so the injection guard can reach it:
+ * `id` embeds `device.id` and the label can carry console-supplied text, both
+ * attacker-controlled, and both land as property assignments — never markup.
+ * The caller owns `checked`, `disabled` and the change listener.
+ */
+export function renderToggle(doc, id, label) {
+  const wrap = doc.createElement('label')
+  wrap.setAttribute('for', id)
+  const input = doc.createElement('input')
+  input.type = 'checkbox'
+  input.id = id
+  wrap.append(input, ` ${label}`)
+  return { wrap, input }
 }
 
 /**

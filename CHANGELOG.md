@@ -6,6 +6,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- TypeScript is pinned to the 6.x line (`^6.0.3`), matching what Homebridge 2.2.1 itself
+  builds against. npm's `latest` tag is now TypeScript 7, whose native compiler is too new
+  to assume Homebridge supports it; the caret keeps 7 out.
+
 ### Added
 - Motion sensors for every camera, driven by the live event stream rather than polling.
   `GET /v1/events` does not exist in the Integration API, so a lost end-frame can never be
@@ -46,6 +51,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hardware encoding, two with software. Five cameras therefore share one budget instead of
   each getting its own, and a request past the cap is refused with a logged reason instead
   of overloading the machine.
+- The package lens appears in HomeKit as its own camera, named "<camera> Package Camera",
+  for cameras whose payload reports the lens (`hasPackageCamera`) and whose owner switched
+  it on in the settings. It is bridged like every other accessory, is a camera and nothing
+  else — the package motion sensor stays on the main accessory, so existing automations are
+  untouched — and it advertises a range of 4:3 sizes and no audio. Its snapshots come from
+  the package channel, so the tile shows the downward view rather than the main lens.
+  Switching the setting off removes it again on the next discovery.
+- The package lens transcode is scaled to whatever size HomeKit asks for, and its frame
+  rate padded to the rate HomeKit negotiated, so every advertised size is one the plugin
+  actually delivers. That path decodes in software and scales before handing the frame to
+  the hardware encoder: scaling on the GPU fails outright on the reference host, and
+  decoding this lens in software costs almost nothing because the console serves it at
+  2 fps.
+- The Doorbell's package lens can now be streamed like any other camera. It has one stream
+  rather than a choice of substreams, and the console serves it at 1600×1200/2 fps rather
+  than 16:9/30 fps like every other lens, so ffmpeg duplicates frames up to the rate
+  HomeKit negotiated — without that, HomeKit can mistake a genuine 2 fps feed for a stalled
+  stream. It never carries audio, since the lens shares its microphone with the main camera
+  and a second identical audio source helps no one.
 - Live view can carry audio, sent as its own stream alongside the video and transcoded to
   Opus, which HomeKit accepts and which the hardware-capable ffmpeg can encode. AAC-ELD is
   used instead when a build has `libfdk_aac` but not `libopus`. Audio is **off by default
@@ -89,8 +113,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   teardown so a dropped viewer can never leave a transcode running indefinitely. ffmpeg's
   own failure output is redacted before it is ever logged, since the command line it echoes
   on error contains the RTSPS stream's auth token.
+- New per-camera setting: `packageCamera`, off by default. The settings UI offers it only
+  for a camera the console reports a package lens on, and its label states plainly that the
+  console serves that lens at 2 fps — enabling it adds a second HomeKit accessory for one
+  physical device, so nobody should be surprised by either consequence after the fact.
 
 ### Fixed
+- The video size and frame rate a controller negotiates are now validated before they
+  reach ffmpeg. HAP does not check a controller's selection against the resolutions the
+  accessory advertised, so a malformed one asking for 0 fps produced `-r 0`, which ffmpeg
+  refuses outright, and an absurd size produced a scale filter that allocated before it
+  failed. Both are now clamped into the advertised range rather than rejected, so the
+  viewer gets a slightly different picture instead of no picture.
+- An ffmpeg process whose kill signal was not delivered is no longer dropped. It used to
+  be removed from the session map regardless, leaving nobody able to retry: the orphan
+  kept running, held a decode open, and kept its slot in the host-wide stream cap for the
+  rest of the uptime, so live views were eventually refused for corpses. A process that
+  survives its kill now stays tracked until it genuinely exits.
+- The package camera would not stream at all: HomeKit showed "No Response" for every live
+  view, with nothing logged anywhere to explain it. It had been advertising a single
+  1600×1200 at 15 fps, which HomeKit rejects on two counts — every advertised stream must
+  offer at least 24 fps, and 1600×1200 is not one of the 4:3 sizes it accepts. Nothing in
+  the stack validates this, so the refusal was silent: HomeKit simply never asked for
+  video, and no request ever reached the plugin. It now advertises a range of accepted 4:3
+  sizes at 30 fps, and scales the picture to whichever one HomeKit picks.
+- A package camera already in HomeKit is no longer unregistered when the plugin starts
+  without a usable ffmpeg. It used to be removed immediately — not after the usual
+  confirmation window — so a single restart with ffmpeg temporarily missing permanently
+  lost the accessory's room, scenes and automations. It is now kept without live view,
+  exactly as the main cameras already were. Switching the setting off, or the lens
+  genuinely disappearing, still removes it at once.
+- The package camera reports its manufacturer, model and serial number to HomeKit
+  instead of showing the placeholder values on its tile. Its serial is distinct from the
+  main camera's, since the two are separate accessories for one physical device.
 - Live view SSRCs are now positive signed 32-bit values. The previous range reached
   0x100000000, which HomeKit and ffmpeg both reject, so a fraction of streams simply never
   loaded — intermittently, and with nothing in the log to explain it.
