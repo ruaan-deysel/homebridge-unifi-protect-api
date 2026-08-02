@@ -99,6 +99,14 @@ export interface StreamArgs {
   video: RtpTarget
   /** Absent means video-only: either the camera opted out or no codec is available. */
   audio?: AudioStreamArgs
+  /**
+   * Output frame rate. Supplied only for the package lens, which the console
+   * serves at 2 fps — HomeKit negotiates a rate and can treat a 2 fps feed as a
+   * stalled stream, so ffmpeg duplicates frames up to this rate. It does that
+   * unprompted anyway (a 15 s sample reported `dup=8`), and duplicated frames
+   * compress to almost nothing.
+   */
+  fps?: number
 }
 
 const SRTP_SUITE = 'AES_CM_128_HMAC_SHA1_80'
@@ -140,6 +148,9 @@ export function buildFfmpegArgs(caps: FfmpegCapabilities, s: StreamArgs): string
     s.video.key.toString('base64'),
     destination(s.address, s.video, 1316),
   ]
+
+  if (s.fps !== undefined)
+    video.push('-r', String(s.fps))
 
   if (!s.audio)
     return [...input, ...video]
@@ -196,6 +207,12 @@ interface DelegateOptions {
   maxStreams?: number
   /** Injected in tests; production lists encoders with the probed ffmpeg. */
   run?: RunFfmpeg
+  /**
+   * Set to 'package' for the Doorbell's downward lens. It is a CHANNEL, not a
+   * quality tier: the package stream has exactly one variant, so substream
+   * selection does not apply and `selectQuality` is never consulted.
+   */
+  channel?: 'package'
 }
 
 /** What prepareStream knows. The payload types only arrive with the start request. */
@@ -337,10 +354,22 @@ export class StreamingDelegate implements CameraStreamingDelegate {
    * on the client, where no unit test is watching.
    */
   async audioStreamingOptions(): Promise<AudioStreamingOptions | undefined> {
+    // The package lens carries audio, but from the SAME microphone as the main
+    // lens. Two identical audio sources on one physical device benefits nobody.
+    if (this.options.channel === 'package')
+      return undefined
     if (!this.options.settings().audio)
       return undefined
     const codec = await this.probeAudioCodec()
     return codec ? { codecs: [audioStreamingCodec(codec)] } : undefined
+  }
+
+  /** The package lens has one stream; every other camera selects a substream. */
+  async streamUrlFor(request: { width: number, height: number }): Promise<string> {
+    if (this.options.channel === 'package')
+      return this.options.urls.get(this.options.deviceId, 'package')
+    const quality = selectQuality(request.width, request.height, this.options.settings().quality)
+    return this.options.urls.get(this.options.deviceId, quality)
   }
 
   /** Audio for this session, or undefined when it is off or cannot be encoded. */
@@ -373,12 +402,14 @@ export class StreamingDelegate implements CameraStreamingDelegate {
     reservedSlots++
     try {
       const settings = this.options.settings()
-      const quality = selectQuality(request.width, request.height, settings.quality)
-      const audio = await this.audioFor(request, rtp, settings.audio)
+      const isPackage = this.options.channel === 'package'
+      // No audio on the package path, whatever the camera's audio setting says
+      // — see audioStreamingOptions for why.
+      const audio = await this.audioFor(request, rtp, settings.audio && !isPackage)
 
       let url: string
       try {
-        url = await this.options.urls.get(this.options.deviceId, quality)
+        url = await this.streamUrlFor(request)
       }
       catch (error) {
         this.options.log.warn(`Could not start a stream for "${this.options.label}": ${errorMessage(error)}`)
@@ -401,6 +432,7 @@ export class StreamingDelegate implements CameraStreamingDelegate {
         address: rtp.address,
         video: { ...rtp.video, payloadType: request.videoPayloadType },
         audio,
+        fps: isPackage ? 15 : undefined,
       })
       const proc = new FfmpegProcess({
         path: this.options.caps.path,
@@ -425,7 +457,8 @@ export class StreamingDelegate implements CameraStreamingDelegate {
         return false
       }
       this.sessions.set(sessionId, proc)
-      this.options.log.info(`Live view started for "${this.options.label}" (${quality} substream, ${audio ? 'with' : 'no'} audio).`)
+      const channelDescription = isPackage ? 'package' : selectQuality(request.width, request.height, settings.quality)
+      this.options.log.info(`Live view started for "${this.options.label}" (${channelDescription} substream, ${audio ? 'with' : 'no'} audio).`)
       return true
     }
     finally {

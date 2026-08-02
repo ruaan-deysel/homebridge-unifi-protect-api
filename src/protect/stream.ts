@@ -25,7 +25,7 @@ export class StreamUrls {
     private readonly ttlMs = 5 * 60_000,
   ) {}
 
-  async get(deviceId: string, quality: Quality): Promise<string> {
+  async get(deviceId: string, quality: Quality | 'package'): Promise<string> {
     const key = `${deviceId}:${quality}`
     const hit = this.cache.get(key)
     // performance.now(), never Date.now(): this hardware NTP-steps its wall
@@ -48,7 +48,7 @@ export class StreamUrls {
     return promise
   }
 
-  private async fetch(deviceId: string, quality: Quality, key: string): Promise<string> {
+  private async fetch(deviceId: string, quality: Quality | 'package', key: string): Promise<string> {
     const generation = this.generation
     let url: string | undefined
     try {

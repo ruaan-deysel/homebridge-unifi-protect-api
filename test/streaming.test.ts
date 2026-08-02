@@ -681,3 +681,64 @@ describe('streamingDelegate hap wiring', () => {
     expect(spawn).not.toHaveBeenCalled()
   })
 })
+
+const PKG_CAPS = { path: '/usr/bin/ffmpeg', encoder: 'h264_vaapi' as const, hwaccel: 'vaapi' as const }
+const PKG_URL = 'rtsps://192.0.2.1:7441/pkg?token=SENTINEL'
+
+function pkgTarget() {
+  return { port: 5000, ssrc: 1, payloadType: 99, key: Buffer.alloc(30), localPort: 6000 }
+}
+
+describe('package channel', () => {
+  const log = { info: vi.fn(), warn: vi.fn(), debug: vi.fn() }
+
+  function makeDelegate(channel?: 'package') {
+    const urls = { get: vi.fn(async () => PKG_URL), hasPackageCamera: vi.fn(async () => true) }
+    const spawn = vi.fn(() => {
+      throw new Error('should not spawn in this test')
+    })
+    const delegate = new StreamingDelegate({
+      deviceId: 'cam1',
+      label: 'Doorbell Package Camera',
+      log,
+      client: { getSnapshot: vi.fn(async () => Buffer.from('jpeg')) } as never,
+      urls: urls as never,
+      caps: PKG_CAPS,
+      channel,
+      settings: () => ({ quality: 'auto', audio: true }),
+      spawn: spawn as never,
+    })
+    return { delegate, urls }
+  }
+
+  it('requests the package channel rather than a selected substream', async () => {
+    const { delegate, urls } = makeDelegate('package')
+    await delegate.streamUrlFor({ width: 1920, height: 1080 })
+    expect(urls.get).toHaveBeenCalledWith('cam1', 'package')
+  })
+
+  it('still selects a substream when no channel is given', async () => {
+    const { delegate, urls } = makeDelegate()
+    await delegate.streamUrlFor({ width: 1280, height: 720 })
+    expect(urls.get).toHaveBeenCalledWith('cam1', 'medium')
+  })
+
+  it('never requests audio on a package delegate, even when the camera opted in', async () => {
+    const { delegate } = makeDelegate('package')
+    expect(await delegate.audioStreamingOptions()).toBeUndefined()
+  })
+})
+
+describe('buildFfmpegArgs frame-rate padding', () => {
+  const base = { url: PKG_URL, bitrate: 800, address: '192.0.2.9', video: pkgTarget() }
+
+  it('emits -r when an fps is supplied', () => {
+    const args = buildFfmpegArgs(PKG_CAPS, { ...base, fps: 15 })
+    expect(args).toContain('-r')
+    expect(args[args.indexOf('-r') + 1]).toBe('15')
+  })
+
+  it('omits -r when no fps is supplied', () => {
+    expect(buildFfmpegArgs(PKG_CAPS, base)).not.toContain('-r')
+  })
+})
