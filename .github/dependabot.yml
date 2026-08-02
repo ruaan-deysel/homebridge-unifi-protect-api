@@ -37,6 +37,12 @@ updates:
       - dependency-name: homebridge
         update-types:
           - version-update:semver-major
+      # Pinned to the 6.x line because that is what Homebridge 2.2.1 builds
+      # against. TypeScript 7 is the native compiler rewrite; adopting it is a
+      # deliberate decision to take once Homebridge does, not a dependency bump.
+      - dependency-name: typescript
+        update-types:
+          - version-update:semver-major
 
   # Actions pinned in workflows go stale silently and are a real supply-chain
   # surface — a compromised action runs with repository credentials.
