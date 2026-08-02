@@ -88,4 +88,15 @@ describe('talkbackRelay', () => {
     await new Promise(r => setImmediate(r))
     expect(h.forwarded).toEqual([])
   })
+
+  it('stops forwarding once closed, even with a session already open', async () => {
+    const h = harness(async () => 5000)
+    h.socket.emit('message', Buffer.from([1]))
+    await new Promise(r => setImmediate(r))
+    expect(h.forwarded).toHaveLength(1)
+    h.relay.close()
+    h.socket.emit('message', Buffer.from([2]))
+    await new Promise(r => setImmediate(r))
+    expect(h.forwarded).toHaveLength(1)
+  })
 })
