@@ -832,17 +832,19 @@ describe('package session honours what homekit negotiated', () => {
     const { delegate, spawn } = makeDelegate({ channel: 'package' })
     expect(await delegate.startSession('a', negotiated, RTP)).toBe(true)
     const args = argvOf(spawn)
+    // Torn down BEFORE the assertions: a failing expect would otherwise leave
+    // the process-wide count non-zero and fail every later test with it.
+    delegate.stopAll()
     expect(args[args.indexOf('-vf') + 1]).toBe('scale_vaapi=w=1024:h=768')
     expect(args[args.indexOf('-r') + 1]).toBe('24')
-    delegate.stopAll()
   })
 
   it('leaves the main-camera path with neither a filter nor a forced rate', async () => {
     const { delegate, spawn } = makeDelegate()
     expect(await delegate.startSession('a', negotiated, RTP)).toBe(true)
     const args = argvOf(spawn)
+    delegate.stopAll()
     expect(args).not.toContain('-vf')
     expect(args).not.toContain('-r')
-    delegate.stopAll()
   })
 })
