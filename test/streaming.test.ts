@@ -796,10 +796,15 @@ const HOMEKIT_AUDIO_KEY = Buffer.concat([Buffer.alloc(16, 3), Buffer.alloc(14, 4
 async function startTalkbackSession({ ipv6, ...overrides }: DelegateOverrides & { ipv6?: boolean } = {}) {
   const socket = fakeSocket(6100, ipv6 ? 'IPv6' : 'IPv4')
   const children: ChildRecord[] = []
+  // The FIRST bind is the socket HomeKit talks to and is held; every later one
+  // is the encoder's port reservation, which is closed again immediately.
+  let nextPort = 6100
   const made = makeDelegate({
     talkback: true,
     hasSpeaker: true,
-    bind: async () => ({ socket: socket as never, port: 6100 }),
+    bind: async () => (nextPort++ === 6100
+      ? { socket: socket as never, port: 6100 }
+      : { socket: fakeSocket(nextPort - 1) as never, port: nextPort - 1 }),
     spawn: () => {
       const record: ChildRecord = { stdin: '', killed: false }
       children.push(record)
@@ -894,10 +899,13 @@ describe('talkback', () => {
   // nothing at all — silently.
   it('keeps the sdp, the reserved port and the forward destination in one family on ipv6', async () => {
     const { spawn, socket, children, delegate, sessionId, bind } = await startTalkbackSession({ ipv6: true })
-    expect(bind).toHaveBeenCalledWith(true)
     const packet = Buffer.from([1, 2, 3])
     socket.emit('message', packet)
     await until(() => socket.send.mock.calls.length > 0)
+    // BOTH binds — the held socket and the encoder's port reservation — asked
+    // for the v6 family. A v4-reserved port number is no proof the same port is
+    // free on udp6, which is where ffmpeg is about to bind it.
+    expect(bind.mock.calls).toEqual([[true], [true]])
     const sdp = children[1]!.stdin
     expect(sdp).toContain('c=IN IP6 ::1')
     expect(sdp).not.toContain('127.0.0.1')
@@ -910,9 +918,9 @@ describe('talkback', () => {
 
   it('uses the v4 loopback for a v4 session', async () => {
     const { socket, children, delegate, sessionId, bind } = await startTalkbackSession()
-    expect(bind).toHaveBeenCalledWith(false)
     socket.emit('message', Buffer.from([1]))
     await until(() => socket.send.mock.calls.length > 0)
+    expect(bind.mock.calls).toEqual([[false], [false]])
     expect(children[1]!.stdin).toContain('c=IN IP4 127.0.0.1')
     expect(socket.send.mock.calls[0]![2]).toBe('127.0.0.1')
     delegate.stopSession(sessionId)

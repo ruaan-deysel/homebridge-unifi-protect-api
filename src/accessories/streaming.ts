@@ -736,9 +736,13 @@ export class StreamingDelegate implements CameraStreamingDelegate {
    */
   private async openTalkback(state: TalkbackSession, audio: RtpTarget, ipv6: boolean): Promise<number | undefined> {
     const session = await this.options.client.createTalkbackSession(this.options.deviceId)
-    // Reserved in the SAME family the relay will send from — a v4 port number is
-    // no use to a udp6 socket.
-    const listenPort = await reservePort(ipv6)
+    // Reserved in the SAME family the relay will send from: a port proven free
+    // on udp4 says nothing about udp6, and ffmpeg is about to bind it as the v6
+    // loopback. bind-and-close rather than reservePort so the family is
+    // observable — see the ipv6 test.
+    const reservation = await (this.options.bind ?? bindPort)(ipv6)
+    closeQuietly(reservation.socket)
+    const listenPort = reservation.port
     const proc = new FfmpegProcess({
       path: this.options.caps.path,
       // The rate the CONSOLE asked for, never a constant: the reference doorbell
