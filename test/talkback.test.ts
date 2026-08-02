@@ -1,7 +1,7 @@
 import { Buffer } from 'node:buffer'
 import { EventEmitter } from 'node:events'
 import { describe, expect, it } from 'vitest'
-import { TALKBACK_BUFFER_LIMIT, TalkbackRelay } from '../src/protect/talkback.js'
+import { buildTalkbackArgs, TALKBACK_BUFFER_LIMIT, TalkbackRelay, talkbackSdp } from '../src/protect/talkback.js'
 
 function harness(open: () => Promise<number | undefined>) {
   const socket = new EventEmitter() as EventEmitter & { close: () => void }
@@ -98,5 +98,43 @@ describe('talkbackRelay', () => {
     h.socket.emit('message', Buffer.from([2]))
     await new Promise(r => setImmediate(r))
     expect(h.forwarded).toHaveLength(1)
+  })
+})
+
+const KEY = Buffer.alloc(30, 7)
+
+describe('talkbackSdp', () => {
+  it('describes the inbound srtp stream', () => {
+    const sdp = talkbackSdp({ listenPort: 5000, payloadType: 110, sampleRate: 24000, key: KEY })
+    expect(sdp).toContain('m=audio 5000 RTP/SAVP 110')
+    expect(sdp).toContain('a=rtpmap:110 opus/24000/2')
+    expect(sdp).toContain(`a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:${KEY.toString('base64')}`)
+  })
+})
+
+describe('buildTalkbackArgs', () => {
+  it('reads the sdp from stdin and writes to the console destination', () => {
+    const args = buildTalkbackArgs({ destination: 'rtp://192.168.10.9:7004', sampleRate: 24000 })
+    expect(args).toContain('pipe:0')
+    expect(args[args.length - 1]).toBe('rtp://192.168.10.9:7004')
+    expect(args).toContain('libopus')
+  })
+
+  it('puts every output option before the destination', () => {
+    const args = buildTalkbackArgs({ destination: 'rtp://192.168.10.9:7004', sampleRate: 24000 })
+    // '-f' appears twice: '-f sdp' (input) and '-f rtp' (output). The output
+    // one is the one that must sit between the output options and the
+    // destination, so it is the LAST occurrence, not the first.
+    const outputFormatFlag = args.lastIndexOf('-f')
+    expect(outputFormatFlag).toBeLessThan(args.indexOf('rtp://192.168.10.9:7004'))
+    expect(args.indexOf('-c:a')).toBeLessThan(outputFormatFlag)
+    expect(args.indexOf('-ar')).toBeLessThan(outputFormatFlag)
+  })
+
+  it('whitelists the protocols the sdp refers to', () => {
+    const args = buildTalkbackArgs({ destination: 'rtp://h:1', sampleRate: 24000 })
+    const list = args[args.indexOf('-protocol_whitelist') + 1] ?? ''
+    for (const p of ['pipe', 'udp', 'rtp', 'srtp'])
+      expect(list.split(',')).toContain(p)
   })
 })

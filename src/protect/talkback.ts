@@ -83,3 +83,78 @@ export class TalkbackRelay {
     this.buffered = []
   }
 }
+
+export interface TalkbackSdpOptions {
+  /** The loopback port ffmpeg listens on — the relay forwards here. */
+  listenPort: number
+  /** HomeKit's chosen payload type, from the start request. */
+  payloadType: number
+  /** HomeKit's chosen sample rate in Hz. */
+  sampleRate: number
+  /** srtp_key ‖ srtp_salt as HomeKit sent them. */
+  key: Buffer
+}
+
+/**
+ * Raw RTP carries no format metadata, so ffmpeg cannot decode an SRTP stream
+ * from a URL alone — it needs an SDP describing the payload and the key. This
+ * is fed on stdin rather than written to a file: it contains the session key,
+ * and a temp file would put that secret on disk.
+ *
+ * `RTP/SAVP` and the `a=crypto` line are what make it SRTP rather than RTP.
+ * Opus is always declared with two channels in an SDP even when the stream is
+ * mono; that is the RFC 7587 convention, not a mistake.
+ */
+export function talkbackSdp(options: TalkbackSdpOptions): string {
+  return [
+    'v=0',
+    'o=- 0 0 IN IP4 127.0.0.1',
+    's=Talkback',
+    'c=IN IP4 127.0.0.1',
+    't=0 0',
+    `m=audio ${options.listenPort} RTP/SAVP ${options.payloadType}`,
+    `a=rtpmap:${options.payloadType} opus/${options.sampleRate}/2`,
+    `a=fmtp:${options.payloadType} minptime=10;useinbandfec=1`,
+    `a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:${options.key.toString('base64')}`,
+    '',
+  ].join('\r\n')
+}
+
+export interface TalkbackArgsOptions {
+  /** The console's talkback URL, e.g. rtp://192.168.10.9:7004. */
+  destination: string
+  /** The rate the CONSOLE declared it wants (24000 on the reference doorbell). */
+  sampleRate: number
+}
+
+/**
+ * Decodes HomeKit's SRTP and re-emits Opus RTP at whatever the console asked
+ * for. Output options precede `-f rtp` and the destination: ffmpeg applies them
+ * to the output that FOLLOWS, and anything after the URL is silently ignored —
+ * a defect this repo has already shipped once with `-r`.
+ */
+export function buildTalkbackArgs(options: TalkbackArgsOptions): string[] {
+  return [
+    '-hide_banner',
+    '-loglevel',
+    'warning',
+    // ffmpeg refuses protocols an SDP refers to unless they are listed.
+    '-protocol_whitelist',
+    'pipe,udp,rtp,srtp',
+    '-f',
+    'sdp',
+    '-i',
+    'pipe:0',
+    '-c:a',
+    'libopus',
+    '-ar',
+    String(options.sampleRate),
+    '-ac',
+    '1',
+    '-application',
+    'voip',
+    '-f',
+    'rtp',
+    options.destination,
+  ]
+}
