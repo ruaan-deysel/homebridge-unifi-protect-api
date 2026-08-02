@@ -513,6 +513,10 @@ describe('recordingDelegate encoder', () => {
     await vi.advanceTimersByTimeAsync(RESTART_DELAY_MS)
     await flush()
     expect(h.spawn).toHaveBeenCalledTimes(1)
+    // No restart was even attempted: startEncoder re-checks `active` after its
+    // await, so counting spawns alone would pass with the restart scheduled.
+    // A second stream-url fetch is what proves the retry was never begun.
+    expect(h.get).toHaveBeenCalledTimes(1)
   })
 
   it('gives up after repeated short-lived runs instead of respawning forever', async () => {
