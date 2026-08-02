@@ -34,6 +34,25 @@ describe('fmp4Splitter', () => {
     expect(out).toEqual(['init'])
   })
 
+  it('waits for a box split after the header, mid-payload', () => {
+    const out: string[] = []
+    const split = new Fmp4Splitter(kind => out.push(kind))
+    const whole = Buffer.concat([box('ftyp'), box('moov', Buffer.from('abcdefgh'))])
+    // Split 10 bytes in: past the 8-byte header of the second box, but before
+    // its payload is complete.
+    split.push(whole.subarray(0, 10))
+    expect(out).toEqual([])
+    split.push(whole.subarray(10))
+    expect(out).toEqual(['init'])
+  })
+
+  it('ignores an mdat with no preceding moof rather than emitting a bare fragment', () => {
+    const out: string[] = []
+    const split = new Fmp4Splitter(kind => out.push(kind))
+    split.push(Buffer.concat([box('ftyp'), box('moov'), box('mdat')]))
+    expect(out).toEqual(['init'])
+  })
+
   it('rejects a nonsense box length instead of looping', () => {
     const bad = Buffer.alloc(8)
     bad.writeUInt32BE(3, 0)
