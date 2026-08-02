@@ -1120,6 +1120,46 @@ describe('talkback', () => {
     expect(spawn).toHaveBeenCalledTimes(1)
   })
 
+  // The second half of the same guard, isolated. In the tap-away case above
+  // startSession already refuses, so the arm site is never reached; this is the
+  // case where the start SUCCEEDS but the prepared entry it began with is no
+  // longer the current one. Arming then would bind the relay to a socket
+  // nothing owns any more — the stale one, while HomeKit talks to the new port.
+  it('never arms a socket from a prepared entry that has since been replaced', async () => {
+    const stale = fakeSocket(6100)
+    const fresh = fakeSocket(6200)
+    const sockets = [stale, fresh]
+    let release: (url: string) => void = () => {}
+    const { delegate, spawn, get, createTalkbackSession } = makeDelegate({
+      talkback: true,
+      hasSpeaker: true,
+      bind: async () => {
+        const socket = sockets.shift()!
+        return { socket: socket as never, port: socket.address().port }
+      },
+      url: () => new Promise<string>((resolve) => {
+        release = resolve
+      }),
+    })
+    const prepare = () => new Promise<PrepareStreamResponse>((resolve, reject) => {
+      delegate.prepareStream(prepareRequest(), (error, response) => (response ? resolve(response) : reject(error)))
+    })
+    await prepare()
+    const outcome = new Promise<unknown>(resolve => delegate.handleStreamRequest(startRequest(), resolve))
+    await until(() => get.mock.calls.length === 1)
+    // A re-prepare on the same session id, landing while the start is parked.
+    expect((await prepare()).audio).toMatchObject({ port: 6200 })
+    release(URL)
+    expect(await outcome).toBeUndefined()
+
+    stale.emit('message', rtp(1))
+    fresh.emit('message', rtp(1))
+    await new Promise(resolve => setTimeout(resolve, 5))
+    expect(createTalkbackSession).not.toHaveBeenCalled()
+    expect(spawn).toHaveBeenCalledTimes(1)
+    delegate.stopSession('session-1')
+  })
+
   // hap-nodejs mints a fresh session id per attempt, so against a flapping
   // console every retry used to leave one more bound socket behind.
   it('releases the held socket when the start fails', async () => {
