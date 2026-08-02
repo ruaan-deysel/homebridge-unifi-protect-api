@@ -148,6 +148,7 @@ const URL = `rtsps://192.0.2.1:7441/live?token=${SECRET}`
 function fakeSpawn() {
   const proc = Object.assign(new EventEmitter(), {
     stderr: new EventEmitter(),
+    stdin: { write: vi.fn(), end: vi.fn() },
     // Real child.kill() returns true once the signal was actually delivered.
     kill: vi.fn(() => true),
     killed: false,
@@ -426,5 +427,26 @@ describe('ffmpegProcess', () => {
     p2.stop()
     proc2.emit('close', null)
     expect(FfmpegProcess.activeCount).toBe(before)
+  })
+
+  it('writes the stdin payload and ends the stream', () => {
+    const { proc, spawn } = fakeSpawn()
+    new FfmpegProcess({ path: '/usr/bin/ffmpeg', args: [], log, spawn, stdin: 'v=0\r\n' }).start()
+    expect(proc.stdin.write).toHaveBeenCalledExactlyOnceWith('v=0\r\n')
+    expect(proc.stdin.end).toHaveBeenCalledOnce()
+  })
+
+  it('leaves stdin alone when no payload is given', () => {
+    const { proc, spawn } = fakeSpawn()
+    new FfmpegProcess({ path: '/usr/bin/ffmpeg', args: [], log, spawn }).start()
+    expect(proc.stdin.write).not.toHaveBeenCalled()
+    expect(proc.stdin.end).not.toHaveBeenCalled()
+  })
+
+  it('does not throw when the child has no stdin stream', () => {
+    const { proc, spawn } = fakeSpawn()
+    // @ts-expect-error simulating a ChildProcess whose stdin is null, as Node's types allow
+    proc.stdin = undefined
+    expect(() => new FfmpegProcess({ path: '/usr/bin/ffmpeg', args: [], log, spawn, stdin: 'v=0\r\n' }).start()).not.toThrow()
   })
 })

@@ -190,6 +190,12 @@ interface FfmpegProcessOptions {
   spawn?: SpawnFn
   /** Called once when the process ends, however it ends. */
   onExit?: () => void
+  /**
+   * Written to the child's stdin at spawn, then closed. The talkback encoder
+   * reads an SDP this way: raw RTP carries no format metadata, so ffmpeg cannot
+   * decode an SRTP stream without one.
+   */
+  stdin?: string
 }
 
 /** Spawns, tracks and kills a single ffmpeg process. */
@@ -227,6 +233,11 @@ export class FfmpegProcess {
     FfmpegProcess.active++
 
     child.stderr?.on('data', (chunk: Buffer) => this.absorb(chunk.toString()))
+
+    if (this.options.stdin !== undefined) {
+      child.stdin?.write(this.options.stdin)
+      child.stdin?.end()
+    }
 
     child.on('close', (code: number | null) => {
       this.flushStderr()
