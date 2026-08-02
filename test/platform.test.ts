@@ -1225,6 +1225,32 @@ describe('uniFiProtectPlatform', () => {
     expect(doorbell.services.some(s => s.type === S.Microphone)).toBe(true)
   })
 
+  // Talkback and `audio` are independent: talkback must advertise codecs (and
+  // twoWayAudio) even with the microphone left off, because hap-nodejs marks a
+  // stream video-only, disabling the audio machinery talkback needs, when no
+  // codec is advertised at all. Sending the microphone stays gated elsewhere.
+  it('advertises two-way audio for a talkback camera even with the microphone off', async () => {
+    const talkbackOnly = { ...validConfig, devices: { [DOORBELL]: { talkback: true } } }
+    const { accessories } = await withCameras(cameras, { config: talkbackOnly })
+    const doorbell = doorbellOf(accessories)
+    const advertised = (controllerOf(doorbell).options.streamingOptions as { audio?: { codecs: { type: string }[], twoWayAudio?: boolean } }).audio
+
+    expect(advertised?.twoWayAudio).toBe(true)
+    expect(advertised?.codecs.length).toBeGreaterThan(0)
+  })
+
+  // `hasSpeaker` lives under `featureFlags` on the real payload (verified
+  // against the live console) — only the Doorbell has one. Enabling talkback in
+  // config on a speakerless camera must not advertise two-way audio.
+  it('never advertises two-way audio on a camera without a speaker, whatever the setting says', async () => {
+    const talkbackOnDriveway = { ...validConfig, devices: { [DRIVEWAY]: { talkback: true } } }
+    const { accessories } = await withCameras(cameras, { config: talkbackOnDriveway })
+    const driveway = accessories.find(a => a.UUID === `uuid-${DRIVEWAY}`)!
+    const advertised = (controllerOf(driveway).options.streamingOptions as { audio?: { twoWayAudio?: boolean } }).audio
+
+    expect(advertised?.twoWayAudio).toBeFalsy()
+  })
+
   // `ffmpeg -encoders` answers for the binary, not for a camera. Five cameras
   // meant five blocking execs, serially, on every discovery pass.
   it('lists the ffmpeg encoders once for the whole platform, not once per camera', async () => {
@@ -1364,16 +1390,16 @@ describe('uniFiProtectPlatform', () => {
     const config = { ...validConfig, devices: { [DOORBELL]: { quality: 'low' } } }
     const { platform, accessories } = await withCameras(cameras, { config })
     const settings = () => (delegateOf(doorbellOf(accessories)) as unknown as {
-      options: { settings: () => { quality: string, audio: boolean } }
+      options: { settings: () => { quality: string, audio: boolean, talkback: boolean } }
     }).options.settings()
 
-    expect(settings()).toEqual({ quality: 'low', audio: false })
+    expect(settings()).toEqual({ quality: 'low', audio: false, talkback: false })
 
     // What saving the settings page does: rewrite the config block in place.
     const live = (platform as unknown as { config: ProtectPluginConfig }).config
-    live.devices[DOORBELL] = { quality: 'high', audio: true }
+    live.devices[DOORBELL] = { quality: 'high', audio: true, talkback: true }
 
-    expect(settings()).toEqual({ quality: 'high', audio: true })
+    expect(settings()).toEqual({ quality: 'high', audio: true, talkback: true })
   })
 
   // -------------------------------------------------------------------------
@@ -1511,6 +1537,17 @@ describe('uniFiProtectPlatform', () => {
     // The main accessory still gets its audio — the package path must not
     // switch audio off for the camera itself.
     expect((controllerOf(doorbellOf(accessories)).options.streamingOptions as { audio?: unknown }).audio).toBeDefined()
+  })
+
+  // The package lens shares the main camera's speaker as much as its
+  // microphone — it has no speaker of its own to accept return audio on.
+  it('never advertises two-way audio on the package lens, even with talkback and audio on', async () => {
+    const config = { ...validConfig, devices: { [DOORBELL]: { packageCamera: true, audio: true, talkback: true } } }
+    const { accessories } = await withCameras(cameras, { config })
+    const pkg = packageOf(accessories)!
+    const streaming = controllerOf(pkg).options.streamingOptions as { audio?: unknown }
+
+    expect(streaming.audio).toBeUndefined()
   })
 
   it('streams the package channel, not a quality tier', async () => {

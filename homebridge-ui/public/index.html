@@ -127,8 +127,9 @@
       // honour it, so the UI never lets someone flip a setting that will
       // silently do nothing.
       if (device.type === 'camera') {
-        // Live and enabled, unlike hksv/talkback below: both of these genuinely
-        // work now, so a disabled control would be the dishonest one.
+        // Live and enabled, like audio and talkback below and unlike hksv:
+        // these genuinely work now, so a disabled control would be the
+        // dishonest one. Only hksv still carries `comingLater`.
         const { wrap, select } = renderQualitySelect(document, device, settingOf(device.id, 'quality', config.defaults.quality))
         select.addEventListener('change', async () => {
           config = setDeviceSetting(config, device.id, 'quality', select.value)

@@ -135,6 +135,13 @@ export const QUALITY_OPTIONS = [
 export const AUDIO_LABEL = 'Live view audio (restart to enable)'
 
 /**
+ * Says "restart" for the same reason AUDIO_LABEL does: HAP fixes the advertised
+ * codecs and two-way capability when the controller is configured, and
+ * `CameraController.streamingOptions` is private and read-only afterwards.
+ */
+export const TALKBACK_LABEL = 'Two-way audio (restart to enable)'
+
+/**
  * Builds the per-camera quality selector with DOM APIs only — never
  * `innerHTML`. `device.id` is console-supplied and therefore
  * attacker-controlled, exactly like the name in `renderDeviceHeader`, and it is
@@ -188,7 +195,8 @@ export function shouldOfferPackageCamera(device) {
  * renders exactly this list and nothing else, so the package toggle's
  * appearance is decided in tested code rather than in an untestable inline
  * branch. `comingLater` renders the control inert: the setting exists in the
- * schema but nothing reads it yet.
+ * schema but nothing reads it yet — which is now hksv alone. Audio, talkback
+ * and the package lens are all live; do not add the flag back to them.
  */
 export function cameraToggles(device) {
   const toggles = []
@@ -196,7 +204,7 @@ export function cameraToggles(device) {
     toggles.push({ key: 'audio', label: AUDIO_LABEL })
   toggles.push({ key: 'hksv', label: 'HomeKit Secure Video', comingLater: true })
   if (device.hasSpeaker)
-    toggles.push({ key: 'talkback', label: 'Two-way audio', comingLater: true })
+    toggles.push({ key: 'talkback', label: TALKBACK_LABEL })
   if (shouldOfferPackageCamera(device))
     toggles.push({ key: 'packageCamera', label: PACKAGE_LABEL })
   return toggles

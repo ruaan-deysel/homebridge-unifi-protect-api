@@ -36,6 +36,12 @@ export interface DiscoveredDevice {
    * Optional here only because `validate` degrades to the raw payload.
    */
   hasPackageCamera?: boolean
+  /**
+   * Feature flags. `hasSpeaker` lives HERE, not top-level — unlike
+   * `hasPackageCamera`. Optional and loosely typed because `validate` degrades
+   * to the raw payload when the schema does not match.
+   */
+  featureFlags?: { hasSpeaker?: boolean }
 }
 
 /**
@@ -588,7 +594,7 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
    * pipeline, and a controller-owned second one makes the doorbell appear twice
    * in Home.app.
    */
-  private async attachStreaming(accessory: PlatformAccessory, deviceId: string): Promise<void> {
+  private async attachStreaming(accessory: PlatformAccessory, device: DiscoveredDevice): Promise<void> {
     // No usable ffmpeg means no live view for anyone; already-wired means a
     // later discovery, and configuring a second controller would duplicate
     // every stream management service on the accessory.
@@ -599,7 +605,7 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
 
     const label = accessory.displayName
     const delegate = new StreamingDelegate({
-      deviceId,
+      deviceId: device.id,
       label,
       log: this.log,
       client: this.client,
@@ -612,9 +618,10 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
       // Read on every stream request, never snapshotted at construction, so the
       // delegate can never answer from a stale copy of the settings.
       settings: () => {
-        const settings = settingsFor(this.config!, deviceId)
-        return { quality: settings.quality, audio: settings.audio }
+        const settings = settingsFor(this.config!, device.id)
+        return { quality: settings.quality, audio: settings.audio, talkback: settings.talkback }
       },
+      hasSpeaker: device.featureFlags?.hasSpeaker === true,
     })
     // Claimed before the await below, so a discovery arriving mid-probe cannot
     // build a second controller for the same accessory.
@@ -635,7 +642,7 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
       // afterwards. So this advertisement is fixed for the life of the process:
       // turning audio OFF takes effect on the next stream request, turning it ON
       // needs the restart Homebridge already prompts for when settings are saved.
-      if (!audio && settingsFor(this.config!, deviceId).audio) {
+      if (!audio && settingsFor(this.config!, device.id).audio) {
         this.log.warn(`Audio is enabled for "${label}" but no codec HomeKit accepts could be advertised, so live view will be video-only. The ffmpeg at ${this.caps.path} can encode neither libopus nor libfdk_aac.`)
       }
 
@@ -749,7 +756,7 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
         // stream) and refuses audio outright, but the shape is shared.
         settings: () => {
           const settings = settingsFor(this.config!, device.id)
-          return { quality: settings.quality, audio: settings.audio }
+          return { quality: settings.quality, audio: settings.audio, talkback: settings.talkback }
         },
         channel: 'package',
       })
@@ -853,7 +860,7 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
         buildCameraServices(this.api, this.log, accessory, device as unknown as Record<string, unknown>, this.cameraCallbacks)
         // Cameras only: a light or a chime has nothing to stream, and a
         // CameraController on one would offer HomeKit a live view of nothing.
-        await this.attachStreaming(accessory, device.id)
+        await this.attachStreaming(accessory, device)
         const packageUuid = await this.attachPackageCamera(device)
         if (packageUuid)
           packages.add(packageUuid)

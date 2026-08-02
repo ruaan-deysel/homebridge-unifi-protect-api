@@ -77,6 +77,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   places, and an outdoor camera hears passers-by who have not consented. If ffmpeg has
   neither encoder the plugin says so once and streams video only, rather than producing a
   stream HomeKit cannot play.
+- Two-way talkback on cameras with a speaker: pressing the microphone button in the Home
+  app's live view now plays your voice through the camera. It is **off by default and
+  opt-in per camera**, offered in the settings UI only for hardware that reports a
+  speaker, and **enabling it needs a restart** — the same one Homebridge already prompts
+  for when settings are saved. Talkback is independent of the audio setting: turning it on
+  does not start sending the camera's own microphone to HomeKit, and turning audio on does
+  not enable talkback. Nothing is sent to the camera until you actually speak.
 - Every camera now appears in the Home app as a camera: live view and snapshots are wired
   to HomeKit, bridged like every other accessory so a child bridge still holds the whole
   console under one pairing. The doorbell keeps the single Doorbell service the event
@@ -184,6 +191,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   by default because the 50 GB tier allows a single camera.
 
 ### Security
+- Talkback's per-session SRTP key could previously reach the log: ffmpeg echoes its full
+  command line on failure, and it echoes the offending line of an SDP it cannot parse.
+  Both paths are now redacted before anything is logged.
 - ffmpeg's error output is redacted a whole token at a time, so a stream URL split across
   two reads of the pipe — its `rtsps://` scheme arriving separately from its auth token —
   is still redacted. Redaction had been applied per read, which cannot match a URL that

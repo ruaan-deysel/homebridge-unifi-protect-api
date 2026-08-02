@@ -12,14 +12,19 @@ accessory cache, and exposes:
 
 - **Live view and snapshots** for every camera. Snapshots come straight from the console as
   JPEG; live view transcodes Protect's HEVC to the H.264 HomeKit requires, with optional
-  per-camera audio (off by default).
+  per-camera audio (off by default) and, on cameras with a speaker, optional two-way
+  talkback (also off by default).
 - **Sensors** driven by the live event stream: motion, smart detection (person, vehicle,
   animal, package), smoke and carbon monoxide, and a Doorbell service on cameras with a
   speaker.
 - **A status-LED switch** on cameras that have one.
 
-Still to come: HomeKit Secure Video, two-way audio, and light accessories. See
-`CHANGELOG.md`.
+Talkback is a separate setting from audio: turning it on does not start sending the
+camera's own microphone to HomeKit, and it has no effect on the audio setting either way.
+Like the audio setting, **enabling talkback takes effect after a restart** — the same one
+Homebridge already prompts for when settings are saved.
+
+Still to come: HomeKit Secure Video and light accessories. See `CHANGELOG.md`.
 
 ## Requirements
 
