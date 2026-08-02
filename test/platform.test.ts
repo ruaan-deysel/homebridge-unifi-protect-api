@@ -1,5 +1,6 @@
 import type { StreamingDelegate } from '../src/accessories/streaming.js'
 import type { ProtectPluginConfig } from '../src/config.js'
+import { Buffer } from 'node:buffer'
 import { EventEmitter } from 'node:events'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -9,6 +10,7 @@ import { AUDIO_LABEL } from '../homebridge-ui/public/config-ops.js'
 import { UniFiProtectPlatform } from '../src/platform.js'
 import { fingerprintOf } from '../src/protect/cert.js'
 import { ProtectAuthError, ProtectUnavailableError } from '../src/protect/errors.js'
+import { FfmpegProcess } from '../src/protect/ffmpeg.js'
 import { C, FakeAccessory, FakeDoorbellController, hap, S } from './fake-hap.js'
 import { makeSelfSigned } from './support/tls.js'
 
@@ -1084,6 +1086,40 @@ describe('uniFiProtectPlatform', () => {
   const delegateOf = (accessory: FakePlatformAccessory) =>
     controllerOf(accessory).options.delegate as StreamingDelegate
 
+  /**
+   * Starts a genuine session on `delegate` with a stand-in child process, so a
+   * teardown assertion can check what happened to the ffmpeg — a spy on
+   * stopAll() alone stays green even when stopAll() kills nothing. Returns the
+   * child; `killed` records that a signal was actually delivered.
+   */
+  async function startFakeSession(delegate: StreamingDelegate, id = 'session-1') {
+    const child = new EventEmitter() as EventEmitter & { stderr: EventEmitter, kill: () => boolean, killed: boolean }
+    child.stderr = new EventEmitter()
+    child.killed = false
+    child.kill = () => {
+      child.killed = true
+      // The real child emits `close` after a kill; without it the process-wide
+      // active count would never be released.
+      child.emit('close', 0)
+      return true
+    }
+    ;(delegate as unknown as { options: { spawn: unknown } }).options.spawn = () => child
+    const started = await delegate.startSession(id, {
+      width: 1280,
+      height: 960,
+      fps: 30,
+      bitrate: 800,
+      videoPayloadType: 99,
+    }, {
+      address: '192.0.2.9',
+      video: { port: 5000, ssrc: 7, key: Buffer.alloc(30), localPort: 5001 },
+      audio: { port: 5002, ssrc: 8, key: Buffer.alloc(30), localPort: 5003 },
+    })
+    if (!started)
+      throw new Error('expected the faked session to start')
+    return child
+  }
+
   // Two execs per probe. Per camera that is ten on a five-camera console, and
   // it repeats on every resync — while the answer is a property of the host.
   it('probes ffmpeg once, not once per camera and not once per discovery', async () => {
@@ -1490,14 +1526,23 @@ describe('uniFiProtectPlatform', () => {
       .toBeUndefined()
   })
 
-  // A stranded ffmpeg holds a decode open for as long as the host is up.
+  // A stranded ffmpeg holds a decode open for as long as the host is up. The
+  // session is REAL (with a stand-in child) rather than a spy on stopAll():
+  // asserting only that stopAll() was called stays green even if it kills
+  // nothing at all.
   it('stops the package delegate on shutdown too', async () => {
     const { api, accessories } = await withCameras(cameras, { config: packageOn(DOORBELL) })
-    const stop = vi.spyOn(delegateOf(packageOf(accessories)!), 'stopAll')
+    const delegate = delegateOf(packageOf(accessories)!)
+    const child = await startFakeSession(delegate)
+    expect(delegate.activeCount).toBe(1)
+    expect(FfmpegProcess.activeCount).toBe(1)
 
     api.emit('shutdown')
 
-    expect(stop).toHaveBeenCalledTimes(1)
+    expect(child.killed).toBe(true)
+    expect(delegate.activeCount).toBe(0)
+    // The host-wide slot is back, or the cap fills with corpses over an uptime.
+    expect(FfmpegProcess.activeCount).toBe(0)
   })
 
   // The regression this design exists to prevent. Detecting the lens by asking
@@ -1637,7 +1682,10 @@ describe('uniFiProtectPlatform', () => {
   it('removes the package accessory and stops its ffmpeg when the setting is switched off', async () => {
     const { api, platform, accessories } = await withCameras(cameras, { config: packageOn(DOORBELL) })
     const pkg = packageOf(accessories)!
-    const stop = vi.spyOn(delegateOf(pkg), 'stopAll')
+    const delegate = delegateOf(pkg)
+    // A live session, so this asserts the transcode actually died rather than
+    // that a method was called on the way past.
+    const child = await startFakeSession(delegate)
 
     const live = (platform as unknown as { config: ProtectPluginConfig }).config
     live.devices[DOORBELL] = { packageCamera: false }
@@ -1645,7 +1693,9 @@ describe('uniFiProtectPlatform', () => {
 
     expect(platform.accessories.has(pkg.UUID)).toBe(false)
     expect(registered(api.unregisterPlatformAccessories)).toContain(pkg)
-    expect(stop).toHaveBeenCalledTimes(1)
+    expect(child.killed).toBe(true)
+    expect(delegate.activeCount).toBe(0)
+    expect(FfmpegProcess.activeCount).toBe(0)
   })
 
   // A genuine removal, unlike the no-ffmpeg case above: the lens itself is

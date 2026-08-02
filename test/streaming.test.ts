@@ -878,6 +878,73 @@ describe('buildFfmpegArgs scaling', () => {
   })
 })
 
+/**
+ * hap-nodejs does not check a paired controller's selection against the ladder
+ * the accessory advertised, so every number here reaches ffmpeg verbatim unless
+ * something clamps it. `-r 0` makes ffmpeg refuse to start at all.
+ */
+describe('buildFfmpegArgs clamps the negotiated parameters', () => {
+  const base = { url: PKG_URL, bitrate: 800, address: '192.0.2.9', video: pkgTarget(), scale: { width: 1280, height: 960 } }
+  const rate = (fps: number) => {
+    const args = buildFfmpegArgs(PKG_CAPS, { ...base, fps })
+    return args[args.indexOf('-r') + 1]
+  }
+  const filter = (scale: { width: number, height: number }) => {
+    const args = buildFfmpegArgs(PKG_CAPS, { ...base, scale, fps: 30 })
+    return args[args.indexOf('-vf') + 1]
+  }
+
+  for (const fps of [0, -1, -30, Number.NaN, Number.POSITIVE_INFINITY, 0.4]) {
+    it(`turns a negotiated fps of ${fps} into the advertised rate, never -r 0`, () => {
+      expect(rate(fps)).toBe('30')
+    })
+  }
+
+  it('rounds a fractional rate rather than handing ffmpeg a decimal', () => {
+    expect(rate(23.6)).toBe('24')
+  })
+
+  it('caps a rate above anything advertised', () => {
+    expect(rate(240)).toBe('30')
+  })
+
+  it('leaves a rate the ladder actually offers alone', () => {
+    expect(rate(24)).toBe('24')
+  })
+
+  it('bounds absurd dimensions by the largest advertised size', () => {
+    expect(filter({ width: 1_000_000_000, height: 1_000_000_000 })).toBe('scale=1600:1200,format=nv12,hwupload')
+  })
+
+  for (const [name, scale] of [
+    ['zero', { width: 0, height: 0 }],
+    ['negative', { width: -1280, height: -960 }],
+    ['nan', { width: Number.NaN, height: Number.NaN }],
+    ['infinite', { width: Number.POSITIVE_INFINITY, height: Number.POSITIVE_INFINITY }],
+  ] as const) {
+    it(`falls back to the native size for a ${name} dimension`, () => {
+      expect(filter(scale)).toBe('scale=1600:1200,format=nv12,hwupload')
+    })
+  }
+
+  // 4:2:0 chroma has no half-pixels; an odd size fails the encoder outright.
+  it('rounds a made-up size down to an even one', () => {
+    expect(filter({ width: 641, height: 481 })).toBe('scale=640:480,format=nv12,hwupload')
+  })
+
+  it('leaves a size the ladder actually offers alone', () => {
+    expect(filter({ width: 1024, height: 768 })).toBe('scale=1024:768,format=nv12,hwupload')
+  })
+
+  // The main camera negotiates the same numbers but supplies neither field, so
+  // nothing here may start emitting one for it.
+  it('adds neither -r nor -vf to the main-camera path', () => {
+    const args = buildFfmpegArgs(CAPS_HW, { url: PKG_URL, bitrate: 800, address: '192.0.2.9', video: pkgTarget() })
+    expect(args).not.toContain('-r')
+    expect(args).not.toContain('-vf')
+  })
+})
+
 describe('package session honours what homekit negotiated', () => {
   // 1024x768@24 — neither the lens's native size nor the old hardcoded 15 fps,
   // so a constant anywhere in the path shows up here.
@@ -901,5 +968,101 @@ describe('package session honours what homekit negotiated', () => {
     delegate.stopAll()
     expect(args).not.toContain('-vf')
     expect(args).not.toContain('-r')
+  })
+})
+
+/**
+ * A `kill()` that returns false means the signal was NOT delivered and the
+ * process is still running — still decoding, and still holding one of the
+ * host-wide stream slots that only its exit releases. Dropping it from the
+ * session map at that point leaves nobody holding a handle to retry.
+ */
+describe('a session whose kill does not land', () => {
+  /** Refuses SIGKILL until `allow()` is called, then behaves like fakeChild. */
+  function stubbornChild() {
+    const child = new EventEmitter() as EventEmitter & { stderr: EventEmitter, kill: () => boolean }
+    child.stderr = new EventEmitter()
+    let killable = false
+    child.kill = () => {
+      if (!killable)
+        return false
+      child.emit('close', 0)
+      return true
+    }
+    return { child: child as unknown as ChildProcess, allow: () => {
+      killable = true
+    } }
+  }
+
+  it('stays tracked and keeps holding its slot, and a retry kills it', async () => {
+    const { child, allow } = stubbornChild()
+    const { delegate } = makeDelegate({ spawn: () => child })
+    expect(await delegate.startSession('a', REQUEST, RTP)).toBe(true)
+
+    delegate.stopAll()
+
+    // Both counts are the point: the orphan is still ours to retry, and it
+    // still counts against the cap because it is genuinely still running.
+    expect(delegate.activeCount).toBe(1)
+    expect(FfmpegProcess.activeCount).toBe(1)
+
+    allow()
+    delegate.stopAll()
+
+    expect(delegate.activeCount).toBe(0)
+    expect(FfmpegProcess.activeCount).toBe(0)
+  })
+
+  it('is retried by stopSession too, not only by the shutdown drain', async () => {
+    const { child, allow } = stubbornChild()
+    const { delegate } = makeDelegate({ spawn: () => child })
+    await delegate.startSession('a', REQUEST, RTP)
+
+    delegate.stopSession('a')
+    expect(delegate.activeCount).toBe(1)
+
+    allow()
+    delegate.stopSession('a')
+    expect(delegate.activeCount).toBe(0)
+    expect(FfmpegProcess.activeCount).toBe(0)
+  })
+
+  it('drops a process that exits on its own and releases its slot', async () => {
+    const child = fakeChild()
+    const { delegate } = makeDelegate({ spawn: () => child })
+    await delegate.startSession('a', REQUEST, RTP)
+    expect(delegate.activeCount).toBe(1)
+
+    // ffmpeg died by itself — nothing called stop(), so only onExit can clear
+    // the entry. A map that only shrinks on stop() would grow without bound.
+    ;(child as unknown as EventEmitter).emit('close', 0)
+
+    expect(delegate.activeCount).toBe(0)
+    expect(FfmpegProcess.activeCount).toBe(0)
+  })
+})
+
+// HomeKit reuses session ids, so a retained orphan and a fresh session can end
+// up sharing one. The orphan's exit must not evict the live session with it.
+describe('a late exit from an orphaned process', () => {
+  it('does not untrack the session that reused its id', async () => {
+    const orphan = new EventEmitter() as EventEmitter & { stderr: EventEmitter, kill: () => boolean }
+    orphan.stderr = new EventEmitter()
+    orphan.kill = () => false
+    const live = fakeChild()
+    const children = [orphan as unknown as ChildProcess, live]
+    const { delegate } = makeDelegate({ spawn: () => children.shift()! })
+
+    await delegate.startSession('a', REQUEST, RTP)
+    delegate.stopSession('a')
+    await delegate.startSession('a', REQUEST, RTP)
+
+    ;(orphan as EventEmitter).emit('close', 0)
+
+    // The live session is still there — and still the one a stop request kills.
+    expect(delegate.activeCount).toBe(1)
+    delegate.stopAll()
+    expect(delegate.activeCount).toBe(0)
+    expect(FfmpegProcess.activeCount).toBe(0)
   })
 })

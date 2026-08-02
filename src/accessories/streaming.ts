@@ -119,6 +119,42 @@ export interface StreamArgs {
 
 const SRTP_SUITE = 'AES_CM_128_HMAC_SHA1_80'
 
+/**
+ * The top of the ladder `packageVideoStreamingOptions` (src/platform.ts)
+ * advertises, and the rate every entry on it offers. Only the package lens
+ * supplies `scale`/`fps`, so this is the bound for both. Keep the two in step:
+ * a larger entry there without a change here would be clamped away.
+ */
+const ADVERTISED_MAX = { width: 1600, height: 1200, fps: 30 }
+
+/**
+ * hap-nodejs does NOT check a paired controller's selection against the ladder
+ * we advertised — whatever it sends lands here verbatim. `fps: 0` would become
+ * `-r 0`, which ffmpeg rejects outright, so the viewer gets nothing; an absurd
+ * width would become a scale filter that allocates before it fails.
+ *
+ * CLAMPED, not rejected, deliberately: every value this can produce is one we
+ * already offered, and a viewer getting a slightly different size beats a viewer
+ * getting a failed stream. Non-finite input falls back to the top of the ladder
+ * — the lens's native size and rate — rather than to a guess.
+ */
+function clampDimension(value: number, max: number): number {
+  if (!Number.isFinite(value) || value <= 0)
+    return max
+  // Even, because H.264's 4:2:0 chroma has no half-pixels: an odd width would
+  // fail the encoder rather than merely look wrong. Clamped BEFORE the bitwise
+  // round, which is only defined on 32-bit values.
+  return Math.max(2, Math.min(Math.round(value), max) & ~1)
+}
+
+function clampFps(value: number): number {
+  // Below 1 (0, negative, a fraction) has no valid `-r`; NaN and Infinity have
+  // none either. Math.min/max would happily propagate NaN, hence the explicit test.
+  if (!Number.isFinite(value) || value < 1)
+    return ADVERTISED_MAX.fps
+  return Math.min(Math.round(value), ADVERTISED_MAX.fps)
+}
+
 function destination(address: string, target: RtpTarget, packetSize: number): string {
   const host = address.includes(':') ? `[${address}]` : address
   const local = target.localPort === undefined ? '' : `&localrtcpport=${target.localPort}`
@@ -141,8 +177,17 @@ function scaleFilter(caps: FfmpegCapabilities, size: { width: number, height: nu
 }
 
 export function buildFfmpegArgs(caps: FfmpegCapabilities, s: StreamArgs): string[] {
+  // Validated HERE rather than at the call site so every caller is covered by
+  // the one guard: these are the only two negotiated numbers that reach ffmpeg
+  // as arguments. The main-camera path supplies neither and is untouched.
+  const scale = s.scale && {
+    width: clampDimension(s.scale.width, ADVERTISED_MAX.width),
+    height: clampDimension(s.scale.height, ADVERTISED_MAX.height),
+  }
+  const fps = s.fps === undefined ? undefined : clampFps(s.fps)
+
   const input: string[] = ['-hide_banner', '-loglevel', 'warning']
-  if (s.scale) {
+  if (scale) {
     // The scaling path — the package lens, and only it — decodes in SOFTWARE and
     // hands the encoder an uploaded surface. WHY: in-GPU `scale_vaapi` dies on the
     // reference hardware (Intel UHD 630, ffmpeg 6.x) with "Cannot allocate memory"
@@ -173,7 +218,7 @@ export function buildFfmpegArgs(caps: FfmpegCapabilities, s: StreamArgs): string
     ...(s.audio ? ['-map', '0:v:0'] : ['-an']),
     // Like `-r` below, an OUTPUT option: it must precede `-f rtp` and the
     // output URL or ffmpeg never applies it.
-    ...(s.scale ? ['-vf', scaleFilter(caps, s.scale)] : []),
+    ...(scale ? ['-vf', scaleFilter(caps, scale)] : []),
     '-c:v',
     caps.encoder,
     '-b:v',
@@ -186,7 +231,7 @@ export function buildFfmpegArgs(caps: FfmpegCapabilities, s: StreamArgs): string
     // must sit here, before `-f rtp` — after the output URL it is dangling and
     // never reaches the encoder. This is the frame-rate padding the package
     // lens depends on to avoid looking like a stalled stream to HomeKit.
-    ...(s.fps !== undefined ? ['-r', String(s.fps)] : []),
+    ...(fps !== undefined ? ['-r', String(fps)] : []),
     '-f',
     'rtp',
     '-srtp_out_suite',
@@ -504,12 +549,22 @@ export class StreamingDelegate implements CameraStreamingDelegate {
         fps: isPackage ? request.fps : undefined,
         scale: isPackage ? { width: request.width, height: request.height } : undefined,
       })
-      const proc = new FfmpegProcess({
+      const proc: FfmpegProcess = new FfmpegProcess({
         path: this.options.caps.path,
         args,
         log: this.options.log,
         spawn: this.options.spawn,
-        onExit: () => this.sessions.delete(sessionId),
+        // Identity-checked: a process that outlived a failed kill stays in the
+        // map, and HomeKit reuses session ids — its late exit must not evict
+        // the live session that replaced it.
+        //
+        // ponytail: one entry per session id, so a new session reusing the id
+        // of an orphan does displace it from the map. Key orphans separately if
+        // an unkillable ffmpeg ever shows up outside a test.
+        onExit: () => {
+          if (this.sessions.get(sessionId) === proc)
+            this.sessions.delete(sessionId)
+        },
       })
       try {
         proc.start()
@@ -535,10 +590,20 @@ export class StreamingDelegate implements CameraStreamingDelegate {
     }
   }
 
+  /**
+   * Dropping the entry unconditionally used to orphan the process whenever
+   * `kill()` failed: nothing else holds a handle, so nobody could ever retry,
+   * and the orphan kept running — holding a decode open and a slot in the
+   * host-wide cap that is only released when the process actually exits. Over
+   * a long uptime the cap fills with corpses and live views get refused. A
+   * process that survives its kill therefore STAYS tracked; a later
+   * stopSession/stopAll retries it, and its own onExit removes it once it
+   * genuinely dies, so nothing lingers forever.
+   */
   stopSession(sessionId: string): void {
     const proc = this.sessions.get(sessionId)
-    proc?.stop()
-    this.sessions.delete(sessionId)
+    if (!proc || proc.stop())
+      this.sessions.delete(sessionId)
     this.prepared.delete(sessionId)
   }
 

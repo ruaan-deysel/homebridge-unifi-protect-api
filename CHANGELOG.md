@@ -119,6 +119,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   physical device, so nobody should be surprised by either consequence after the fact.
 
 ### Fixed
+- The video size and frame rate a controller negotiates are now validated before they
+  reach ffmpeg. HAP does not check a controller's selection against the resolutions the
+  accessory advertised, so a malformed one asking for 0 fps produced `-r 0`, which ffmpeg
+  refuses outright, and an absurd size produced a scale filter that allocated before it
+  failed. Both are now clamped into the advertised range rather than rejected, so the
+  viewer gets a slightly different picture instead of no picture.
+- An ffmpeg process whose kill signal was not delivered is no longer dropped. It used to
+  be removed from the session map regardless, leaving nobody able to retry: the orphan
+  kept running, held a decode open, and kept its slot in the host-wide stream cap for the
+  rest of the uptime, so live views were eventually refused for corpses. A process that
+  survives its kill now stays tracked until it genuinely exits.
 - The package camera would not stream at all: HomeKit showed "No Response" for every live
   view, with nothing logged anywhere to explain it. It had been advertising a single
   1600×1200 at 15 fps, which HomeKit rejects on two counts — every advertised stream must

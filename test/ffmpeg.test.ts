@@ -331,6 +331,37 @@ describe('ffmpegProcess', () => {
     expect(proc.kill).toHaveBeenCalledTimes(2)
   })
 
+  // The return value is how the caller learns it is holding an orphan: false
+  // means the process is still running and must stay tracked for a retry.
+  it('stop() reports whether the kill actually landed', () => {
+    const { proc, spawn } = fakeSpawn()
+    proc.kill.mockReturnValueOnce(false)
+    const p = new FfmpegProcess({ path: '/usr/bin/ffmpeg', args: [], log, spawn })
+    p.start()
+
+    expect(p.stop()).toBe(false)
+    // Still running, so it still holds its slot — the count must not have moved.
+    expect(p.running).toBe(true)
+    expect(p.stop()).toBe(true)
+
+    proc.emit('close', null)
+  })
+
+  // Nothing left to kill: a process that already exited needs no retry, and
+  // reporting false for it would keep a corpse in the caller's map forever.
+  it('stop() reports success for a process that already exited, and for one never started', () => {
+    const { proc, spawn } = fakeSpawn()
+    const p = new FfmpegProcess({ path: '/usr/bin/ffmpeg', args: [], log, spawn })
+    p.start()
+    proc.emit('close', 0)
+    proc.kill.mockReturnValue(false)
+
+    expect(p.stop()).toBe(true)
+    expect(proc.kill).not.toHaveBeenCalled()
+
+    expect(new FfmpegProcess({ path: '/usr/bin/ffmpeg', args: [], log, spawn }).stop()).toBe(true)
+  })
+
   it('calls onExit exactly once when a failed spawn emits error then close', () => {
     const before = FfmpegProcess.activeCount
     const onExit = vi.fn()
