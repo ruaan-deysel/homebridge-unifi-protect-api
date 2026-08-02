@@ -61,6 +61,25 @@ describe('fmp4Splitter', () => {
     expect(() => split.push(bad)).toThrow(/box length/i)
   }, 1000)
 
+  // The lower bound stops the loop spinning; without an upper bound a corrupt
+  // length simply keeps `pending.length < length` true while every chunk is
+  // concatenated on — 4 GB of accumulation before anything throws.
+  it('rejects an oversized box length instead of buffering towards it', () => {
+    const bad = Buffer.alloc(16)
+    bad.writeUInt32BE(0xFFFFFFFF, 0)
+    bad.write('mdat', 4, 'latin1')
+    const split = new Fmp4Splitter(() => {})
+    expect(() => split.push(bad)).toThrow(/box length/i)
+  }, 1000)
+
+  it('accepts a fragment far larger than any real one, so the bound cannot reject legitimate media', () => {
+    const out: string[] = []
+    const split = new Fmp4Splitter(kind => out.push(kind))
+    // 8 MB — about 32x a measured 4 s fragment on the high substream.
+    split.push(Buffer.concat([box('moof'), box('mdat', Buffer.alloc(8 * 1024 * 1024))]))
+    expect(out).toEqual(['fragment'])
+  })
+
   it('emits the fragment payload as the concatenation of the moof and mdat boxes, not just their headers', () => {
     const moof = box('moof', Buffer.from('MOOF-PAYLOAD'))
     const mdat = box('mdat', Buffer.from('MDAT-PAYLOAD'))

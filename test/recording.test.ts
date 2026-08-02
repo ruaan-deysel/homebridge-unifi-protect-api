@@ -1,9 +1,20 @@
 import type { CameraRecordingConfiguration, RecordingPacket } from 'homebridge'
+import type { QualityPreference } from '../src/accessories/quality.js'
 import type { FfmpegCapabilities, SpawnFn } from '../src/protect/ffmpeg.js'
 import { Buffer } from 'node:buffer'
 import { EventEmitter } from 'node:events'
-import { describe, expect, it, vi } from 'vitest'
-import { PREBUFFER_FRAGMENTS, PrebufferRing, recordingArgs, RecordingDelegate } from '../src/accessories/recording.js'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { MAX_RESTARTS, PREBUFFER_FRAGMENTS, PrebufferRing, recordingArgs, RecordingDelegate, RESTART_DELAY_MS } from '../src/accessories/recording.js'
+import { FfmpegProcess } from '../src/protect/ffmpeg.js'
+
+// setTimeout only: `flush` below rides on setImmediate, and faking that would
+// hang every await in this file.
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+})
+afterEach(() => {
+  vi.useRealTimers()
+})
 
 describe('prebufferRing', () => {
   it('drops the oldest past the cap', () => {
@@ -91,7 +102,7 @@ function fakeSpawn() {
 
 const flush = () => new Promise(resolve => setImmediate(resolve))
 
-function harness(options: { audio?: boolean, url?: () => Promise<string> } = {}) {
+function harness(options: { audio?: boolean, url?: () => Promise<string>, quality?: () => QualityPreference } = {}) {
   const log = { info: vi.fn(), warn: vi.fn(), debug: vi.fn() }
   const { proc, spawn } = fakeSpawn()
   const get = vi.fn(options.url ?? (async () => URL))
@@ -102,6 +113,7 @@ function harness(options: { audio?: boolean, url?: () => Promise<string> } = {})
     urls: { get },
     caps,
     audioActive: () => options.audio ?? true,
+    quality: options.quality,
     spawn,
   })
   return {
@@ -196,11 +208,16 @@ describe('recordingArgs', () => {
 
 describe('recordingDelegate stream generator', () => {
   it('yields the init segment before any fragment', async () => {
-    const { delegate, ring } = harness()
+    const { delegate, ring, close } = harness()
     ring.accept('init', Buffer.from('I'))
     ring.accept('fragment', Buffer.from('f1'))
-    const packets = await take(delegate.handleRecordingStreamRequest(1), 2)
-    expect(packets.map(p => p.data.toString())).toEqual(['I', 'f1'])
+    const gen = delegate.handleRecordingStreamRequest(1)
+    // One packet is held back until it is known whether another follows, so the
+    // close is what releases the final one.
+    const packets = take(gen, 3)
+    await flush()
+    close(1)
+    expect((await packets).map(p => p.data.toString())).toEqual(['I', 'f1'])
   })
 
   it('marks only the final packet as last', async () => {
@@ -221,28 +238,57 @@ describe('recordingDelegate stream generator', () => {
   // a `return` that never comes. Isolated on purpose — every other close in
   // these tests happens with a fragment still queued, so none of them reaches
   // the parked path.
-  it('finishes a generator that is parked with an empty queue when the stream closes', async () => {
+  //
+  // `.done` alone passed over the real defect: hap-nodejs has no way to tell the
+  // controller a clip ended unless some packet carries isLast, so what matters
+  // is that the LAST packet is flagged, not merely that the generator finished.
+  it('finishes a generator that is parked with an empty queue by flagging its last packet', async () => {
     const { delegate, ring, close } = harness()
     ring.accept('init', Buffer.from('I'))
     const gen = delegate.handleRecordingStreamRequest(1)
-    await gen.next()
     const pending = gen.next()
     await flush()
     close(1)
-    expect((await pending).done).toBe(true)
+    const packet = await pending
+    expect(packet.value!.data.toString()).toBe('I')
+    expect(packet.value!.isLast).toBe(true)
+    expect((await gen.next()).done).toBe(true)
+  })
+
+  it('flags the last packet even when the stream closes after live fragments have been sent', async () => {
+    const h = await harnessStarted()
+    h.proc.stdout.emit('data', init('one'))
+    const gen = h.delegate.handleRecordingStreamRequest(1)
+    const packets: RecordingPacket[] = []
+    const done = (async () => {
+      for await (const packet of gen) packets.push(packet)
+    })()
+    await flush()
+    h.proc.stdout.emit('data', fragment('a'))
+    await flush()
+    h.close(1)
+    await done
+    expect(packets.map(p => p.isLast)).toEqual([false, true])
+    expect(packets.at(-1)!.data.toString('latin1')).toContain('a')
   })
 
   it('yields fragments that arrive live, after the prebuffer is exhausted', async () => {
     const h = await harnessStarted()
     h.proc.stdout.emit('data', init('one'))
     const gen = h.delegate.handleRecordingStreamRequest(1)
-    expect((await gen.next()).value!.data.toString('latin1')).toContain('one')
-    // Parked: the prebuffer held no fragments, so nothing can be yielded until
-    // the encoder produces one.
+    // Parked: the prebuffer held no fragments, so the init segment cannot be
+    // yielded until something tells the generator whether more follows.
     const pending = gen.next()
     await flush()
     h.proc.stdout.emit('data', fragment('live'))
-    const packet = await pending
+    const first = await pending
+    expect(first.value!.data.toString('latin1')).toContain('one')
+    expect(first.value!.isLast).toBe(false)
+
+    const second = gen.next()
+    await flush()
+    h.proc.stdout.emit('data', fragment('later'))
+    const packet = await second
     expect(packet.value!.data.toString('latin1')).toContain('live')
     expect(packet.value!.isLast).toBe(false)
   })
@@ -270,9 +316,10 @@ describe('recordingDelegate stream generator', () => {
     await h.start()
     h.ring.accept('init', Buffer.from('I'))
     const gen = h.delegate.handleRecordingStreamRequest(1)
-    await gen.next()
+    const drained = drain(gen)
+    await flush()
     h.close(1)
-    await drain(gen)
+    await drained
     const logged = [...h.log.info.mock.calls, ...h.log.warn.mock.calls, ...h.log.debug.mock.calls].flat().join(' ')
     expect(logged).not.toContain(SECRET)
   })
@@ -343,9 +390,10 @@ describe('recordingDelegate encoder', () => {
     const h = await harnessStarted()
     h.ring.accept('init', Buffer.from('I'))
     const gen = h.delegate.handleRecordingStreamRequest(1)
-    await gen.next()
+    const drained = drain(gen)
+    await flush()
     h.close(1)
-    await drain(gen)
+    await drained
     expect(h.proc.kill).not.toHaveBeenCalled()
     expect(h.delegate.encoding).toBe(true)
   })
@@ -376,6 +424,135 @@ describe('recordingDelegate encoder', () => {
     // And the fragments that follow the new init are kept.
     h.proc.stdout.emit('data', fragment('c'))
     expect(h.ring.snapshot()!.fragments.map(f => f.toString('latin1').slice(-1))).toEqual(['c'])
+  })
+
+  // FfmpegProcess.activeCount IS the host-wide live-view cap (default 6 on
+  // hardware, 2 on software). A recorder is not an interactive viewer, and six
+  // recording cameras counting towards it would refuse every live view.
+  it('does not consume a live-view slot while recording', async () => {
+    const before = FfmpegProcess.activeCount
+    const h = await harnessStarted()
+    expect(h.delegate.encoding).toBe(true)
+    expect(FfmpegProcess.activeCount).toBe(before)
+  })
+
+  // A kill that was not delivered leaves an orphan: it still runs, and if the
+  // handle were dropped `encoding` would report false and the next start would
+  // spawn a SECOND encoder against the same camera.
+  it('keeps a process whose kill failed, and refuses to spawn a second for it', async () => {
+    const h = await harnessStarted()
+    h.proc.kill.mockReturnValue(false)
+    h.delegate.updateRecordingActive(false)
+    expect(h.delegate.encoding).toBe(true)
+    h.delegate.updateRecordingActive(true)
+    await flush()
+    expect(h.spawn).toHaveBeenCalledTimes(1)
+    // And a later stop retries the kill rather than assuming it worked.
+    h.proc.kill.mockReturnValue(true)
+    h.delegate.updateRecordingActive(false)
+    expect(h.proc.kill).toHaveBeenCalledTimes(2)
+    expect(h.delegate.encoding).toBe(false)
+  })
+
+  it('ends every open recording stream when the encoder stops', async () => {
+    const h = await harnessStarted()
+    h.proc.stdout.emit('data', init('one'))
+    const gen = h.delegate.handleRecordingStreamRequest(1)
+    const packets: RecordingPacket[] = []
+    const done = (async () => {
+      for await (const packet of gen)
+        packets.push(packet)
+    })()
+    await flush()
+    h.delegate.updateRecordingActive(false)
+    await done
+    expect(packets.at(-1)!.isLast).toBe(true)
+  })
+
+  it('clears buffered fragments when the encoder exits, so the next clip is not served from a dead one', async () => {
+    const h = await harnessStarted()
+    h.proc.stdout.emit('data', init('one'))
+    h.proc.stdout.emit('data', fragment('a'))
+    h.proc.emit('close', 0)
+    expect(h.ring.snapshot()!.fragments).toEqual([])
+  })
+
+  it('ends a clip whose consumer falls more than the prebuffer depth behind, rather than queueing without limit', async () => {
+    const h = await harnessStarted()
+    h.proc.stdout.emit('data', init('one'))
+    const gen = h.delegate.handleRecordingStreamRequest(1)
+    for (let i = 0; i < PREBUFFER_FRAGMENTS + 5; i++)
+      h.proc.stdout.emit('data', fragment(`f${i}`))
+    const packets = await drain(gen)
+    expect(packets).toHaveLength(PREBUFFER_FRAGMENTS + 1)
+    expect(packets.at(-1)!.isLast).toBe(true)
+    expect(h.log.warn.mock.calls.flat().join(' ')).toContain('fragments behind')
+  })
+
+  it('logs a clean exit, which ffmpeg itself never reports', async () => {
+    const h = await harnessStarted()
+    h.proc.emit('close', 0)
+    expect(h.delegate.encoding).toBe(false)
+    expect(h.log.info.mock.calls.flat().join(' ')).toContain('Recording prebuffer for "Front Door" stopped')
+  })
+
+  it('restarts an encoder that exited while recording is still active', async () => {
+    const h = await harnessStarted()
+    h.proc.emit('close', 0)
+    expect(h.spawn).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(RESTART_DELAY_MS)
+    await flush()
+    expect(h.spawn).toHaveBeenCalledTimes(2)
+    expect(h.delegate.encoding).toBe(true)
+  })
+
+  it('does not restart an encoder that stopped because recording was switched off', async () => {
+    const h = await harnessStarted()
+    h.delegate.updateRecordingActive(false)
+    h.proc.emit('close', 0)
+    await vi.advanceTimersByTimeAsync(RESTART_DELAY_MS)
+    await flush()
+    expect(h.spawn).toHaveBeenCalledTimes(1)
+  })
+
+  it('gives up after repeated short-lived runs instead of respawning forever', async () => {
+    const h = await harnessStarted()
+    for (let i = 0; i <= MAX_RESTARTS; i++) {
+      h.proc.emit('close', 1)
+      await vi.advanceTimersByTimeAsync(RESTART_DELAY_MS)
+      await flush()
+    }
+    expect(h.spawn).toHaveBeenCalledTimes(MAX_RESTARTS + 1)
+    expect(h.log.warn.mock.calls.flat().join(' ')).toContain('Giving up')
+  })
+
+  it('honours the configured quality preference, which live view already does', async () => {
+    const h = harness({ quality: () => 'low' })
+    h.delegate.updateRecordingConfiguration(configuration(4000))
+    await h.start()
+    expect(h.get).toHaveBeenCalledWith('cam-1', 'low')
+  })
+
+  it('falls back to the requested resolution when the preference is auto', async () => {
+    const h = harness({ quality: () => 'auto' })
+    h.delegate.updateRecordingConfiguration(configuration(4000, 1280, 720))
+    await h.start()
+    expect(h.get).toHaveBeenCalledWith('cam-1', 'medium')
+  })
+
+  // An async generator's body does not run until the first next(), so
+  // registering the stream inside one loses every fragment produced between the
+  // request and HAP's first pull.
+  it('keeps fragments produced before HomeKit first pulls from the generator', async () => {
+    const h = await harnessStarted()
+    h.proc.stdout.emit('data', init('one'))
+    const gen = h.delegate.handleRecordingStreamRequest(1)
+    h.proc.stdout.emit('data', fragment('early'))
+    expect((await gen.next()).value!.data.toString('latin1')).toContain('one')
+    const pending = gen.next()
+    await flush()
+    h.close(1)
+    expect((await pending).value!.data.toString('latin1')).toContain('early')
   })
 
   it('stops the encoder when stdout stops being parsable', async () => {

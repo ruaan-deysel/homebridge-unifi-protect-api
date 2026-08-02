@@ -267,8 +267,17 @@ export class FfmpegProcess {
 
     child.stderr?.on('data', (chunk: Buffer) => this.absorb(chunk.toString()))
 
-    if (this.options.onStdout)
+    if (this.options.onStdout) {
       child.stdout?.on('data', (chunk: Buffer) => this.options.onStdout!(chunk))
+      // Load-bearing despite looking empty: Node crashes the HOST process on an
+      // unhandled 'error' event, and a readable pipe raises one on EPIPE or
+      // ECONNRESET when the child dies mid-write. Homebridge going down because
+      // one camera's ffmpeg was killed is not an acceptable failure mode.
+      // Swallowed rather than logged for the same reason as stdin: the death is
+      // reported with better detail by the 'close'/'error' handlers below, and
+      // nothing from stdout may reach a log — it is binary media.
+      child.stdout?.on('error', () => {})
+    }
 
     if (this.options.stdin !== undefined) {
       // A child that has already died (or closed its own stdin) turns this

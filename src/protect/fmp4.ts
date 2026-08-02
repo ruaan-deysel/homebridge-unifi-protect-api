@@ -13,6 +13,17 @@ import { Buffer } from 'node:buffer'
 export type Fmp4Piece = 'init' | 'fragment'
 
 const MIN_BOX = 8
+/**
+ * Upper bound on one box, so a corrupt length cannot be accumulated towards.
+ * The `MIN_BOX` guard stops the loop spinning but not the buffering: a length of
+ * 0xFFFFFFFF keeps `pending.length < length` true while every chunk is
+ * concatenated on, reaching 4 GB before anything throws.
+ *
+ * 64 MiB cannot reject a legitimate fragment: measured fragments are ~250 KB at
+ * 4 s on the high substream, so this is roughly 250x the real thing — a single
+ * 4 s fragment would have to arrive at 134 Mbit/s to reach it.
+ */
+const MAX_BOX = 64 * 1024 * 1024
 
 export class Fmp4Splitter {
   private pending: Buffer<ArrayBufferLike> = Buffer.alloc(0)
@@ -27,10 +38,16 @@ export class Fmp4Splitter {
       if (this.pending.length < MIN_BOX)
         return
       const length = this.pending.readUInt32BE(0)
-      // A length below the header size cannot advance the cursor: without this
-      // the loop would spin forever on a corrupt stream.
-      if (length < MIN_BOX)
-        throw new Error(`refusing a box length of ${length}`)
+      // A length below the header size cannot advance the cursor (the loop
+      // would spin forever), and one above MAX_BOX can only be corruption the
+      // splitter would otherwise buffer towards for gigabytes.
+      //
+      // Sizes 1 and 0 are legal ISO-BMFF — 64-bit `largesize`, and "box runs to
+      // end of file" — and are rejected here rather than implemented: neither
+      // can occur in a 4 s fragmented-MP4 stream from this encoder, and both
+      // would be dead code nobody could exercise.
+      if (length < MIN_BOX || length > MAX_BOX)
+        throw new Error(`refusing a box length of ${length} (64-bit and to-end-of-file box sizes are not supported)`)
       if (this.pending.length < length)
         return
       const type = this.pending.toString('latin1', 4, 8)

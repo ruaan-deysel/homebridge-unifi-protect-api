@@ -497,4 +497,13 @@ describe('ffmpegProcess', () => {
     p.start()
     expect(() => proc.stdin.emit('error', Object.assign(new Error('EPIPE'), { code: 'EPIPE' }))).not.toThrow()
   })
+
+  // Same rule on the readable side: the recording delegate reads fMP4 from
+  // stdout for hours, and an ECONNRESET or EPIPE there with no listener takes
+  // the whole Homebridge process down.
+  it('does not crash when child.stdout emits an error', () => {
+    const { proc, spawn } = fakeSpawn()
+    new FfmpegProcess({ path: '/usr/bin/ffmpeg', args: [], log, spawn, onStdout: () => {} }).start()
+    expect(() => proc.stdout.emit('error', Object.assign(new Error('ECONNRESET'), { code: 'ECONNRESET' }))).not.toThrow()
+  })
 })
