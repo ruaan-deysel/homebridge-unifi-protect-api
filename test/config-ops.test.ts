@@ -526,7 +526,11 @@ describe('icloudTier validation', () => {
   })
 
   it('ensureConfig falls back rather than persisting an unrecognised tier from config.json', () => {
-    const config = ensureConfig({ platform: 'UniFiProtect', host: '10.0.0.1', apiKey: 'k', defaults: { icloudTier: '1tb' } })
+    // Cast: a hand-edited config.json is exactly the untyped input this test
+    // guards against — `Partial<ConfigShape>` promises a legal tier, real
+    // config.json on disk does not.
+    const badConfig = { platform: 'UniFiProtect', host: '10.0.0.1', apiKey: 'k', defaults: { icloudTier: '1tb' } } as unknown as Parameters<typeof ensureConfig>[0]
+    const config = ensureConfig(badConfig)
     expect(config.defaults.icloudTier).toBe(DEFAULTS.icloudTier)
     // And the fallback itself is one parseConfig accepts, so the round-trip
     // this test guards against actually terminates.
