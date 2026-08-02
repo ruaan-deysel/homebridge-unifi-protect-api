@@ -49,4 +49,24 @@ describe('renderTabs', () => {
     expect(panes[1]?.style.display).not.toBe('none')
     expect(panes[0]?.style.display).toBe('none')
   })
+
+  // The parent iframe sizes itself from a mutation observer, and swapping a
+  // pane's `display` does not fire one — nothing resizes the frame unless
+  // renderTabs calls this itself after every switch.
+  it('calls homebridge.fixScrollHeight() after a tab switch', () => {
+    const calls: number[] = []
+    // @ts-expect-error test-only global stub; the real homebridge object is
+    // injected by the parent iframe and is not present under vitest.
+    globalThis.homebridge = { fixScrollHeight: () => calls.push(1) }
+    try {
+      const { select } = renderTabs(doc, ['A', 'B']) as unknown as { select: (index: number) => void }
+      const before = calls.length
+      select(1)
+      expect(calls.length).toBeGreaterThan(before)
+    }
+    finally {
+      // @ts-expect-error see above
+      delete globalThis.homebridge
+    }
+  })
 })
