@@ -119,9 +119,14 @@ function videoStreamingOptions(hap: HAP): CameraStreamingOptions['video'] {
  * log anywhere. Verified against real hardware: with this list iOS negotiates
  * 1280x960@30 and the stream starts.
  *
- * 1920x1440 and 1280x960 are here on top of the spec's list because HomeKit
- * mandates the 1920 and 1280 widths; 1920x1440 exceeds the lens's native
- * 1600x1200 and is upscaled rather than omitted for exactly that reason.
+ * 1280x960 is here on top of the spec's list because HomeKit mandates the
+ * 1280 width. The other mandated width, 1920, is deliberately NOT present:
+ * 1920x1440 is the only 4:3 size at that width, it is 120x90 = 10800
+ * macroblocks — above H.264 Level 4.0's 8192 cap, out of level for the
+ * levels advertised below — and it exceeds the lens's native 1600x1200, so a
+ * controller that picked it (being first in an earlier revision of this
+ * list) would get a pure upscale for no benefit. Without it, every entry
+ * here fits inside Level 4.0 (1600x1200 = 100x75 = 7500 macroblocks).
  * buildFfmpegArgs scales the transcode to whatever size is negotiated, so
  * every entry is a promise the encoder now keeps.
  */
@@ -132,7 +137,6 @@ function packageVideoStreamingOptions(hap: HAP): CameraStreamingOptions['video']
       levels: [hap.H264Level.LEVEL3_1, hap.H264Level.LEVEL3_2, hap.H264Level.LEVEL4_0],
     },
     resolutions: [
-      [1920, 1440, 30],
       [1600, 1200, 30],
       [1280, 960, 30],
       [1024, 768, 30],

@@ -1456,7 +1456,6 @@ describe('uniFiProtectPlatform', () => {
     // entry made iOS refuse to negotiate at all, silently — hap-nodejs
     // validates neither the 24 fps floor nor the legal sizes.
     expect(streaming.video.resolutions).toEqual([
-      [1920, 1440, 30],
       [1600, 1200, 30],
       [1280, 960, 30],
       [1024, 768, 30],
