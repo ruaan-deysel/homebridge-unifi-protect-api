@@ -1,6 +1,6 @@
 import type { DeviceOverride, IcloudTier } from '../homebridge-ui/public/config-ops.js'
 import { describe, expect, it, vi } from 'vitest'
-import { cameraToggles, clearDeviceSetting, debounce, defaultFor, DEFAULTS, ensureConfig, isOverridden, MAX_STREAMS_RANGE, NEEDS_RESTART, PACKAGE_LABEL, parseIcloudTier, parseMaxStreams, QUALITY_OPTIONS, RECORDING_LIMITS, recordingCount, renderDeviceHeader, renderQualitySelect, renderToggle, SAVE_DEBOUNCE_MS, setDeviceSetting, setGlobalSetting, shouldOfferPackageCamera, tierWarning } from '../homebridge-ui/public/config-ops.js'
+import { AUDIO_LABEL, cameraToggles, clearDeviceSetting, debounce, defaultFor, DEFAULTS, ensureConfig, isOverridden, MAX_STREAMS_RANGE, NEEDS_RESTART, PACKAGE_LABEL, parseIcloudTier, parseMaxStreams, QUALITY_OPTIONS, RECORDING_LIMITS, recordingCount, renderDeviceHeader, renderQualitySelect, renderToggle, SAVE_DEBOUNCE_MS, setDeviceSetting, setGlobalSetting, shouldOfferPackageCamera, TALKBACK_LABEL, tierWarning } from '../homebridge-ui/public/config-ops.js'
 import { parseConfig, settingsFor } from '../src/config.js'
 
 // Minimal fake DOM — just enough to prove renderDeviceHeader never turns
@@ -531,11 +531,14 @@ describe('cameraToggles sections', () => {
 })
 
 describe('talkback toggle', () => {
-  it('offers talkback on a speaker camera, enabled', () => {
+  it('offers talkback on a speaker camera, enabled and marked as needing a restart', () => {
     const toggles = cameraToggles({ hasSpeaker: true, hasMic: true, hasPackageCamera: false })
     const talkback = toggles.find(t => t.key === 'talkback')
     expect(talkback?.comingLater).toBeUndefined()
-    expect(talkback?.label).toContain('restart')
+    // The restart warning is now carried by renderToggle's marker (driven off
+    // NEEDS_RESTART), not by the label text — see 'restart labels do not
+    // duplicate the marker' below for the other half of that split.
+    expect(NEEDS_RESTART.has('talkback')).toBe(true)
   })
 
   it('offers no talkback without a speaker', () => {
@@ -710,5 +713,20 @@ describe('renderToggle restart marker', () => {
   it('renders no marker by default when the caller does not say', () => {
     const { wrap } = renderToggle(makeDoc(), 'cam1-quality', 'Some setting') as unknown as { wrap: FakeElement }
     expect(wrap.textContent).not.toContain('restart')
+  })
+})
+
+// index.html renders AUDIO_LABEL/TALKBACK_LABEL through exactly this call
+// (renderToggle(..., NEEDS_RESTART.has(key))) — rendering it here, not just
+// reading the label constants, is what proves the word only ever shows up
+// once on the actual control, not twice (once in the label text, once in
+// the marker).
+describe('restart labels do not duplicate the marker', () => {
+  it('says "restart" exactly once on the rendered audio and talkback controls', () => {
+    for (const label of [AUDIO_LABEL, TALKBACK_LABEL]) {
+      const { wrap } = renderToggle(makeDoc(), 'cam1-x', label, true) as unknown as { wrap: FakeElement }
+      const occurrences = wrap.textContent.toLowerCase().split('restart').length - 1
+      expect(occurrences, label).toBe(1)
+    }
   })
 })

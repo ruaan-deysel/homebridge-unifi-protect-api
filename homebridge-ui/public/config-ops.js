@@ -142,21 +142,24 @@ export const QUALITY_OPTIONS = [
 ]
 
 /**
- * The audio toggle's label. It names the restart deliberately: HAP tells HomeKit
- * which audio codecs a camera offers when the controller is attached at startup
- * and gives no way to change it afterwards, so switching audio ON only reaches
- * HomeKit after a restart — the one Homebridge already prompts for on save.
- * Switching it OFF applies to the next live view immediately. A toggle that
- * silently did nothing until a restart would look broken.
+ * The audio toggle's label. HAP tells HomeKit which audio codecs a camera
+ * offers when the controller is attached at startup and gives no way to
+ * change it afterwards, so switching audio ON only reaches HomeKit after a
+ * restart. Switching it OFF applies to the next live view immediately. The
+ * restart itself is signalled by `renderToggle`'s marker (see `NEEDS_RESTART`)
+ * rather than baked into this text — putting it in both places doubled the
+ * warning on this exact control, which is the defect this file's `NEEDS_RESTART`
+ * set now exists to avoid.
  */
-export const AUDIO_LABEL = 'Live view audio (restart to enable)'
+export const AUDIO_LABEL = 'Live view audio'
 
 /**
- * Says "restart" for the same reason AUDIO_LABEL does: HAP fixes the advertised
+ * Restart-worthy for the same reason AUDIO_LABEL is: HAP fixes the advertised
  * codecs and two-way capability when the controller is configured, and
  * `CameraController.streamingOptions` is private and read-only afterwards.
+ * See AUDIO_LABEL for why that is not spelled out in the text itself.
  */
-export const TALKBACK_LABEL = 'Two-way audio (restart to enable)'
+export const TALKBACK_LABEL = 'Two-way audio'
 
 /**
  * Builds the per-camera quality selector with DOM APIs only — never

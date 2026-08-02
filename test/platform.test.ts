@@ -6,7 +6,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { AUDIO_LABEL } from '../homebridge-ui/public/config-ops.js'
+import { NEEDS_RESTART } from '../homebridge-ui/public/config-ops.js'
 import { UniFiProtectPlatform } from '../src/platform.js'
 import { fingerprintOf } from '../src/protect/cert.js'
 import { ProtectAuthError, ProtectUnavailableError } from '../src/protect/errors.js'
@@ -1278,10 +1278,10 @@ describe('uniFiProtectPlatform', () => {
 
   // HAP builds the audio TLVs and the Microphone service when the controller is
   // configured, and `CameraController.streamingOptions` is private and readonly,
-  // so the advertisement cannot change afterwards. The documentation must say
-  // "restart to enable audio" for exactly as long as that is true — this test is
-  // what fails if someone makes it live without updating the docs, or writes
-  // docs claiming it is live when it is not.
+  // so the advertisement cannot change afterwards. The settings UI must mark
+  // `audio` as needing a restart for exactly as long as that is true — this
+  // test is what fails if someone makes it live without updating the UI, or
+  // marks it restart-required when it is not.
   it('cannot re-advertise audio for a camera switched on after the controller was attached', async () => {
     const { platform, accessories } = await withCameras()
     const doorbell = doorbellOf(accessories)
@@ -1296,10 +1296,10 @@ describe('uniFiProtectPlatform', () => {
       expect.objectContaining({ audio: undefined }),
     )
     expect(doorbell.controllers).toHaveLength(1)
-    // The documentation must match the behaviour. The toggle's own label is what
-    // the user reads before clicking, so assert the exported constant itself —
-    // not the file's text, which the explanatory comment would satisfy on its own.
-    expect(AUDIO_LABEL).toMatch(/restart/i)
+    // The UI must match the behaviour. NEEDS_RESTART is what actually drives
+    // the marker renderToggle shows on the audio control — assert that
+    // runtime source of truth, not label text.
+    expect(NEEDS_RESTART.has('audio')).toBe(true)
   })
 
   it('advertises the configured maximum number of concurrent streams', async () => {
