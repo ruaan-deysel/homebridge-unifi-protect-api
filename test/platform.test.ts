@@ -1452,7 +1452,10 @@ describe('uniFiProtectPlatform', () => {
       video: { resolutions: number[][] }
     }
 
-    expect(streaming.video.resolutions).toEqual([[1600, 1200, 15], [800, 600, 15]])
+    // Exactly one size: the lens has a single 1600x1200 stream and ffmpeg is
+    // given no scale filter, so a controller picking anything smaller would be
+    // sent 1600x1200 anyway and may refuse to display it.
+    expect(streaming.video.resolutions).toEqual([[1600, 1200, 15]])
     for (const [width, height] of streaming.video.resolutions)
       expect(width! / height!).toBeCloseTo(4 / 3)
     // No audio even though this camera opted in: the lens shares the main
@@ -1553,6 +1556,60 @@ describe('uniFiProtectPlatform', () => {
     expect(pkg.controllers).toHaveLength(1)
   })
 
+  /** The same "next startup, ffmpeg gone" model, with the accessory restored. */
+  async function restartWithoutFfmpeg(config: unknown, devices: unknown[], pkg: FakePlatformAccessory) {
+    const restarted = makePlatform(config, devices)
+    restarted.platform.probeFfmpeg = (async () => {
+      throw new Error('no usable ffmpeg')
+    }) as never
+    restarted.platform.accessories.set(pkg.UUID, pkg as never)
+    await restarted.platform.discover()
+    return restarted
+  }
+
+  // The retention guard above must never outrank the opt-out: unticking the
+  // toggle is the user's explicit instruction, and a missing ffmpeg is no
+  // reason to keep an accessory they asked to be rid of.
+  it('removes the package accessory when the setting is off, even with ffmpeg unusable', async () => {
+    const { accessories } = await withCameras(cameras, { config: packageOn(DOORBELL) })
+    const pkg = packageOf(accessories)!
+
+    const off = { ...validConfig, devices: { [DOORBELL]: { packageCamera: false } } }
+    const restarted = await restartWithoutFfmpeg(off, cameras, pkg)
+
+    expect(restarted.platform.accessories.has(pkg.UUID)).toBe(false)
+    expect(registered(restarted.api.unregisterPlatformAccessories)).toContain(pkg)
+  })
+
+  // And the same for the lens genuinely being gone from the console's answer.
+  it('removes the package accessory when hasPackageCamera flips to false, even with ffmpeg unusable', async () => {
+    const config = packageOn(DOORBELL)
+    const { accessories } = await withCameras(cameras, { config })
+    const pkg = packageOf(accessories)!
+
+    const lensGone = cameras.map(c => (c.id === DOORBELL ? { ...c, hasPackageCamera: false } : c))
+    const restarted = await restartWithoutFfmpeg(config, lensGone, pkg)
+
+    expect(restarted.platform.accessories.has(pkg.UUID)).toBe(false)
+    expect(registered(restarted.api.unregisterPlatformAccessories)).toContain(pkg)
+  })
+
+  // Renaming the camera in Protect must not leave the package accessory behind
+  // under the old name — it is a separate accessory with its own displayName.
+  it('renames the package accessory when the parent camera is renamed', async () => {
+    const config = packageOn(DOORBELL)
+    const { api, platform, accessories } = await withCameras(cameras, { config })
+    const pkg = packageOf(accessories)!
+    expect(pkg.displayName).toBe('Doorbell Package Camera')
+
+    const client = (platform as unknown as { client: ReturnType<typeof makeClient> }).client
+    client.getCameras.mockResolvedValueOnce(cameras.map(c => (c.id === DOORBELL ? { ...c, name: 'Front Door' } : c)))
+    await platform.discover()
+
+    expect(pkg.displayName).toBe('Front Door Package Camera')
+    expect(registered(api.updatePlatformAccessories)).toContain(pkg)
+  })
+
   // No pre-existing accessory and no usable ffmpeg: there is nothing to keep
   // and nothing worth creating controller-less.
   it('registers no package accessory when ffmpeg is unusable and none existed yet', async () => {
@@ -1602,9 +1659,8 @@ describe('uniFiProtectPlatform', () => {
   // One camera failing must not abort discovery for every other device.
   it('keeps discovering when the package accessory cannot be wired up', async () => {
     const config = { ...validConfig, devices: Object.fromEntries(cameras.map(c => [c.id as string, { packageCamera: true }])) }
-    const { platform } = makePlatform(config, cameras)
+    const { platform, api } = makePlatform(config, cameras)
     const boom = Object.assign(new Error('controller refused'), { cause: { apiKey: 'sk-live-DO-NOT-LOG' } })
-    const api = (platform as unknown as { api: { platformAccessory: unknown } }).api
     class Exploding extends FakePlatformAccessory {
       configureController(controller: never) {
         if (this.displayName.endsWith('Package Camera'))
@@ -1615,6 +1671,19 @@ describe('uniFiProtectPlatform', () => {
     api.platformAccessory = Exploding
 
     await platform.discover()
+
+    // The load-bearing half of the `return uuid` after the catch: the package
+    // accessory is registered and SURVIVES the removal sweep controller-less.
+    // Nothing in the console inventory carries its UUID, so without that return
+    // the sweep would unregister it over a transient wiring failure.
+    const pkg = [...platform.accessories.values()].find(a => a.displayName === 'Doorbell Package Camera')!
+    expect(pkg).toBeDefined()
+    expect((pkg as unknown as FakeAccessory).controllers).toHaveLength(0)
+    platform.confirmRemovalAfterMs = 0
+    await platform.discover()
+    await platform.discover()
+    expect(platform.accessories.has(pkg.UUID)).toBe(true)
+    expect(api.unregisterPlatformAccessories).not.toHaveBeenCalled()
 
     // Every camera still reached HomeKit, controller and all.
     expect(platform.accessories.get(`uuid-${DOORBELL}`)).toBeDefined()

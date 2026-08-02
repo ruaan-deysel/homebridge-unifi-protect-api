@@ -14,7 +14,7 @@ import type {
 import type { ProtectClient } from '../protect/client.js'
 import type { FfmpegCapabilities, RunFfmpeg, SpawnFn } from '../protect/ffmpeg.js'
 import type { StreamUrls } from '../protect/stream.js'
-import type { QualityPreference } from './quality.js'
+import type { Quality, QualityPreference } from './quality.js'
 import { Buffer } from 'node:buffer'
 import { createSocket } from 'node:dgram'
 import { errorMessage } from '../protect/errors.js'
@@ -312,6 +312,10 @@ export class StreamingDelegate implements CameraStreamingDelegate {
    * HomeKit polls snapshots far more eagerly than expected; the short cache
    * keeps that off the console.
    *
+   * The channel goes with the request: without it the package accessory's tile
+   * shows the MAIN lens. The cache lives on the instance and each lens has its
+   * own delegate, so the two can never serve each other's image.
+   *
    * ponytail: caches the result, not the in-flight promise, so two simultaneous
    * first polls both reach the console. Dedupe the promise if that ever shows up.
    */
@@ -320,7 +324,7 @@ export class StreamingDelegate implements CameraStreamingDelegate {
     if (this.snapshotCache && now - this.snapshotCache.at < SNAPSHOT_TTL_MS)
       return this.snapshotCache.jpeg
     try {
-      const jpeg = await this.options.client.getSnapshot(this.options.deviceId, {})
+      const jpeg = await this.options.client.getSnapshot(this.options.deviceId, this.options.channel === 'package' ? { channel: 'package' } : {})
       this.snapshotCache = { at: now, jpeg }
       return jpeg
     }
@@ -369,22 +373,16 @@ export class StreamingDelegate implements CameraStreamingDelegate {
   }
 
   /**
-   * The substream or channel this request resolves to: 'package' for the
-   * package lens, otherwise whatever selectQuality picks. Shared by
-   * streamUrlFor and the session-start log line so the two never disagree.
+   * The package lens has one stream; every other camera selects a substream.
+   * The resolved channel comes back with the URL so the session logs the
+   * channel it actually streams — re-reading the settings later would name a
+   * different one after a mid-session settings change.
    */
-  private channelFor(request: { width: number, height: number }): string {
-    return this.options.channel === 'package'
+  async streamUrlFor(request: { width: number, height: number }): Promise<{ url: string, channel: Quality | 'package' }> {
+    const channel = this.options.channel === 'package'
       ? 'package'
       : selectQuality(request.width, request.height, this.options.settings().quality)
-  }
-
-  /** The package lens has one stream; every other camera selects a substream. */
-  async streamUrlFor(request: { width: number, height: number }): Promise<string> {
-    if (this.options.channel === 'package')
-      return this.options.urls.get(this.options.deviceId, 'package')
-    const quality = selectQuality(request.width, request.height, this.options.settings().quality)
-    return this.options.urls.get(this.options.deviceId, quality)
+    return { url: await this.options.urls.get(this.options.deviceId, channel), channel }
   }
 
   /** Audio for this session, or undefined when it is off or cannot be encoded. */
@@ -424,9 +422,12 @@ export class StreamingDelegate implements CameraStreamingDelegate {
       // both must stay in place — this is deliberate redundancy, not a leftover.
       const audio = await this.audioFor(request, rtp, settings.audio && !isPackage)
 
+      // Resolved ONCE, here: the channel logged at the end must be the one this
+      // session actually streams, whatever the settings say by then.
       let url: string
+      let channel: Quality | 'package'
       try {
-        url = await this.streamUrlFor(request)
+        ({ url, channel } = await this.streamUrlFor(request))
       }
       catch (error) {
         this.options.log.warn(`Could not start a stream for "${this.options.label}": ${errorMessage(error)}`)
@@ -474,7 +475,7 @@ export class StreamingDelegate implements CameraStreamingDelegate {
         return false
       }
       this.sessions.set(sessionId, proc)
-      this.options.log.info(`Live view started for "${this.options.label}" (${this.channelFor(request)} substream, ${audio ? 'with' : 'no'} audio).`)
+      this.options.log.info(`Live view started for "${this.options.label}" (${channel} substream, ${audio ? 'with' : 'no'} audio).`)
       return true
     }
     finally {

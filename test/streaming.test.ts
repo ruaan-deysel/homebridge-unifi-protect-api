@@ -694,6 +694,7 @@ describe('package channel', () => {
 
   function makeDelegate(channel?: 'package') {
     const urls = { get: vi.fn(async () => PKG_URL) }
+    const getSnapshot = vi.fn(async () => Buffer.from(channel ?? 'main'))
     const spawn = vi.fn(() => {
       throw new Error('should not spawn in this test')
     })
@@ -701,26 +702,52 @@ describe('package channel', () => {
       deviceId: 'cam1',
       label: 'Doorbell Package Camera',
       log,
-      client: { getSnapshot: vi.fn(async () => Buffer.from('jpeg')) } as never,
+      client: { getSnapshot } as never,
       urls: urls as never,
       caps: PKG_CAPS,
       channel,
       settings: () => ({ quality: 'auto', audio: true }),
       spawn: spawn as never,
     })
-    return { delegate, urls }
+    return { delegate, urls, getSnapshot }
   }
 
   it('requests the package channel rather than a selected substream', async () => {
     const { delegate, urls } = makeDelegate('package')
-    await delegate.streamUrlFor({ width: 1920, height: 1080 })
+    const resolved = await delegate.streamUrlFor({ width: 1920, height: 1080 })
     expect(urls.get).toHaveBeenCalledWith('cam1', 'package')
+    // Returned alongside the URL, and it is what the session logs: reading the
+    // settings again later would name a channel this session is not streaming.
+    expect(resolved.channel).toBe('package')
   })
 
   it('still selects a substream when no channel is given', async () => {
     const { delegate, urls } = makeDelegate()
-    await delegate.streamUrlFor({ width: 1280, height: 720 })
+    const resolved = await delegate.streamUrlFor({ width: 1280, height: 720 })
     expect(urls.get).toHaveBeenCalledWith('cam1', 'medium')
+    expect(resolved.channel).toBe('medium')
+  })
+
+  // Without the channel the console answers with the MAIN lens, so the package
+  // accessory's tile in Home.app shows the wrong camera entirely.
+  it('asks the console for the package lens when snapshotting a package delegate', async () => {
+    const { delegate, getSnapshot } = makeDelegate('package')
+    await delegate.snapshot()
+    expect(getSnapshot).toHaveBeenCalledWith('cam1', { channel: 'package' })
+  })
+
+  it('asks for no channel at all on an ordinary camera', async () => {
+    const { delegate, getSnapshot } = makeDelegate()
+    await delegate.snapshot()
+    expect(getSnapshot).toHaveBeenCalledWith('cam1', {})
+  })
+
+  // The 2s cache lives on the delegate, and each lens has its own delegate.
+  it('does not let one lens serve the other lens image from cache', async () => {
+    const main = makeDelegate()
+    const pkg = makeDelegate('package')
+    expect((await main.delegate.snapshot()).toString()).toBe('main')
+    expect((await pkg.delegate.snapshot()).toString()).toBe('package')
   })
 
   it('never requests audio on a package delegate, even when the camera opted in', async () => {

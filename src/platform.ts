@@ -111,6 +111,11 @@ function videoStreamingOptions(hap: HAP): CameraStreamingOptions['video'] {
  * frame it cannot produce. 15 fps because the console serves the lens at 2 fps
  * and the delegate pads ffmpeg's output up to this rate; HomeKit mistakes a
  * genuine 2 fps feed for a stalled stream.
+ *
+ * ONE resolution, deliberately: the lens has a single stream with no substream
+ * to select, and buildFfmpegArgs applies no scale filter, so a controller that
+ * picked a smaller size would be sent 1600x1200 anyway and may refuse it. Add
+ * more only together with a hardware-aware scale filter chain.
  */
 function packageVideoStreamingOptions(hap: HAP): CameraStreamingOptions['video'] {
   return {
@@ -120,7 +125,6 @@ function packageVideoStreamingOptions(hap: HAP): CameraStreamingOptions['video']
     },
     resolutions: [
       [1600, 1200, 15],
-      [800, 600, 15],
     ],
   }
 }
@@ -648,16 +652,9 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
    */
   private async attachPackageCamera(device: DiscoveredDevice): Promise<string | undefined> {
     const uuid = this.api.hap.uuid.generate(packageSeed(device.id))
-    // No usable ffmpeg means no live view for anyone. `urls` too: both are set
-    // together in prepareStreaming, and the delegate needs it. An already
-    // registered package accessory is kept anyway (controller-less) — the
-    // outage is transient, and unregistering here would be immediate (see
-    // `reconcile`'s `reported` set) and permanently drop the user's HomeKit
-    // room/scene/automation membership over a startup blip. A package
-    // accessory that does not exist yet is not created for a camera with no
-    // usable ffmpeg: that is a genuine "nothing to show yet".
-    if (!this.caps || !this.urls)
-      return this.accessories.has(uuid) ? uuid : undefined
+    // BOTH removals first, ABOVE the ffmpeg guard: unticking the setting and
+    // the console dropping the lens are genuine "this no longer belongs", and
+    // must still unregister even while ffmpeg is unavailable.
     if (!settingsFor(this.config!, device.id).packageCamera)
       return
     // Straight off the payload this loop is already holding — no request of any
@@ -668,6 +665,16 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
     // field can be missing or any type at all.
     if (device.hasPackageCamera !== true)
       return
+    // No usable ffmpeg means no live view for anyone. `urls` too: both are set
+    // together in prepareStreaming, and the delegate needs it. An already
+    // registered package accessory that still belongs is kept anyway
+    // (controller-less) — the outage is transient, and unregistering here would
+    // be immediate (see `reconcile`'s `reported` set) and permanently drop the
+    // user's HomeKit room/scene/automation membership over a startup blip. A
+    // package accessory that does not exist yet is not created for a camera
+    // with no usable ffmpeg: that is a genuine "nothing to show yet".
+    if (!this.caps || !this.urls)
+      return this.accessories.has(uuid) ? uuid : undefined
 
     const label = `${labelFor(device)} Package Camera`
     // From here on the accessory belongs in HomeKit, so the UUID is returned
