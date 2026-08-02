@@ -55,11 +55,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for cameras whose payload reports the lens (`hasPackageCamera`) and whose owner switched
   it on in the settings. It is bridged like every other accessory, is a camera and nothing
   else — the package motion sensor stays on the main accessory, so existing automations are
-  untouched — and it advertises one 4:3 resolution (1600×1200) and no audio. Only the one
-  size is offered because the lens has a single stream and nothing scales it, so a smaller
-  advertised size would be a promise the console cannot keep. Its snapshots come from the
-  package channel, so the tile shows the downward view rather than the main lens.
+  untouched — and it advertises a range of 4:3 sizes and no audio. Its snapshots come from
+  the package channel, so the tile shows the downward view rather than the main lens.
   Switching the setting off removes it again on the next discovery.
+- The package lens transcode is scaled to whatever size HomeKit asks for, and its frame
+  rate padded to the rate HomeKit negotiated, so every advertised size is one the plugin
+  actually delivers. That path decodes in software and scales before handing the frame to
+  the hardware encoder: scaling on the GPU fails outright on the reference host, and
+  decoding this lens in software costs almost nothing because the console serves it at
+  2 fps.
 - The Doorbell's package lens can now be streamed like any other camera. It has one stream
   rather than a choice of substreams, and the console serves it at 1600×1200/2 fps rather
   than 16:9/30 fps like every other lens, so HomeKit is told to expect 15 fps and ffmpeg
@@ -115,6 +119,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   physical device, so nobody should be surprised by either consequence after the fact.
 
 ### Fixed
+- The package camera would not stream at all: HomeKit showed "No Response" for every live
+  view, with nothing logged anywhere to explain it. It had been advertising a single
+  1600×1200 at 15 fps, which HomeKit rejects on two counts — every advertised stream must
+  offer at least 24 fps, and 1600×1200 is not one of the 4:3 sizes it accepts. Nothing in
+  the stack validates this, so the refusal was silent: HomeKit simply never asked for
+  video, and no request ever reached the plugin. It now advertises a range of accepted 4:3
+  sizes at 30 fps, and scales the picture to whichever one HomeKit picks.
 - A package camera already in HomeKit is no longer unregistered when the plugin starts
   without a usable ffmpeg. It used to be removed immediately — not after the usual
   confirmation window — so a single restart with ffmpeg temporarily missing permanently
