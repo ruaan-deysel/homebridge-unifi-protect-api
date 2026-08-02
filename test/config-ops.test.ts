@@ -22,6 +22,9 @@ export class FakeElement {
   checked = false
   /** Only the one CSS property ui-render.js touches. */
   style: { display: string } = { display: '' }
+  /** Mirrors the real DOM's `dataset` — a property bag, never markup. */
+  dataset: Record<string, string> = {}
+  tabIndex = 0
   private listeners = new Map<string, ((event: Record<string, unknown>) => void)[]>()
   private _text = ''
   private _html?: string

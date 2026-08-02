@@ -33,7 +33,15 @@
 </div>
 
 <div id="devices-pane">
-  <div id="devices"></div>
+  <div class="row">
+    <div class="col-4">
+      <input class="form-control mb-2" id="device-filter" type="search" placeholder="Filter devices…" aria-label="Filter devices">
+      <div id="device-list"></div>
+    </div>
+    <div class="col-8">
+      <div id="device-detail" class="text-body-secondary">Select a device from the list.</div>
+    </div>
+  </div>
 </div>
 
 <div id="help-pane">
@@ -46,8 +54,8 @@
 <div id="tab-root"></div>
 
 <script type="module">
-  import { cameraToggles, defaultFor, ensureConfig, parseMaxStreams, renderDeviceHeader, renderQualitySelect, renderToggle, setDeviceSetting, setGlobalSetting } from './config-ops.js'
-  import { renderTabs } from './ui-render.js'
+  import { cameraToggles, defaultFor, ensureConfig, parseMaxStreams, renderQualitySelect, renderToggle, setDeviceSetting, setGlobalSetting } from './config-ops.js'
+  import { renderDetail, renderDeviceList, renderTabs } from './ui-render.js'
 
   // Build the tab shell, then move each pane's static markup into the empty
   // pane element renderTabs created for it — the DOM nodes themselves are
@@ -65,7 +73,9 @@
 
   const statusEl = document.getElementById('status')
   const trustEl = document.getElementById('trust')
-  const devicesEl = document.getElementById('devices')
+  const deviceListEl = document.getElementById('device-list')
+  const deviceFilterEl = document.getElementById('device-filter')
+  const deviceDetailEl = document.getElementById('device-detail')
   const hostEl = document.getElementById('host')
   const keyEl = document.getElementById('apiKey')
 
@@ -103,69 +113,83 @@
     await save()
   })
 
-  function render(devices) {
-    devicesEl.replaceChildren()
-    for (const device of devices) {
-      const card = document.createElement('div')
-      card.className = 'card card-body mb-2'
-      // device.name/device.type are console-supplied — never innerHTML them.
-      card.append(...renderDeviceHeader(document, device))
+  // Which section a per-device toggle belongs in. `expose` is the only
+  // General control; everything camera-specific that cameraToggles() offers
+  // is live-view related except hksv (Recording) and packageCamera (a
+  // genuinely separate accessory).
+  const TOGGLE_SECTION = { hksv: 'Recording', packageCamera: 'Extra accessories' }
 
-      const grid = document.createElement('div')
-      grid.className = 'd-flex flex-wrap gap-3'
+  /**
+   * Renders one device's settings into the detail pane and moves focus to its
+   * heading — the list stays where it is, but the content the user asked for
+   * just replaced what used to be there, so focus has to follow it.
+   */
+  function showDetail(device) {
+    const { pane, heading, bodies } = renderDetail(document, device)
 
-      const toggle = (key, label, comingLater) => {
-        const fallback = defaultFor(config, key)
-        // id embeds device.id (console-supplied) — renderToggle builds it with
-        // DOM APIs only, and carries the injection test for this path.
-        const { wrap, input } = renderToggle(document, `${device.id}-${key}`, label)
-        input.checked = Boolean(settingOf(device.id, key, fallback))
-        if (comingLater) {
-          // Shown, but inert and said so plainly. This release has no camera
-          // services yet, so honouring the flag is impossible — offering a
-          // live checkbox that quietly does nothing would be the dishonest
-          // option, and hiding it entirely hides the roadmap.
-          // Sub-project 2 must drop `comingLater` when the services land, or
-          // the settings stay permanently unreachable. Note also that a
-          // hand-edited `hksv: true` renders checked-but-disabled and cannot
-          // be cleared here — harmless while nothing reads it, but it must not
-          // outlive this release.
-          input.disabled = true
-          wrap.className = 'text-body-secondary small'
-          wrap.append(' — arriving in a later release')
-        }
-        else {
-          input.addEventListener('change', async () => {
-            config = setDeviceSetting(config, device.id, key, input.checked)
-            await save()
-          })
-        }
-        grid.append(wrap)
+    const toggle = (body, key, label, comingLater) => {
+      const fallback = defaultFor(config, key)
+      // id embeds device.id (console-supplied) — renderToggle builds it with
+      // DOM APIs only, and carries the injection test for this path.
+      const { wrap, input } = renderToggle(document, `${device.id}-${key}`, label)
+      input.checked = Boolean(settingOf(device.id, key, fallback))
+      if (comingLater) {
+        // Shown, but inert and said so plainly. This release has no camera
+        // services yet, so honouring the flag is impossible — offering a
+        // live checkbox that quietly does nothing would be the dishonest
+        // option, and hiding it entirely hides the roadmap.
+        // Sub-project 2 must drop `comingLater` when the services land, or
+        // the settings stay permanently unreachable. Note also that a
+        // hand-edited `hksv: true` renders checked-but-disabled and cannot
+        // be cleared here — harmless while nothing reads it, but it must not
+        // outlive this release.
+        input.disabled = true
+        wrap.className = 'text-body-secondary small'
+        wrap.append(' — arriving in a later release')
       }
-
-      toggle('expose', 'Expose in HomeKit')
-      // Capability-driven: a control is only offered when the hardware can
-      // honour it, so the UI never lets someone flip a setting that will
-      // silently do nothing.
-      if (device.type === 'camera') {
-        // Live and enabled, like audio and talkback below and unlike hksv:
-        // these genuinely work now, so a disabled control would be the
-        // dishonest one. Only hksv still carries `comingLater`.
-        const { wrap, select } = renderQualitySelect(document, device, settingOf(device.id, 'quality', config.defaults.quality))
-        select.addEventListener('change', async () => {
-          config = setDeviceSetting(config, device.id, 'quality', select.value)
+      else {
+        input.addEventListener('change', async () => {
+          config = setDeviceSetting(config, device.id, key, input.checked)
           await save()
         })
-        grid.append(wrap)
-        // Which checkboxes a camera gets — including whether the package lens
-        // is offered — is decided in config-ops.js, where a test can reach it.
-        for (const { key, label, comingLater } of cameraToggles(device))
-          toggle(key, label, comingLater)
       }
-
-      card.append(grid)
-      devicesEl.append(card)
+      body.append(wrap)
     }
+
+    toggle(bodies.General, 'expose', 'Expose in HomeKit')
+
+    // Capability-driven: a control is only offered when the hardware can
+    // honour it, so the UI never lets someone flip a setting that will
+    // silently do nothing.
+    if (device.type === 'camera') {
+      // Live and enabled, like audio and talkback below and unlike hksv:
+      // these genuinely work now, so a disabled control would be the
+      // dishonest one. Only hksv still carries `comingLater`.
+      const { wrap, select } = renderQualitySelect(document, device, settingOf(device.id, 'quality', config.defaults.quality))
+      select.addEventListener('change', async () => {
+        config = setDeviceSetting(config, device.id, 'quality', select.value)
+        await save()
+      })
+      bodies['Live view'].append(wrap)
+      // Which checkboxes a camera gets — including whether the package lens
+      // is offered — is decided in config-ops.js, where a test can reach it.
+      for (const { key, label, comingLater } of cameraToggles(device))
+        toggle(bodies[TOGGLE_SECTION[key] ?? 'Live view'], key, label, comingLater)
+    }
+
+    deviceDetailEl.replaceChildren(pane)
+    heading.focus()
+  }
+
+  function render(devices) {
+    const { list, filter } = renderDeviceList(document, devices, (id) => {
+      const device = devices.find(d => d.id === id)
+      if (device)
+        showDetail(device)
+    })
+    deviceListEl.replaceChildren(list)
+    deviceFilterEl.value = ''
+    deviceFilterEl.oninput = () => filter(deviceFilterEl.value)
   }
 
   /**

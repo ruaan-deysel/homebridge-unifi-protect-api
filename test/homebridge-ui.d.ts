@@ -139,8 +139,11 @@ declare module '*/homebridge-ui/public/ui-render.js' {
     className: string
     style: { display: string }
     attributes: Record<string, string>
+    dataset: Record<string, string>
+    tabIndex: number
     setAttribute: (name: string, value: string) => void
     addEventListener: (type: 'click' | 'keydown', handler: (event: { key?: string }) => void) => void
+    focus: () => void
   }
   export interface MinimalDocument {
     createElement: (tag: string) => MinimalDomElement
@@ -153,5 +156,29 @@ declare module '*/homebridge-ui/public/ui-render.js' {
     panes: MinimalDomElement[]
     buttons: MinimalDomElement[]
     select: (index: number) => void
+  }
+
+  export interface ListedDevice {
+    id: string
+    name: string
+    type: string
+  }
+  export function renderDeviceList(
+    doc: MinimalDocument,
+    devices: ListedDevice[],
+    onSelect: (id: string) => void,
+  ): {
+    list: MinimalDomElement
+    filter: (term: string) => void
+    rows: () => MinimalDomElement[]
+  }
+
+  export function renderDetail(
+    doc: MinimalDocument,
+    device: { name: string },
+  ): {
+    pane: MinimalDomElement
+    heading: MinimalDomElement
+    bodies: Record<'General' | 'Live view' | 'Recording' | 'Extra accessories', MinimalDomElement>
   }
 }
