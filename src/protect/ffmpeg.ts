@@ -235,6 +235,15 @@ export class FfmpegProcess {
     child.stderr?.on('data', (chunk: Buffer) => this.absorb(chunk.toString()))
 
     if (this.options.stdin !== undefined) {
+      // A child that has already died (or closed its own stdin) turns this
+      // write into an EPIPE, delivered as an 'error' event on the stream —
+      // and Node crashes the host process on an unhandled 'error' event.
+      // Deliberately swallowed rather than logged: the same death is already
+      // reported, with better detail (exit code, stderr tail), by the
+      // 'close'/'error' handlers on the child below. Routing this into
+      // finish() too would just risk winning the idempotency race and
+      // burying that richer message behind a bare "stdin failed".
+      child.stdin?.on('error', () => {})
       child.stdin?.write(this.options.stdin)
       child.stdin?.end()
     }

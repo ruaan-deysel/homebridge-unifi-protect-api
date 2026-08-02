@@ -148,7 +148,7 @@ const URL = `rtsps://192.0.2.1:7441/live?token=${SECRET}`
 function fakeSpawn() {
   const proc = Object.assign(new EventEmitter(), {
     stderr: new EventEmitter(),
-    stdin: { write: vi.fn(), end: vi.fn() },
+    stdin: Object.assign(new EventEmitter(), { write: vi.fn(), end: vi.fn() }),
     // Real child.kill() returns true once the signal was actually delivered.
     kill: vi.fn(() => true),
     killed: false,
@@ -448,5 +448,17 @@ describe('ffmpegProcess', () => {
     // @ts-expect-error simulating a ChildProcess whose stdin is null, as Node's types allow
     proc.stdin = undefined
     expect(() => new FfmpegProcess({ path: '/usr/bin/ffmpeg', args: [], log, spawn, stdin: 'v=0\r\n' }).start()).not.toThrow()
+  })
+
+  // Node's EventEmitter treats 'error' specially: emitting it with zero
+  // listeners throws synchronously, which is exactly how an unhandled EPIPE
+  // on child.stdin would crash the host Homebridge process. Emitting through
+  // the real EventEmitter (not a spy) is what makes this test fail honestly
+  // without the fix, rather than merely checking a listener was registered.
+  it('does not crash when child.stdin emits an error (e.g. EPIPE from a dead process)', () => {
+    const { proc, spawn } = fakeSpawn()
+    const p = new FfmpegProcess({ path: '/usr/bin/ffmpeg', args: [], log, spawn, stdin: 'v=0\r\n' })
+    p.start()
+    expect(() => proc.stdin.emit('error', Object.assign(new Error('EPIPE'), { code: 'EPIPE' }))).not.toThrow()
   })
 })
