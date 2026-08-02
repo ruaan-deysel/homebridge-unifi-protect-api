@@ -437,3 +437,17 @@ describe('renderDeviceHeader (XSS regression)', () => {
     expect(findByTag([nameEl], 'IMG')).toBeNull()
   })
 })
+
+describe('talkback toggle', () => {
+  it('offers talkback on a speaker camera, enabled', () => {
+    const toggles = cameraToggles({ hasSpeaker: true, hasMic: true, hasPackageCamera: false })
+    const talkback = toggles.find(t => t.key === 'talkback')
+    expect(talkback?.comingLater).toBeUndefined()
+    expect(talkback?.label).toContain('restart')
+  })
+
+  it('offers no talkback without a speaker', () => {
+    const toggles = cameraToggles({ hasSpeaker: false, hasMic: true, hasPackageCamera: false })
+    expect(toggles.find(t => t.key === 'talkback')).toBeUndefined()
+  })
+})
