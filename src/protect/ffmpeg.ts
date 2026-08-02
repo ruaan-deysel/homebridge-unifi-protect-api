@@ -141,13 +141,17 @@ export async function probeFfmpeg(options: ProbeOptions): Promise<FfmpegCapabili
 }
 
 /**
- * ffmpeg echoes its full command line on failure, and our command line contains
- * an RTSPS URL carrying an auth token. Redaction happens BEFORE anything is
- * logged — filtering afterwards means the secret has already been formatted into
- * a string somebody may hold a reference to.
+ * Stream URLs AND SRTP keys. ffmpeg echoes its full command line on failure,
+ * and our command line contains both an RTSPS URL carrying an auth token and,
+ * for talkback, a `-srtp_out_params <key|salt>` — a per-session secret.
+ * Redaction happens BEFORE anything is logged — filtering afterwards means the
+ * secret has already been formatted into a string somebody may hold a
+ * reference to.
  */
 export function redactStreamUrls(text: string): string {
-  return text.replace(/rtsps?:\/\/\S+/gi, '<stream-url-redacted>')
+  return text
+    .replace(/rtsps?:\/\/\S+/gi, '<stream-url-redacted>')
+    .replace(/(-srtp_(?:in|out)_params\s+)\S+/gi, '$1<srtp-key-redacted>')
 }
 
 /** How much redacted stderr is kept to explain a failure. */

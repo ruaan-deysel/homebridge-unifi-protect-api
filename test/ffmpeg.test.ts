@@ -171,6 +171,21 @@ describe('redactStreamUrls', () => {
   it('leaves text without urls untouched', () => {
     expect(redactStreamUrls('no url here')).toBe('no url here')
   })
+
+  it('redacts srtp key parameters', () => {
+    const line = '-srtp_out_params AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA== -f rtp'
+    expect(redactStreamUrls(line)).not.toContain('AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==')
+    expect(redactStreamUrls(line)).toContain('-srtp_out_params')
+  })
+
+  it('redacts inbound srtp key parameters', () => {
+    const line = '-srtp_in_params SECRETKEYSECRETKEYSECRETKEY== -i srtp://127.0.0.1:5000'
+    expect(redactStreamUrls(line)).not.toContain('SECRETKEYSECRETKEYSECRETKEY==')
+  })
+
+  it('still redacts stream urls', () => {
+    expect(redactStreamUrls('rtsps://host:7441/token')).toBe('<stream-url-redacted>')
+  })
 })
 
 // The structural half of the redaction fix: redaction only ever runs on whole
@@ -292,6 +307,26 @@ describe('ffmpegProcess', () => {
     // is silently DROPPED at close would also contain no secret, while throwing
     // away the line that explains the failure.
     expect(message).toContain('opening <stream-url-redacted>')
+  })
+
+  // The sentinel: same shape as the stream-url leak test above, but for the
+  // SRTP key ffmpeg echoes when talkback fails. `util.inspect` on the whole
+  // captured call list is the same check that has caught a raw-error leak
+  // before, so it stays the assertion even though nothing here throws.
+  it('never leaks an srtp key through a failed process', () => {
+    log.warn.mockClear()
+    const SRTP_SECRET = 'PLANTEDSENTINELKEY=='
+    const { proc, spawn } = fakeSpawn()
+    const p = new FfmpegProcess({ path: '/usr/bin/ffmpeg', args: ['-srtp_out_params', SRTP_SECRET], log, spawn })
+    p.start()
+    proc.stderr.emit('data', Buffer.from(`-srtp_out_params ${SRTP_SECRET} -f rtp\n`))
+    proc.emit('close', 1)
+
+    expect(log.warn).toHaveBeenCalledTimes(1)
+    expect(log.warn.mock.calls[0]?.[0]).toContain('ffmpeg exited with code 1')
+
+    const logged = inspect(log.warn.mock.calls, { depth: 10 })
+    expect(logged).not.toContain(SRTP_SECRET)
   })
 
   it('tracks and releases an active slot', () => {
