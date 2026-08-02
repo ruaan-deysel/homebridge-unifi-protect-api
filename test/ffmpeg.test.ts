@@ -148,6 +148,7 @@ const URL = `rtsps://192.0.2.1:7441/live?token=${SECRET}`
 function fakeSpawn() {
   const proc = Object.assign(new EventEmitter(), {
     stderr: new EventEmitter(),
+    stdout: new EventEmitter(),
     stdin: Object.assign(new EventEmitter(), { write: vi.fn(), end: vi.fn() }),
     // Real child.kill() returns true once the signal was actually delivered.
     kill: vi.fn(() => true),
@@ -454,6 +455,21 @@ describe('ffmpegProcess', () => {
     new FfmpegProcess({ path: '/usr/bin/ffmpeg', args: [], log, spawn }).start()
     expect(proc.stdin.write).not.toHaveBeenCalled()
     expect(proc.stdin.end).not.toHaveBeenCalled()
+  })
+
+  it('delivers stdout chunks in order', () => {
+    const seen: string[] = []
+    const { proc, spawn } = fakeSpawn()
+    new FfmpegProcess({ path: '/usr/bin/ffmpeg', args: [], log, onStdout: c => seen.push(c.toString()), spawn }).start()
+    proc.stdout.emit('data', Buffer.from('a'))
+    proc.stdout.emit('data', Buffer.from('b'))
+    expect(seen).toEqual(['a', 'b'])
+  })
+
+  it('does not read stdout when no consumer is given', () => {
+    const { proc, spawn } = fakeSpawn()
+    new FfmpegProcess({ path: '/usr/bin/ffmpeg', args: [], log, spawn }).start()
+    expect(proc.stdout.listenerCount('data')).toBe(0)
   })
 
   it('does not throw when the child has no stdin stream', () => {

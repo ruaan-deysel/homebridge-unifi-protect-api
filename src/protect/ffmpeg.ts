@@ -215,6 +215,14 @@ interface FfmpegProcessOptions {
    * spoke into the first one.
    */
   counted?: boolean
+  /**
+   * Consumes stdout. Recording reads fragmented MP4 from here.
+   *
+   * Deliberately NOT routed through the stderr machinery: that path redacts and
+   * retains text for diagnostics, and this is binary media — buffering it there
+   * would leak memory and log nothing useful. stdout is never logged.
+   */
+  onStdout?: (chunk: Buffer) => void
 }
 
 /** Spawns, tracks and kills a single ffmpeg process. */
@@ -258,6 +266,9 @@ export class FfmpegProcess {
       FfmpegProcess.active++
 
     child.stderr?.on('data', (chunk: Buffer) => this.absorb(chunk.toString()))
+
+    if (this.options.onStdout)
+      child.stdout?.on('data', (chunk: Buffer) => this.options.onStdout!(chunk))
 
     if (this.options.stdin !== undefined) {
       // A child that has already died (or closed its own stdin) turns this
