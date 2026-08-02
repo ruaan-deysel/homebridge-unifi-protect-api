@@ -63,6 +63,7 @@ declare module '*/homebridge-ui/public/config-ops.js' {
     exposeNewDevices: boolean
     quality: string
     hksv: boolean
+    icloudTier: string
   }
 
   export interface DeviceOverride {
@@ -80,6 +81,7 @@ declare module '*/homebridge-ui/public/config-ops.js' {
   }
 
   export const DEFAULTS: Defaults
+  export const RECORDING_LIMITS: Record<string, number>
   export function ensureConfig(raw?: Partial<ConfigShape> | null): ConfigShape
   export function setDeviceSetting(
     config: ConfigShape,
