@@ -106,16 +106,24 @@ function videoStreamingOptions(hap: HAP): CameraStreamingOptions['video'] {
 }
 
 /**
- * What the package lens advertises. It is 1600x1200 — 4:3, not 16:9 like every
- * other stream this plugin serves — so advertising a 16:9 size would promise a
- * frame it cannot produce. 15 fps because the console serves the lens at 2 fps
- * and the delegate pads ffmpeg's output up to this rate; HomeKit mistakes a
- * genuine 2 fps feed for a stalled stream.
+ * What the package lens advertises. 4:3 throughout, because the lens is 4:3 —
+ * a 16:9 entry would promise a frame it cannot produce.
  *
- * ONE resolution, deliberately: the lens has a single stream with no substream
- * to select, and buildFfmpegArgs applies no scale filter, so a controller that
- * picked a smaller size would be sent 1600x1200 anyway and may refuse it. Add
- * more only together with a hardware-aware scale filter chain.
+ * A LADDER, and every entry at 30 fps, because Apple's HAP R2 spec (11.7,
+ * 11.8.1) requires it: each advertised stream must offer at least 24 fps, and
+ * Table 11-2 lists the legal 4:3 sizes as 1280x960, 1024x768, 640x480, 480x360
+ * and 320x240. hap-nodejs validates NEITHER rule and encodes whatever it is
+ * handed, so a non-conformant list fails completely silently — the earlier
+ * single `[1600, 1200, 15]` made iOS refuse to negotiate at all: it never wrote
+ * SetupEndpoints, the delegate was never called, and nothing appeared in any
+ * log anywhere. Verified against real hardware: with this list iOS negotiates
+ * 1280x960@30 and the stream starts.
+ *
+ * 1920x1440 and 1280x960 are here on top of the spec's list because HomeKit
+ * mandates the 1920 and 1280 widths; 1920x1440 exceeds the lens's native
+ * 1600x1200 and is upscaled rather than omitted for exactly that reason.
+ * buildFfmpegArgs scales the transcode to whatever size is negotiated, so
+ * every entry is a promise the encoder now keeps.
  */
 function packageVideoStreamingOptions(hap: HAP): CameraStreamingOptions['video'] {
   return {
@@ -124,7 +132,13 @@ function packageVideoStreamingOptions(hap: HAP): CameraStreamingOptions['video']
       levels: [hap.H264Level.LEVEL3_1, hap.H264Level.LEVEL3_2, hap.H264Level.LEVEL4_0],
     },
     resolutions: [
-      [1600, 1200, 15],
+      [1920, 1440, 30],
+      [1600, 1200, 30],
+      [1280, 960, 30],
+      [1024, 768, 30],
+      [640, 480, 30],
+      [480, 360, 30],
+      [320, 240, 30],
     ],
   }
 }

@@ -232,6 +232,7 @@ interface DelegateOverrides {
   spawn?: () => ChildProcess
   quality?: 'auto' | 'low' | 'medium' | 'high'
   maxStreams?: number
+  channel?: 'package'
 }
 
 const jpeg = Buffer.from('jpeg-bytes')
@@ -289,6 +290,7 @@ function makeDelegate(overrides: DelegateOverrides = {}) {
     spawn,
     run,
     maxStreams: overrides.maxStreams,
+    channel: overrides.channel,
   })
   return { delegate, getSnapshot, get, spawn, run, log }
 }
@@ -775,5 +777,72 @@ describe('buildFfmpegArgs frame-rate padding', () => {
 
   it('omits -r when no fps is supplied', () => {
     expect(buildFfmpegArgs(PKG_CAPS, base)).not.toContain('-r')
+  })
+})
+
+describe('buildFfmpegArgs scaling', () => {
+  const base = { url: PKG_URL, bitrate: 800, address: '192.0.2.9', video: pkgTarget() }
+  const scale = { width: 1280, height: 960 }
+
+  // The filter has to match where the frames live. With hardware decoding they
+  // are GPU surfaces, and a software `scale` cannot touch them — the filter
+  // graph fails to build and the stream never starts.
+  const expected = [
+    { name: 'vaapi', caps: PKG_CAPS, filter: 'scale_vaapi=w=1280:h=960' },
+    { name: 'qsv', caps: { path: '/usr/bin/ffmpeg', encoder: 'h264_qsv' as const, hwaccel: 'qsv' as const }, filter: 'vpp_qsv=w=1280:h=960' },
+    { name: 'software', caps: { path: '/usr/bin/ffmpeg', encoder: 'libx264' as const }, filter: 'scale=1280:960' },
+  ]
+
+  for (const { name, caps, filter } of expected) {
+    it(`uses the ${name} scale filter with the negotiated size`, () => {
+      const args = buildFfmpegArgs(caps, { ...base, scale })
+      expect(args).toContain('-vf')
+      expect(args[args.indexOf('-vf') + 1]).toBe(filter)
+    })
+  }
+
+  it('follows the negotiated size rather than a constant', () => {
+    const args = buildFfmpegArgs(PKG_CAPS, { ...base, scale: { width: 640, height: 480 } })
+    expect(args[args.indexOf('-vf') + 1]).toBe('scale_vaapi=w=640:h=480')
+  })
+
+  it('places -vf before -f rtp and the output url, so it applies to that output', () => {
+    // Position, not presence: an output option after the output URL dangles and
+    // never reaches the encoder. `-r` shipped broken that way once already.
+    const args = buildFfmpegArgs(PKG_CAPS, { ...base, scale })
+    expect(args.indexOf('-vf')).toBeLessThan(args.indexOf('-f'))
+    expect(args.indexOf('-vf')).toBeLessThan(args.findIndex(a => a.startsWith('srtp://')))
+    // And after the input, not among the input options — an input-side -vf is
+    // not a thing ffmpeg accepts.
+    expect(args.indexOf('-vf')).toBeGreaterThan(args.indexOf('-i'))
+  })
+
+  it('adds no filter when no size is given, leaving the main-camera path alone', () => {
+    expect(buildFfmpegArgs(PKG_CAPS, base)).not.toContain('-vf')
+    expect(buildFfmpegArgs(CAPS_SW, base)).not.toContain('-vf')
+  })
+})
+
+describe('package session honours what homekit negotiated', () => {
+  // 1024x768@24 — neither the lens's native size nor the old hardcoded 15 fps,
+  // so a constant anywhere in the path shows up here.
+  const negotiated = { ...REQUEST, width: 1024, height: 768, fps: 24 }
+
+  it('scales to and pads to the negotiated size and rate', async () => {
+    const { delegate, spawn } = makeDelegate({ channel: 'package' })
+    expect(await delegate.startSession('a', negotiated, RTP)).toBe(true)
+    const args = argvOf(spawn)
+    expect(args[args.indexOf('-vf') + 1]).toBe('scale_vaapi=w=1024:h=768')
+    expect(args[args.indexOf('-r') + 1]).toBe('24')
+    delegate.stopAll()
+  })
+
+  it('leaves the main-camera path with neither a filter nor a forced rate', async () => {
+    const { delegate, spawn } = makeDelegate()
+    expect(await delegate.startSession('a', negotiated, RTP)).toBe(true)
+    const args = argvOf(spawn)
+    expect(args).not.toContain('-vf')
+    expect(args).not.toContain('-r')
+    delegate.stopAll()
   })
 })

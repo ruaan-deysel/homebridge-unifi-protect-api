@@ -1452,12 +1452,23 @@ describe('uniFiProtectPlatform', () => {
       video: { resolutions: number[][] }
     }
 
-    // Exactly one size: the lens has a single 1600x1200 stream and ffmpeg is
-    // given no scale filter, so a controller picking anything smaller would be
-    // sent 1600x1200 anyway and may refuse to display it.
-    expect(streaming.video.resolutions).toEqual([[1600, 1200, 15]])
-    for (const [width, height] of streaming.video.resolutions)
+    // The exact ladder, not merely "some 4:3 sizes". A single non-conformant
+    // entry made iOS refuse to negotiate at all, silently — hap-nodejs
+    // validates neither the 24 fps floor nor the legal sizes.
+    expect(streaming.video.resolutions).toEqual([
+      [1920, 1440, 30],
+      [1600, 1200, 30],
+      [1280, 960, 30],
+      [1024, 768, 30],
+      [640, 480, 30],
+      [480, 360, 30],
+      [320, 240, 30],
+    ])
+    for (const [width, height, fps] of streaming.video.resolutions) {
       expect(width! / height!).toBeCloseTo(4 / 3)
+      // HAP R2 11.8.1: every advertised stream must offer at least 24 fps.
+      expect(fps!).toBeGreaterThanOrEqual(24)
+    }
     // No audio even though this camera opted in: the lens shares the main
     // camera's microphone, so HAP must not create a Microphone service here.
     expect(streaming.audio).toBeUndefined()

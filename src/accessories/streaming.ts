@@ -107,6 +107,14 @@ export interface StreamArgs {
    * compress to almost nothing.
    */
   fps?: number
+  /**
+   * Output size. Supplied only for the package lens, which has a single
+   * 1600x1200 stream and no substream to pick from, so without a scale filter
+   * every advertised resolution below (or above) that would be a promise the
+   * encoder does not keep. Main cameras select a substream that already
+   * approximates the request and need no filter.
+   */
+  scale?: { width: number, height: number }
 }
 
 const SRTP_SUITE = 'AES_CM_128_HMAC_SHA1_80'
@@ -115,6 +123,20 @@ function destination(address: string, target: RtpTarget, packetSize: number): st
   const host = address.includes(':') ? `[${address}]` : address
   const local = target.localPort === undefined ? '' : `&localrtcpport=${target.localPort}`
   return `srtp://${host}:${target.port}?rtcpport=${target.port}${local}&pkt_size=${packetSize}`
+}
+
+/**
+ * The scale filter that matches the encoder. With hardware decoding the frames
+ * are already VAAPI/QSV surfaces in GPU memory, and plain `scale` — a software
+ * filter — cannot touch them: ffmpeg would fail to build the filter graph and
+ * the stream would never start.
+ */
+function scaleFilter(caps: FfmpegCapabilities, size: { width: number, height: number }): string {
+  if (caps.hwaccel === 'vaapi')
+    return `scale_vaapi=w=${size.width}:h=${size.height}`
+  if (caps.hwaccel === 'qsv')
+    return `vpp_qsv=w=${size.width}:h=${size.height}`
+  return `scale=${size.width}:${size.height}`
 }
 
 export function buildFfmpegArgs(caps: FfmpegCapabilities, s: StreamArgs): string[] {
@@ -132,6 +154,9 @@ export function buildFfmpegArgs(caps: FfmpegCapabilities, s: StreamArgs): string
   // audio the input's audio track is dropped outright.
   const video = [
     ...(s.audio ? ['-map', '0:v:0'] : ['-an']),
+    // Like `-r` below, an OUTPUT option: it must precede `-f rtp` and the
+    // output URL or ffmpeg never applies it.
+    ...(s.scale ? ['-vf', scaleFilter(caps, s.scale)] : []),
     '-c:v',
     caps.encoder,
     '-b:v',
@@ -450,7 +475,11 @@ export class StreamingDelegate implements CameraStreamingDelegate {
         address: rtp.address,
         video: { ...rtp.video, payloadType: request.videoPayloadType },
         audio,
-        fps: isPackage ? 15 : undefined,
+        // The rate HomeKit negotiated, not a constant: the advertised ladder is
+        // 30 fps throughout, and padding to a hardcoded 15 would under-deliver
+        // against what the controller was told it would get.
+        fps: isPackage ? request.fps : undefined,
+        scale: isPackage ? { width: request.width, height: request.height } : undefined,
       })
       const proc = new FfmpegProcess({
         path: this.options.caps.path,
