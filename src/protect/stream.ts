@@ -80,42 +80,4 @@ export class StreamUrls {
     this.inFlight.clear()
     this.generation++
   }
-
-  private readonly packageProbe = new Map<string, boolean>()
-
-  /**
-   * Whether this camera has a package lens.
-   *
-   * There is no feature flag for it — `featureFlags` on a real Doorbell contains
-   * supportFullHdSnapshot, hasHdr, smartDetectTypes, smartDetectAudioTypes,
-   * videoModes, hasMic, hasLedStatus and hasSpeaker, and nothing else. So the
-   * only reliable signal is asking for the channel and seeing whether the
-   * console answers. Verified on real hardware: the Doorbell answers 200 with a
-   * URL; the other four answer **404** (`NOT_FOUND`, entity "quality"), which
-   * `send()` turns into a rejected ProtectNotFoundError. So the catch below is
-   * the primary path for "no package camera", not an edge case.
-   *
-   * Never throws. A console that errors is treated as "no package camera" —
-   * the caller uses this to decide whether to offer a control, and a failed
-   * probe must not take discovery down with it.
-   */
-  async hasPackageCamera(deviceId: string): Promise<boolean> {
-    const cached = this.packageProbe.get(deviceId)
-    if (cached !== undefined)
-      return cached
-
-    let present = false
-    try {
-      const created = await this.client.createRtspsStream(deviceId, ['package'])
-      present = typeof created.package === 'string'
-    }
-    catch {
-      // Deliberately swallowed and deliberately not logged with the error: the
-      // rejection can carry request context, and `util.inspect` on it — which is
-      // what log.error(err) uses — would print the API key.
-      present = false
-    }
-    this.packageProbe.set(deviceId, present)
-    return present
-  }
 }

@@ -29,6 +29,13 @@ export interface DiscoveredDevice {
   id: string
   name?: string | null
   modelKey: string
+  /**
+   * Whether this camera has the downward-facing package lens. A TOP-LEVEL
+   * camera property, not a `featureFlags` entry — `cameraSchema` marks it
+   * required — so it arrives with every inventory read and needs no probe.
+   * Optional here only because `validate` degrades to the raw payload.
+   */
+  hasPackageCamera?: boolean
 }
 
 /**
@@ -640,15 +647,19 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
    * disappearing and breaks the user's automations.
    */
   private async attachPackageCamera(device: DiscoveredDevice): Promise<string | undefined> {
-    // No usable ffmpeg means no live view for anyone — and no `urls` to probe
-    // with either, since both are set together in prepareStreaming.
+    // No usable ffmpeg means no live view for anyone. `urls` too: both are set
+    // together in prepareStreaming, and the delegate needs it.
     if (!this.caps || !this.urls)
       return
     if (!settingsFor(this.config!, device.id).packageCamera)
       return
-    // Never throws, and caches per camera — so this is one probe per camera for
-    // the life of the process, not one per discovery.
-    if (!await this.urls.hasPackageCamera(device.id))
+    // Straight off the payload this loop is already holding — no request of any
+    // kind. Asking the console instead would mean a POST that CREATES a package
+    // RTSPS stream, against every camera, on every startup, to learn something
+    // already in hand. `=== true` and not a truthiness check: `validate`
+    // degrades to the raw response when cameraSchema fails, so on that path the
+    // field can be missing or any type at all.
+    if (device.hasPackageCamera !== true)
       return
 
     const uuid = this.api.hap.uuid.generate(packageSeed(device.id))

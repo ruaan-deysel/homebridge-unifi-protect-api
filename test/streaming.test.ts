@@ -693,7 +693,7 @@ describe('package channel', () => {
   const log = { info: vi.fn(), warn: vi.fn(), debug: vi.fn() }
 
   function makeDelegate(channel?: 'package') {
-    const urls = { get: vi.fn(async () => PKG_URL), hasPackageCamera: vi.fn(async () => true) }
+    const urls = { get: vi.fn(async () => PKG_URL) }
     const spawn = vi.fn(() => {
       throw new Error('should not spawn in this test')
     })

@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AUDIO_LABEL } from '../homebridge-ui/public/config-ops.js'
 import { UniFiProtectPlatform } from '../src/platform.js'
 import { fingerprintOf } from '../src/protect/cert.js'
-import { ProtectAuthError, ProtectNotFoundError, ProtectUnavailableError } from '../src/protect/errors.js'
+import { ProtectAuthError, ProtectUnavailableError } from '../src/protect/errors.js'
 import { C, FakeAccessory, FakeDoorbellController, hap, S } from './fake-hap.js'
 import { makeSelfSigned } from './support/tls.js'
 
@@ -70,19 +70,12 @@ function makeClient(devices: unknown[]) {
     getViewers: vi.fn(async () => of('viewer')),
     patchCamera: vi.fn(async () => ({})),
     /**
-     * The package probe's only console call. Real hardware answers 200 with a
-     * URL for the Doorbell and 404 (`NOT_FOUND`, entity "quality") for the other
-     * four, which `send()` turns into a rejected ProtectNotFoundError — so the
-     * rejection is the ordinary "no package lens" answer, not an edge case.
-     * Driven off the fixture's own `hasPackageCamera`, which the live console
-     * really does return at the top level of a camera.
+     * Present so a call during discovery is VISIBLE, not so one is expected:
+     * this is a POST that creates a stream on the console, and discovery must
+     * never make it. Live view calls it when a viewer actually opens.
      */
-    createRtspsStream: vi.fn(async (id: string, qualities: string[]) => {
-      const device = devices.find(d => (d as { id?: string })?.id === id) as { hasPackageCamera?: boolean } | undefined
-      if (qualities.includes('package') && !device?.hasPackageCamera)
-        throw new ProtectNotFoundError('Entity \'quality\' not found')
-      return Object.fromEntries(qualities.map(q => [q, `rtsps://10.0.0.1:7441/${id}-${q}?token=SECRET`]))
-    }),
+    createRtspsStream: vi.fn(async (id: string, qualities: string[]) =>
+      Object.fromEntries(qualities.map(q => [q, `rtsps://10.0.0.1:7441/${id}-${q}?token=SECRET`]))),
     getRtspsStream: vi.fn(async () => ({})),
   }
 }
@@ -1385,10 +1378,24 @@ describe('uniFiProtectPlatform', () => {
   })
 
   it('adds none when the camera has no package lens, whatever the setting says', async () => {
+    // The gate the whole feature rests on. Asserted on the fixture first, so a
+    // green result cannot come from the fixture having drifted.
+    expect(camera('Backyard').hasPackageCamera).toBe(false)
+
     const { accessories } = await withCameras(cameras, { config: packageOn(BACKYARD) })
 
     expect(accessories.map(a => a.displayName)).not.toContain('Backyard Package Camera')
     expect(accessories).toHaveLength(5)
+  })
+
+  // `ProtectClient` returns the RAW payload when cameraSchema validation fails,
+  // so a Ubiquiti field rename is a real production input — and an absent flag
+  // must read as "no lens", never as "assume yes".
+  it('adds none when a degraded payload carries no lens flag at all', async () => {
+    const degraded = cameras.map(c => ({ id: c.id, name: c.name, modelKey: 'camera' }))
+    const { accessories } = await withCameras(degraded, { config: packageOn(DOORBELL) })
+
+    expect(packageOf(accessories)).toBeUndefined()
   })
 
   // A camera and nothing else. The "Doorbell Package" motion sensor in
@@ -1454,19 +1461,24 @@ describe('uniFiProtectPlatform', () => {
     expect(stop).toHaveBeenCalledTimes(1)
   })
 
-  // The probe is a POST against the console. Once per camera, cached — never
-  // once per discovery, which a resync storm would turn into a flood.
-  it('probes for the package lens once per camera, not once per discovery', async () => {
+  // The regression this design exists to prevent. Detecting the lens by asking
+  // the console means `POST /cameras/{id}/rtsps-stream {qualities:["package"]}`,
+  // which CREATES a stream — a state-changing request against every camera on
+  // every startup, to learn something the inventory payload already carries.
+  it('makes no console request to detect the package lens', async () => {
     const config = { ...validConfig, devices: Object.fromEntries(cameras.map(c => [c.id as string, { packageCamera: true }])) }
     const { platform, accessories } = await withCameras(cameras, { config })
     const client = (platform as unknown as { client: ReturnType<typeof makeClient> }).client
-    const probes = () => client.createRtspsStream.mock.calls.filter(c => c[1].includes('package'))
 
-    expect(probes()).toHaveLength(5)
+    // The Doorbell still got its accessory, so this is not passing by doing
+    // nothing at all.
+    expect(packageOf(accessories)).toBeDefined()
+    expect(client.createRtspsStream).not.toHaveBeenCalled()
+    expect(client.getRtspsStream).not.toHaveBeenCalled()
 
     await platform.discover()
 
-    expect(probes()).toHaveLength(5)
+    expect(client.createRtspsStream).not.toHaveBeenCalled()
     // And still exactly one controller on the package accessory — a second
     // would duplicate every stream management service on it.
     expect(packageOf(accessories)!.controllers).toHaveLength(1)

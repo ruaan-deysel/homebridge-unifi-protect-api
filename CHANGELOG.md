@@ -52,11 +52,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each getting its own, and a request past the cap is refused with a logged reason instead
   of overloading the machine.
 - The package lens appears in HomeKit as its own camera, named "<camera> Package Camera",
-  for cameras that have the lens and whose owner switched it on in the settings. It is
-  bridged like every other accessory, is a camera and nothing else — the package motion
-  sensor stays on the main accessory, so existing automations are untouched — and it
-  advertises 4:3 resolutions (1600×1200 and 800×600) and no audio. Switching the setting
-  off removes it again on the next discovery.
+  for cameras whose payload reports the lens (`hasPackageCamera`) and whose owner switched
+  it on in the settings. It is bridged like every other accessory, is a camera and nothing
+  else — the package motion sensor stays on the main accessory, so existing automations are
+  untouched — and it advertises 4:3 resolutions (1600×1200 and 800×600) and no audio.
+  Switching the setting off removes it again on the next discovery.
 - The Doorbell's package lens can now be streamed like any other camera. It has one stream
   rather than a choice of substreams, and the console serves it at 1600×1200/2 fps rather
   than 16:9/30 fps like every other lens, so HomeKit is told to expect 15 fps and ffmpeg
@@ -106,13 +106,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   teardown so a dropped viewer can never leave a transcode running indefinitely. ffmpeg's
   own failure output is redacted before it is ever logged, since the command line it echoes
   on error contains the RTSPS stream's auth token.
-- The plugin can now tell whether a camera has a downward-facing package lens, ahead of
-  exposing it as its own camera in HomeKit. There is no feature flag for this — Protect
-  only reveals it by answering the package stream request, with a URL if the lens exists
-  and a 404 if it does not — so the check asks the console once per camera and remembers
-  the answer rather than asking again.
 - New per-camera setting: `packageCamera`, off by default. The settings UI offers it only
-  for a Doorbell where the package lens was detected, and its label states plainly that the
+  for a camera the console reports a package lens on, and its label states plainly that the
   console serves that lens at 2 fps — enabling it adds a second HomeKit accessory for one
   physical device, so nobody should be surprised by either consequence after the fact.
 
