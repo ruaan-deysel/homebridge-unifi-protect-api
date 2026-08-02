@@ -51,6 +51,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hardware encoding, two with software. Five cameras therefore share one budget instead of
   each getting its own, and a request past the cap is refused with a logged reason instead
   of overloading the machine.
+- The package lens appears in HomeKit as its own camera, named "<camera> Package Camera",
+  for cameras that have the lens and whose owner switched it on in the settings. It is
+  bridged like every other accessory, is a camera and nothing else — the package motion
+  sensor stays on the main accessory, so existing automations are untouched — and it
+  advertises 4:3 resolutions (1600×1200 and 800×600) and no audio. Switching the setting
+  off removes it again on the next discovery.
 - The Doorbell's package lens can now be streamed like any other camera. It has one stream
   rather than a choice of substreams, and the console serves it at 1600×1200/2 fps rather
   than 16:9/30 fps like every other lens, so HomeKit is told to expect 15 fps and ffmpeg

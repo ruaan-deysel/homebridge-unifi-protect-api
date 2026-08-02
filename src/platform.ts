@@ -98,6 +98,31 @@ function videoStreamingOptions(hap: HAP): CameraStreamingOptions['video'] {
   }
 }
 
+/**
+ * What the package lens advertises. It is 1600x1200 — 4:3, not 16:9 like every
+ * other stream this plugin serves — so advertising a 16:9 size would promise a
+ * frame it cannot produce. 15 fps because the console serves the lens at 2 fps
+ * and the delegate pads ffmpeg's output up to this rate; HomeKit mistakes a
+ * genuine 2 fps feed for a stalled stream.
+ */
+function packageVideoStreamingOptions(hap: HAP): CameraStreamingOptions['video'] {
+  return {
+    codec: {
+      profiles: [hap.H264Profile.BASELINE, hap.H264Profile.MAIN, hap.H264Profile.HIGH],
+      levels: [hap.H264Level.LEVEL3_1, hap.H264Level.LEVEL3_2, hap.H264Level.LEVEL4_0],
+    },
+    resolutions: [
+      [1600, 1200, 15],
+      [800, 600, 15],
+    ],
+  }
+}
+
+/** The package accessory's UUID seed. Never equal to the camera's own. */
+function packageSeed(deviceId: string): string {
+  return `${deviceId}-package`
+}
+
 export class UniFiProtectPlatform implements DynamicPlatformPlugin {
   readonly accessories = new Map<string, PlatformAccessory>()
   client!: ProtectClient
@@ -602,11 +627,115 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
     }
   }
 
+  /**
+   * Registers the Doorbell's downward-facing package lens as its own bridged
+   * accessory, and returns the UUID it belongs under so `reconcile`'s removal
+   * sweep keeps it — nothing in the console inventory carries that UUID, so
+   * without the return value the sweep would unregister it.
+   *
+   * A camera and NOTHING else: no motion sensor, no doorbell, no LED switch.
+   * `buildCameraServices` is deliberately never called for it — in particular
+   * the "Doorbell Package" motion sensor stays on the MAIN accessory, because
+   * moving a service between accessories reads to HomeKit as the old one
+   * disappearing and breaks the user's automations.
+   */
+  private async attachPackageCamera(device: DiscoveredDevice): Promise<string | undefined> {
+    // No usable ffmpeg means no live view for anyone — and no `urls` to probe
+    // with either, since both are set together in prepareStreaming.
+    if (!this.caps || !this.urls)
+      return
+    if (!settingsFor(this.config!, device.id).packageCamera)
+      return
+    // Never throws, and caches per camera — so this is one probe per camera for
+    // the life of the process, not one per discovery.
+    if (!await this.urls.hasPackageCamera(device.id))
+      return
+
+    const uuid = this.api.hap.uuid.generate(packageSeed(device.id))
+    const label = `${labelFor(device)} Package Camera`
+    // From here on the accessory belongs in HomeKit, so the UUID is returned
+    // even when wiring it up fails or shutdown lands mid-pass: the removal
+    // sweep must not delete an accessory that is only temporarily unwired.
+    try {
+      let accessory = this.accessories.get(uuid)
+      if (!accessory) {
+        // eslint-disable-next-line new-cap -- Homebridge exposes the constructor lowercased.
+        accessory = new this.api.platformAccessory(label, uuid)
+        // Bridged, always — never published as an external accessory, which
+        // would be a separate pairing the user has to add by hand.
+        this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory])
+        this.accessories.set(uuid, accessory)
+        this.log.info(`Added the package camera "${label}".`)
+      }
+      else if (accessory.displayName !== label) {
+        // Renaming the camera in Protect must not leave this one behind.
+        accessory.displayName = label
+        this.api.updatePlatformAccessories([accessory])
+      }
+      accessory.context.device = device
+
+      // Already wired means a later discovery; `stopped` means shutdown has
+      // already stopped every delegate it knew about, so one attached now would
+      // never be stopped by anything.
+      if (this.delegates.has(uuid) || this.stopped)
+        return uuid
+
+      const delegate = new StreamingDelegate({
+        deviceId: device.id,
+        label,
+        log: this.log,
+        client: this.client,
+        urls: this.urls,
+        caps: this.caps,
+        maxStreams: this.config!.maxStreams,
+        run: this.sharedRun,
+        // The delegate ignores quality on this channel (the lens has one
+        // stream) and refuses audio outright, but the shape is shared.
+        settings: () => {
+          const settings = settingsFor(this.config!, device.id)
+          return { quality: settings.quality, audio: settings.audio }
+        },
+        channel: 'package',
+      })
+      // Keyed by the package UUID in the SAME map, so the shutdown handler's
+      // existing loop stops this delegate with no change: a stranded ffmpeg
+      // holds a decode open indefinitely.
+      this.delegates.set(uuid, delegate)
+
+      accessory.configureController(new this.api.hap.CameraController({
+        cameraStreamCount: delegate.maxStreams,
+        delegate,
+        streamingOptions: {
+          supportedCryptoSuites: [this.api.hap.SRTPCryptoSuites.AES_CM_128_HMAC_SHA1_80],
+          video: packageVideoStreamingOptions(this.api.hap),
+          // No `audio` key at all: the lens shares the main camera's microphone,
+          // so a second identical audio source benefits nobody.
+        },
+        // No doorbell option: sub-project 2a already builds the subtyped `ring`
+        // Doorbell on the MAIN accessory, and a second makes the doorbell
+        // appear twice in Home.app.
+      }))
+    }
+    catch (error) {
+      this.delegates.delete(uuid)
+      // errorMessage, and the STRING — see prepareStreaming. One camera failing
+      // must not abort discovery for every other device.
+      this.log.warn(`Could not enable the package camera for "${label}": ${errorMessage(error)}`)
+    }
+    return uuid
+  }
+
   private async reconcile(devices: DiscoveredDevice[]): Promise<void> {
     const config = this.config!
     const wanted = new Map<string, DiscoveredDevice>()
     // Every device the console actually reported, before the expose filter.
     const reported = new Set<string>()
+    /**
+     * Package accessories that still belong. They carry a UUID no console
+     * device ever will, so they are kept by this set alone — and dropping out
+     * of it (the setting switched off, the lens gone) is what removes them.
+     */
+    const packages = new Set<string>()
     let usable = 0
 
     for (const device of devices) {
@@ -620,6 +749,11 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
       usable++
       const uuid = this.api.hap.uuid.generate(device.id)
       reported.add(uuid)
+      // The parent camera is in the inventory, so its package accessory is
+      // "reported" too: switching the setting off then takes effect at once,
+      // exactly like `expose: false`, rather than waiting out the removal
+      // confirmation window meant for a console that answered mid-reboot.
+      reported.add(this.api.hap.uuid.generate(packageSeed(device.id)))
       // Counted before the expose filter: flipping every device to
       // `expose: false` is a legitimate removal and must still unregister.
       if (!settingsFor(config, device.id).expose)
@@ -664,6 +798,9 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
         // Cameras only: a light or a chime has nothing to stream, and a
         // CameraController on one would offer HomeKit a live view of nothing.
         await this.attachStreaming(accessory, device.id)
+        const packageUuid = await this.attachPackageCamera(device)
+        if (packageUuid)
+          packages.add(packageUuid)
       }
     }
 
@@ -681,7 +818,7 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
     }
 
     for (const [uuid, accessory] of this.accessories) {
-      if (wanted.has(uuid)) {
+      if (wanted.has(uuid) || packages.has(uuid)) {
         // Back in the inventory — whatever made it vanish was transient.
         this.pendingRemoval.delete(uuid)
         continue
@@ -697,6 +834,19 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
           this.log.info(`"${accessory.displayName}" is missing from the console inventory. Keeping it until a later discovery agrees.`)
         }
         continue
+      }
+      // Before unregistering: an ffmpeg for an accessory that no longer exists
+      // is never stopped by anything, and a delegate left in the map would make
+      // `attachStreaming` skip the re-added accessory as "already wired".
+      const delegate = this.delegates.get(uuid)
+      if (delegate) {
+        this.delegates.delete(uuid)
+        try {
+          delegate.stopAll()
+        }
+        catch (error) {
+          this.log.warn(`Could not stop the live view of "${accessory.displayName}" while removing it: ${errorMessage(error)}`)
+        }
       }
       this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory])
       this.accessories.delete(uuid)
