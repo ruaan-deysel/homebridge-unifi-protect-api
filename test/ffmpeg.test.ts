@@ -472,6 +472,13 @@ describe('ffmpegProcess', () => {
     expect(proc.stdout.listenerCount('data')).toBe(0)
   })
 
+  it('does not throw when the child has no stdout stream', () => {
+    const { proc, spawn } = fakeSpawn()
+    // @ts-expect-error simulating a ChildProcess whose stdout is null, as Node's types allow
+    proc.stdout = undefined
+    expect(() => new FfmpegProcess({ path: '/usr/bin/ffmpeg', args: [], log, onStdout: () => {}, spawn }).start()).not.toThrow()
+  })
+
   it('does not throw when the child has no stdin stream', () => {
     const { proc, spawn } = fakeSpawn()
     // @ts-expect-error simulating a ChildProcess whose stdin is null, as Node's types allow
