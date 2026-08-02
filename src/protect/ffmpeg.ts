@@ -196,6 +196,14 @@ interface FfmpegProcessOptions {
    * decode an SRTP stream without one.
    */
   stdin?: string
+  /**
+   * Whether this process counts towards `activeCount`, the host-wide transcode
+   * cap. Talkback passes false: it is a voice-only Opus transcode that only ever
+   * exists alongside a video session which has already paid for a slot, so
+   * counting it would refuse a second camera's live view the moment somebody
+   * spoke into the first one.
+   */
+  counted?: boolean
 }
 
 /** Spawns, tracks and kills a single ffmpeg process. */
@@ -217,7 +225,12 @@ export class FfmpegProcess {
   /** Set once the process has actually exited; guards the active count and onExit. */
   private ended = false
 
-  constructor(private readonly options: FfmpegProcessOptions) {}
+  /** Read once, so start() and finish() can never disagree about the count. */
+  private readonly counted: boolean
+
+  constructor(private readonly options: FfmpegProcessOptions) {
+    this.counted = options.counted !== false
+  }
 
   get running(): boolean {
     return this.child !== undefined && !this.ended
@@ -230,7 +243,8 @@ export class FfmpegProcess {
     const spawn = this.options.spawn ?? (nodeSpawn as SpawnFn)
     const child = spawn(this.options.path, this.options.args)
     this.child = child
-    FfmpegProcess.active++
+    if (this.counted)
+      FfmpegProcess.active++
 
     child.stderr?.on('data', (chunk: Buffer) => this.absorb(chunk.toString()))
 
@@ -294,7 +308,8 @@ export class FfmpegProcess {
     if (this.ended)
       return
     this.ended = true
-    FfmpegProcess.active--
+    if (this.counted)
+      FfmpegProcess.active--
     if (message !== undefined)
       this.options.log.warn(message)
     this.options.onExit?.()

@@ -208,13 +208,30 @@ describe('the advertised codec and the produced codec', () => {
   })
 })
 
-/** A stand-in child that only does what FfmpegProcess touches: stderr, close, kill. */
-function fakeChild(): ChildProcess {
-  const child = new EventEmitter() as EventEmitter & { stderr: EventEmitter, kill: () => boolean }
+/** What a spawned child did, so a test can assert on it after the fact. */
+interface ChildRecord {
+  stdin: string
+  killed: boolean
+}
+
+/** A stand-in child that only does what FfmpegProcess touches: stdin, stderr, close, kill. */
+function fakeChild(record?: ChildRecord): ChildProcess {
+  const child = new EventEmitter() as EventEmitter & { stderr: EventEmitter, stdin: EventEmitter, kill: () => boolean }
   child.stderr = new EventEmitter()
+  const stdin = new EventEmitter() as EventEmitter & { write: (chunk: string) => void, end: () => void }
+  stdin.write = (chunk: string) => {
+    if (record)
+      record.stdin += chunk
+  }
+  stdin.end = () => {}
+  child.stdin = stdin
   // The real child emits `close` after a kill; without it the process-wide
   // active count would never be released.
-  child.kill = () => child.emit('close', 0)
+  child.kill = () => {
+    if (record)
+      record.killed = true
+    return child.emit('close', 0)
+  }
   return child as unknown as ChildProcess
 }
 
@@ -235,9 +252,14 @@ interface DelegateOverrides {
   quality?: 'auto' | 'low' | 'medium' | 'high'
   maxStreams?: number
   channel?: 'package'
+  bind?: () => Promise<{ socket: never, port: number }>
+  createTalkbackSession?: () => Promise<{ url: string, codec: string, samplingRate: number, bitsPerSample: number }>
 }
 
 const jpeg = Buffer.from('jpeg-bytes')
+
+/** What the reference Doorbell answers: plain RTP, the CAMERA's own IP, its own rate. */
+const TALKBACK_SESSION = { url: 'rtp://192.168.10.9:7004', codec: 'opus', samplingRate: 24000, bitsPerSample: 16 }
 
 /** The API key hides in `cause`, exactly where util.inspect finds it. */
 async function failingSnapshot(): Promise<Buffer> {
@@ -286,11 +308,14 @@ function makeDelegate(overrides: DelegateOverrides = {}) {
   const get = vi.fn(overrides.url ?? (async () => URL))
   const spawn = vi.fn(overrides.spawn ?? (() => fakeChild()))
   const run = vi.fn(overrides.run ?? (async () => encoderList(overrides.encoders ?? { opus: true })))
+  const createTalkbackSession = vi.fn(overrides.createTalkbackSession ?? (async () => TALKBACK_SESSION))
+  const bind = vi.fn(overrides.bind ?? (async () => ({ socket: undefined as never, port: 0 })))
   const delegate = new StreamingDelegate({
     deviceId: 'cam1',
     label: 'Driveway',
     log,
-    client: { getSnapshot } as never,
+    client: { getSnapshot, createTalkbackSession } as never,
+    bind: bind as never,
     urls: { get, clear: vi.fn() } as never,
     caps: overrides.caps ?? CAPS_HW,
     settings: () => ({ quality: overrides.quality ?? 'auto', audio: overrides.audio ?? false, talkback: overrides.talkback ?? false }),
@@ -300,7 +325,7 @@ function makeDelegate(overrides: DelegateOverrides = {}) {
     channel: overrides.channel,
     hasSpeaker: overrides.hasSpeaker,
   })
-  return { delegate, getSnapshot, get, spawn, run, log }
+  return { delegate, getSnapshot, get, spawn, run, log, createTalkbackSession, bind }
 }
 
 const RTP = {
@@ -737,6 +762,214 @@ describe('streamingDelegate hap wiring', () => {
     const error = await new Promise(resolve => delegate.handleStreamRequest(startRequest(), resolve))
     expect(error).toBeInstanceOf(Error)
     expect(spawn).not.toHaveBeenCalled()
+  })
+})
+
+/** The socket prepareStream HOLDS for talkback, with everything the relay touches. */
+function fakeSocket(port = 6100) {
+  const socket = new EventEmitter() as EventEmitter & {
+    send: ReturnType<typeof vi.fn>
+    close: ReturnType<typeof vi.fn>
+    address: () => { port: number }
+  }
+  socket.send = vi.fn()
+  socket.close = vi.fn()
+  socket.address = () => ({ port })
+  return socket
+}
+
+/** Polls rather than awaiting a fixed tick: opening binds a real loopback port. */
+async function until(condition: () => boolean): Promise<void> {
+  for (let i = 0; i < 200; i++) {
+    if (condition())
+      return
+    await new Promise(resolve => setTimeout(resolve, 2))
+  }
+  throw new Error('condition was never met')
+}
+
+/** The srtp material prepareRequest() sends for audio, as one key. */
+const HOMEKIT_AUDIO_KEY = Buffer.concat([Buffer.alloc(16, 3), Buffer.alloc(14, 4)]).toString('base64')
+
+async function startTalkbackSession(overrides: DelegateOverrides = {}) {
+  const socket = fakeSocket()
+  const children: ChildRecord[] = []
+  const made = makeDelegate({
+    talkback: true,
+    hasSpeaker: true,
+    bind: async () => ({ socket: socket as never, port: 6100 }),
+    spawn: () => {
+      const record: ChildRecord = { stdin: '', killed: false }
+      children.push(record)
+      return fakeChild(record)
+    },
+    ...overrides,
+  })
+  const { delegate } = made
+  const prepared = await new Promise<PrepareStreamResponse>((resolve, reject) => {
+    delegate.prepareStream(prepareRequest(), (error, response) => (response ? resolve(response) : reject(error)))
+  })
+  await new Promise<void>((resolve, reject) => {
+    delegate.handleStreamRequest(startRequest(), error => (error ? reject(error) : resolve()))
+  })
+  return { ...made, socket, children, prepared, sessionId: 'session-1' }
+}
+
+/** The port ffmpeg is told to listen on — where the relay must send. */
+function sdpListenPort(sdp: string): number {
+  return Number(/^m=audio (\d+) /m.exec(sdp)![1])
+}
+
+describe('talkback', () => {
+  it('holds the audio socket and hands homekit the port it is listening on', async () => {
+    const { socket, prepared, delegate, sessionId } = await startTalkbackSession()
+    expect((prepared.audio as SourceResponse).port).toBe(6100)
+    expect(socket.close).not.toHaveBeenCalled()
+    delegate.stopSession(sessionId)
+  })
+
+  it('reserves and closes the audio port when talkback is off', async () => {
+    const { delegate, bind } = makeDelegate({ talkback: false, hasSpeaker: true })
+    const prepared = await new Promise<PrepareStreamResponse>((resolve, reject) => {
+      delegate.prepareStream(prepareRequest(), (error, response) => (response ? resolve(response) : reject(error)))
+    })
+    expect(bind).not.toHaveBeenCalled()
+    expect((prepared.audio as SourceResponse).port).toBeGreaterThan(0)
+  })
+
+  it('does not touch the console or spawn an encoder until return audio arrives', async () => {
+    const { createTalkbackSession, spawn, delegate, sessionId } = await startTalkbackSession()
+    expect(createTalkbackSession).not.toHaveBeenCalled()
+    // The video session, and nothing else.
+    expect(spawn).toHaveBeenCalledTimes(1)
+    delegate.stopSession(sessionId)
+  })
+
+  it('opens one console session and one encoder on the first datagram', async () => {
+    const { createTalkbackSession, spawn, socket, children, delegate, sessionId } = await startTalkbackSession()
+    socket.emit('message', Buffer.from([1]))
+    socket.emit('message', Buffer.from([2]))
+    await until(() => spawn.mock.calls.length === 2)
+    expect(createTalkbackSession).toHaveBeenCalledTimes(1)
+    expect(createTalkbackSession).toHaveBeenCalledWith('cam1')
+    expect(children[1]!.stdin).toContain('a=crypto:1 AES_CM_128_HMAC_SHA1_80')
+    // HomeKit's own key, and its payload type — not a guess.
+    expect(children[1]!.stdin).toContain(`inline:${HOMEKIT_AUDIO_KEY}`)
+    expect(children[1]!.stdin).toContain('a=rtpmap:110 opus/16000/2')
+    delegate.stopSession(sessionId)
+  })
+
+  it('re-emits at the rate the console asked for, to the url it gave', async () => {
+    const { spawn, socket, delegate, sessionId } = await startTalkbackSession({
+      createTalkbackSession: async () => ({ ...TALKBACK_SESSION, samplingRate: 8000 }),
+    })
+    socket.emit('message', Buffer.from([1]))
+    await until(() => spawn.mock.calls.length === 2)
+    const args = argvOf(spawn, 1)
+    expect(args[args.indexOf('-ar') + 1]).toBe('8000')
+    expect(args.at(-1)).toBe('rtp://192.168.10.9:7004')
+    delegate.stopSession(sessionId)
+  })
+
+  it('forwards the buffered datagrams to the port the encoder listens on', async () => {
+    const { socket, children, delegate, sessionId } = await startTalkbackSession()
+    const packet = Buffer.from([1, 2, 3])
+    socket.emit('message', packet)
+    await until(() => socket.send.mock.calls.length > 0)
+    const port = sdpListenPort(children[1]!.stdin)
+    expect(socket.send.mock.calls[0]![0]).toBe(packet)
+    expect(socket.send.mock.calls[0]![1]).toBe(port)
+    expect(socket.send.mock.calls[0]![2]).toBe('127.0.0.1')
+    delegate.stopSession(sessionId)
+  })
+
+  it('does not count talkback against the transcode cap', async () => {
+    const { spawn, socket, delegate, sessionId } = await startTalkbackSession()
+    socket.emit('message', Buffer.from([1]))
+    await until(() => spawn.mock.calls.length === 2)
+    // Both the per-camera map and the host-wide counter the cap actually reads.
+    expect(delegate.activeCount).toBe(1)
+    expect(FfmpegProcess.activeCount).toBe(1)
+    delegate.stopSession(sessionId)
+  })
+
+  it('kills the encoder and closes the socket on stop', async () => {
+    const { spawn, socket, children, delegate, sessionId } = await startTalkbackSession()
+    socket.emit('message', Buffer.from([1]))
+    await until(() => spawn.mock.calls.length === 2)
+    delegate.stopSession(sessionId)
+    expect(children[1]!.killed).toBe(true)
+    expect(socket.close).toHaveBeenCalled()
+    // Nothing is forwarded after the teardown.
+    const forwarded = socket.send.mock.calls.length
+    socket.emit('message', Buffer.from([9]))
+    expect(socket.send.mock.calls.length).toBe(forwarded)
+  })
+
+  it('kills the encoder and closes the socket on stopAll', async () => {
+    const { spawn, socket, children, delegate } = await startTalkbackSession()
+    socket.emit('message', Buffer.from([1]))
+    await until(() => spawn.mock.calls.length === 2)
+    delegate.stopAll()
+    expect(children[1]!.killed).toBe(true)
+    expect(socket.close).toHaveBeenCalled()
+  })
+
+  it('closes the held socket even when the session is stopped before any speech', async () => {
+    const { socket, delegate } = await startTalkbackSession()
+    delegate.stopAll()
+    expect(socket.close).toHaveBeenCalled()
+  })
+
+  // The console POST took 120-195 ms live: a viewer looking away inside that
+  // window is ordinary, and the relay alone cannot clean up — it does not own
+  // the encoder it asked for.
+  it('kills an encoder whose open resolved after the session was torn down', async () => {
+    let release: () => void = () => {}
+    const { spawn, socket, children, delegate, sessionId, createTalkbackSession } = await startTalkbackSession({
+      createTalkbackSession: async () => new Promise((resolve) => {
+        release = () => resolve(TALKBACK_SESSION)
+      }),
+    })
+    socket.emit('message', Buffer.from([1]))
+    await until(() => createTalkbackSession.mock.calls.length === 1)
+    delegate.stopSession(sessionId)
+    release()
+    await until(() => spawn.mock.calls.length === 2)
+    expect(children[1]!.killed).toBe(true)
+    expect(FfmpegProcess.activeCount).toBe(0)
+  })
+
+  // The SDP carries the session's SRTP key. It goes on stdin precisely so the
+  // secret never reaches disk; a log line would undo that.
+  it('never logs the sdp, the key or the talkback arguments', async () => {
+    const { spawn, socket, delegate, sessionId, log } = await startTalkbackSession()
+    socket.emit('message', Buffer.from([1]))
+    await until(() => spawn.mock.calls.length === 2)
+    delegate.stopSession(sessionId)
+    const logged = [...log.info.mock.calls, ...log.warn.mock.calls, ...log.debug.mock.calls].map(call => inspect(call)).join(' ')
+    expect(logged).not.toContain(HOMEKIT_AUDIO_KEY)
+    expect(logged).not.toContain('a=crypto')
+    expect(logged).not.toContain('inline:')
+    expect(logged).not.toContain('rtp://192.168.10.9:7004')
+    // The key is not on the command line either — only stdin carries it.
+    expect(argvOf(spawn, 1).join(' ')).not.toContain(HOMEKIT_AUDIO_KEY)
+  })
+
+  it('warns without leaking when the console refuses the talkback session', async () => {
+    const { spawn, socket, delegate, sessionId, log } = await startTalkbackSession({
+      createTalkbackSession: async () => {
+        throw Object.assign(new Error('503 DOWNSTREAM_ERROR'), { cause: { apiKey: 'SECRET-KEY' } })
+      },
+    })
+    socket.emit('message', Buffer.from([1]))
+    await until(() => log.warn.mock.calls.length > 0)
+    expect(inspect(log.warn.mock.calls)).toContain('503 DOWNSTREAM_ERROR')
+    expect(inspect(log.warn.mock.calls)).not.toContain('SECRET-KEY')
+    // Nothing was spawned, and nothing is forwarded.
+    expect(spawn).toHaveBeenCalledTimes(1)
+    expect(socket.send).not.toHaveBeenCalled()
+    delegate.stopSession(sessionId)
   })
 })
 

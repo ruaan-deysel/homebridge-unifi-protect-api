@@ -11,6 +11,7 @@ import type {
   StreamingRequest,
   StreamRequestCallback,
 } from 'homebridge'
+import type { Socket } from 'node:dgram'
 import type { ProtectClient } from '../protect/client.js'
 import type { FfmpegCapabilities, RunFfmpeg, SpawnFn } from '../protect/ffmpeg.js'
 import type { StreamUrls } from '../protect/stream.js'
@@ -19,6 +20,7 @@ import { Buffer } from 'node:buffer'
 import { createSocket } from 'node:dgram'
 import { errorMessage } from '../protect/errors.js'
 import { FfmpegProcess, hasEncoder, redactStreamUrls, runFfmpeg } from '../protect/ffmpeg.js'
+import { buildTalkbackArgs, TalkbackRelay, talkbackSdp } from '../protect/talkback.js'
 import { selectQuality } from './quality.js'
 
 /**
@@ -289,7 +291,7 @@ interface DelegateOptions {
   deviceId: string
   label: string
   log: { info: (m: string) => void, warn: (m: string) => void, debug: (m: string) => void }
-  client: Pick<ProtectClient, 'getSnapshot'>
+  client: Pick<ProtectClient, 'getSnapshot' | 'createTalkbackSession'>
   urls: Pick<StreamUrls, 'get'>
   caps: FfmpegCapabilities
   settings: () => CameraStreamSettings
@@ -310,6 +312,8 @@ interface DelegateOptions {
    * this must come from the payload, never from probing.
    */
   hasSpeaker?: boolean
+  /** Injected in tests; production binds a real UDP socket. */
+  bind?: typeof bindPort
 }
 
 /** What prepareStream knows. The payload types only arrive with the start request. */
@@ -317,6 +321,19 @@ interface SessionRtp {
   address: string
   video: Omit<RtpTarget, 'payloadType'>
   audio: Omit<RtpTarget, 'payloadType'>
+  /**
+   * Present only for a talkback session: the socket bound to `audio.localPort`,
+   * HELD rather than closed because HomeKit sends return audio to it.
+   */
+  audioSocket?: Socket
+}
+
+/** A talkback session's moving parts, so stopSession can take all of them down. */
+interface TalkbackSession {
+  relay: TalkbackRelay
+  proc?: FfmpegProcess
+  /** Latched by stopSession. See the check in openTalkback. */
+  closed: boolean
 }
 
 interface SessionRequest {
@@ -379,9 +396,41 @@ async function reservePort(ipv6: boolean): Promise<number> {
   }
 }
 
+/**
+ * Binds an ephemeral UDP port and RETURNS the socket. Talkback needs the socket
+ * itself: HomeKit sends return audio to this port, so something must be
+ * listening. It also closes, for this path only, the bind-then-close race that
+ * `reservePort` documents.
+ *
+ * `on('error')` rather than `once`: after the bind resolves, `reject` is a
+ * no-op, and leaving it registered means a later socket error can never be an
+ * unhandled 'error' event, which Node turns into a process-wide crash.
+ */
+async function bindPort(ipv6: boolean): Promise<{ socket: Socket, port: number }> {
+  const socket = createSocket(ipv6 ? 'udp6' : 'udp4')
+  await new Promise<void>((resolve, reject) => {
+    socket.on('error', reject)
+    socket.bind(0, resolve)
+  })
+  return { socket, port: socket.address().port }
+}
+
+/** Closing a socket that never bound (or is already closed) throws; neither matters here. */
+function closeQuietly(socket: Socket | undefined): void {
+  try {
+    socket?.close()
+  }
+  catch {}
+}
+
 export class StreamingDelegate implements CameraStreamingDelegate {
   private readonly sessions = new Map<string, FfmpegProcess>()
   private readonly prepared = new Map<string, SessionRtp>()
+  /**
+   * Deliberately NOT `sessions`: the cap counts running transcodes, and a
+   * talkback encoder must never take a slot from a camera's live view.
+   */
+  private readonly talkback = new Map<string, TalkbackSession>()
   private snapshotCache?: { at: number, jpeg: Buffer }
   private audioCodec?: Promise<AudioCodec | undefined>
   private warnedAboutAudio = false
@@ -621,6 +670,19 @@ export class StreamingDelegate implements CameraStreamingDelegate {
     const proc = this.sessions.get(sessionId)
     if (!proc || proc.stop())
       this.sessions.delete(sessionId)
+    const talkback = this.talkback.get(sessionId)
+    if (talkback) {
+      // Latched FIRST: an openTalkback still awaiting the console reads this
+      // when it resumes and kills what it started. Without it, looking away
+      // while the POST is in flight leaks an encoder nobody holds a handle to.
+      talkback.closed = true
+      talkback.relay.close()
+      // Same orphan rule as the video path: a process that survived its kill
+      // stays tracked so a later stop can retry it.
+      if (!talkback.proc || talkback.proc.stop())
+        this.talkback.delete(sessionId)
+    }
+    closeQuietly(this.prepared.get(sessionId)?.audioSocket)
     this.prepared.delete(sessionId)
   }
 
@@ -628,8 +690,84 @@ export class StreamingDelegate implements CameraStreamingDelegate {
     // Latched before the drain, so a startSession parked in an await cannot slip
     // a spawn in behind it.
     this.shuttingDown = true
-    for (const id of [...this.sessions.keys()])
+    // `prepared` too, not just `sessions`: a session that was prepared and never
+    // started still holds a bound talkback socket, and `talkback` because an
+    // entry retained by a failed kill has already left `prepared`.
+    for (const id of new Set([...this.sessions.keys(), ...this.talkback.keys(), ...this.prepared.keys()]))
       this.stopSession(id)
+  }
+
+  /** Talkback is off unless the user asked for it AND the camera can play it. */
+  private talkbackEnabled(): boolean {
+    return this.options.settings().talkback && this.options.hasSpeaker === true
+  }
+
+  /**
+   * Arms the relay that waits for HomeKit's first return datagram. Nothing is
+   * asked of the console and no encoder is spawned until then: opening a
+   * talkback session eagerly would light the doorbell's speaker for every live
+   * view, whether or not anybody ever speaks.
+   */
+  private armTalkback(sessionId: string, socket: Socket, audio: RtpTarget & { sampleRate: number }): void {
+    // Declared first because the relay's `open` closes over the state, and the
+    // state holds the relay. `open` cannot run before the first datagram.
+    let state: TalkbackSession
+    const relay = new TalkbackRelay({
+      socket,
+      open: () => this.openTalkback(state, audio),
+      // The callback swallows send errors: without one, dgram delivers them as
+      // an 'error' event, and an unhandled one crashes the whole process.
+      forward: (packet, port) => socket.send(packet, port, '127.0.0.1', () => {}),
+      log: this.options.log,
+    })
+    state = { relay, closed: false }
+    this.talkback.set(sessionId, state)
+  }
+
+  /**
+   * Opens the console session and starts the encoder, returning the loopback
+   * port the relay should forward to. Called at most once, by the relay.
+   */
+  private async openTalkback(state: TalkbackSession, audio: RtpTarget & { sampleRate: number }): Promise<number | undefined> {
+    const session = await this.options.client.createTalkbackSession(this.options.deviceId)
+    const listenPort = await reservePort(false)
+    const proc = new FfmpegProcess({
+      path: this.options.caps.path,
+      // The rate the CONSOLE asked for, never a constant: the reference doorbell
+      // answers 24000, and another device may not.
+      args: buildTalkbackArgs({ destination: session.url, sampleRate: session.samplingRate }),
+      log: this.options.log,
+      spawn: this.options.spawn,
+      // On stdin, so the session key never touches disk. Nothing here — the SDP
+      // or the arguments — may reach a log.
+      stdin: talkbackSdp({
+        listenPort,
+        payloadType: audio.payloadType,
+        sampleRate: audio.sampleRate,
+        key: audio.key,
+      }),
+      counted: false,
+      onExit: () => {
+        if (state.proc === proc)
+          state.proc = undefined
+      },
+    })
+    try {
+      proc.start()
+    }
+    catch (error) {
+      // ffmpeg echoes its command line on failure, and the relay logs whatever
+      // this throws.
+      throw new Error(redactStreamUrls(errorMessage(error)))
+    }
+    // Both awaits above could have outlived the session: stopSession latches
+    // `closed`, but it never saw this process, so only this can kill it.
+    if (!proc.running || state.closed) {
+      proc.stop()
+      return undefined
+    }
+    state.proc = proc
+    return listenPort
   }
 
   handleSnapshotRequest(_request: SnapshotRequest, callback: SnapshotRequestCallback): void {
@@ -644,9 +782,15 @@ export class StreamingDelegate implements CameraStreamingDelegate {
   prepareStream(request: PrepareStreamRequest, callback: PrepareStreamCallback): void {
     const ipv6 = request.addressVersion === 'ipv6'
     // Audio is a separate RTP stream with its own port, SSRC and key, so it
-    // needs its own local port too.
-    Promise.all([reservePort(ipv6), reservePort(ipv6)]).then(
-      ([videoLocalPort, audioLocalPort]) => {
+    // needs its own local port too. With talkback the socket is HELD instead of
+    // reserved-and-closed: HomeKit sends return audio to that port, and a
+    // reserved port has nothing listening on it.
+    const audioBind = this.talkbackEnabled()
+      ? (this.options.bind ?? bindPort)(ipv6)
+      : reservePort(ipv6).then(port => ({ port, socket: undefined }))
+    Promise.all([reservePort(ipv6), audioBind]).then(
+      ([videoLocalPort, audio]) => {
+        const audioLocalPort = audio.port
         const rtp: SessionRtp = {
           address: request.targetAddress,
           video: {
@@ -661,6 +805,7 @@ export class StreamingDelegate implements CameraStreamingDelegate {
             key: Buffer.concat([request.audio.srtp_key, request.audio.srtp_salt]),
             localPort: audioLocalPort,
           },
+          audioSocket: audio.socket,
         }
         this.prepared.set(request.sessionID, rtp)
         callback(undefined, {
@@ -678,7 +823,13 @@ export class StreamingDelegate implements CameraStreamingDelegate {
           },
         })
       },
-      error => callback(new Error(errorMessage(error))),
+      (error) => {
+        // The video reservation and the audio bind settle independently: if the
+        // first rejects, the second may still be holding a bound port that
+        // nothing else has a handle to.
+        void audioBind.then(a => closeQuietly(a.socket), () => {})
+        callback(new Error(errorMessage(error)))
+      },
     )
   }
 
@@ -713,7 +864,20 @@ export class StreamingDelegate implements CameraStreamingDelegate {
         bitrate: request.audio.max_bit_rate,
       },
     }, rtp).then(
-      started => callback(started ? undefined : new Error(`Could not start a stream for "${this.options.label}".`)),
+      (started) => {
+        // Only once the video session is genuinely running, and only when
+        // prepareStream held the socket — talkback rides alongside a live view,
+        // it is never a session of its own.
+        if (started && rtp.audioSocket) {
+          this.armTalkback(request.sessionID, rtp.audioSocket, {
+            ...rtp.audio,
+            payloadType: request.audio.pt,
+            // HomeKit reports kHz; an SDP wants Hz.
+            sampleRate: request.audio.sample_rate * 1000,
+          })
+        }
+        callback(started ? undefined : new Error(`Could not start a stream for "${this.options.label}".`))
+      },
       error => callback(new Error(errorMessage(error))),
     )
   }
