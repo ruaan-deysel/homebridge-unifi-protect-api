@@ -4,7 +4,7 @@ import type { FfmpegCapabilities, SpawnFn } from '../src/protect/ffmpeg.js'
 import { Buffer } from 'node:buffer'
 import { EventEmitter } from 'node:events'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { MAX_RESTARTS, PREBUFFER_FRAGMENTS, PrebufferRing, recordingArgs, RecordingDelegate, RESTART_DELAY_MS } from '../src/accessories/recording.js'
+import { MAX_RESTARTS, PREBUFFER_FRAGMENTS, PrebufferRing, recordingArgs, RecordingDelegate, RESTART_DELAY_MS, SLOW_RESTART_DELAY_MS } from '../src/accessories/recording.js'
 import { FfmpegProcess } from '../src/protect/ffmpeg.js'
 
 // setTimeout only: `flush` below rides on setImmediate, and faking that would
@@ -41,6 +41,14 @@ describe('prebufferRing', () => {
     const shot = ring.snapshot()!
     expect(shot.init.toString()).toBe('I')
     expect(shot.fragments).toEqual([])
+  })
+
+  it('drops the init segment on clear, unlike reset', () => {
+    const ring = new PrebufferRing()
+    ring.accept('init', Buffer.from('I'))
+    ring.accept('fragment', Buffer.from('f'))
+    ring.clear()
+    expect(ring.snapshot()).toBeUndefined()
   })
 
   it('returns the init segment followed by fragments in insertion order', () => {
@@ -469,12 +477,30 @@ describe('recordingDelegate encoder', () => {
     expect(packets.at(-1)!.isLast).toBe(true)
   })
 
-  it('clears buffered fragments when the encoder exits, so the next clip is not served from a dead one', async () => {
+  // A request landing between an exit and its restart used to succeed on the
+  // DEAD encoder's init, park with nothing to wake it, and then be handed
+  // fragments from the new encoder — a clip whose media does not match its own
+  // init segment. With the ring cleared there is nothing to answer with, and an
+  // empty clip is the honest answer when there is no encoder.
+  it('answers nothing at all between an encoder exit and its restart', async () => {
     const h = await harnessStarted()
     h.proc.stdout.emit('data', init('one'))
     h.proc.stdout.emit('data', fragment('a'))
     h.proc.emit('close', 0)
-    expect(h.ring.snapshot()!.fragments).toEqual([])
+    expect(h.ring.snapshot()).toBeUndefined()
+    expect(await drain(h.delegate.handleRecordingStreamRequest(1))).toEqual([])
+  })
+
+  it('does not hand a stream opened before the restart the new encoder fragments', async () => {
+    const h = await harnessStarted()
+    h.proc.stdout.emit('data', init('one'))
+    h.proc.emit('close', 0)
+    const packets = await drain(h.delegate.handleRecordingStreamRequest(1))
+    await vi.advanceTimersByTimeAsync(RESTART_DELAY_MS)
+    await flush()
+    h.proc.stdout.emit('data', init('two'))
+    h.proc.stdout.emit('data', fragment('b'))
+    expect(packets).toEqual([])
   })
 
   it('ends a clip whose consumer falls more than the prebuffer depth behind, rather than queueing without limit', async () => {
@@ -519,15 +545,63 @@ describe('recordingDelegate encoder', () => {
     expect(h.get).toHaveBeenCalledTimes(1)
   })
 
-  it('gives up after repeated short-lived runs instead of respawning forever', async () => {
+  it('slows the retry down after repeated short-lived runs instead of respawning every 10s', async () => {
     const h = await harnessStarted()
     for (let i = 0; i <= MAX_RESTARTS; i++) {
       h.proc.emit('close', 1)
       await vi.advanceTimersByTimeAsync(RESTART_DELAY_MS)
       await flush()
     }
+    // The last exit scheduled a SLOW retry, so the fast interval buys nothing.
     expect(h.spawn).toHaveBeenCalledTimes(MAX_RESTARTS + 1)
-    expect(h.log.warn.mock.calls.flat().join(' ')).toContain('Giving up')
+    expect(h.log.warn.mock.calls.flat().join(' ')).toContain('failed 5 times in a row')
+  })
+
+  // Stopping outright was terminal: a camera reflashing takes longer than the
+  // fast tally spans and fails fast throughout, so nothing ever retried again
+  // until Homebridge was restarted.
+  it('keeps retrying at the slow cadence, so a camera that comes back recovers on its own', async () => {
+    const h = await harnessStarted()
+    for (let i = 0; i <= MAX_RESTARTS; i++) {
+      h.proc.emit('close', 1)
+      await vi.advanceTimersByTimeAsync(RESTART_DELAY_MS)
+      await flush()
+    }
+    const spawns = h.spawn.mock.calls.length
+    await vi.advanceTimersByTimeAsync(SLOW_RESTART_DELAY_MS)
+    await flush()
+    expect(h.spawn.mock.calls.length).toBe(spawns + 1)
+    expect(h.delegate.encoding).toBe(true)
+  })
+
+  it('warns about the slow cadence once, not on every further failure', async () => {
+    const h = await harnessStarted()
+    for (let i = 0; i < MAX_RESTARTS + 3; i++) {
+      h.proc.emit('close', 1)
+      await vi.advanceTimersByTimeAsync(SLOW_RESTART_DELAY_MS)
+      await flush()
+    }
+    const warned = h.log.warn.mock.calls.flat().filter(m => (m as string).includes('times in a row'))
+    expect(warned).toHaveLength(1)
+  })
+
+  // scheduleRestart used to be reachable only from onExit, so a retry whose
+  // stream-url fetch failed produced no process and scheduled nothing: one
+  // console blip ended recording for that camera permanently.
+  it('retries a start that failed before any process existed', async () => {
+    let fail = true
+    const h = harness({ url: async () => {
+      if (fail)
+        throw new Error(`console unreachable for ${URL}`)
+      return URL
+    } })
+    await h.start()
+    expect(h.spawn).not.toHaveBeenCalled()
+    fail = false
+    await vi.advanceTimersByTimeAsync(RESTART_DELAY_MS)
+    await flush()
+    expect(h.spawn).toHaveBeenCalledTimes(1)
+    expect(h.delegate.encoding).toBe(true)
   })
 
   it('honours the configured quality preference, which live view already does', async () => {

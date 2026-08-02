@@ -51,6 +51,17 @@ export class PrebufferRing {
   reset(): void {
     this.fragments = []
   }
+
+  /**
+   * Drops the init segment too, which `reset` deliberately never does. For the
+   * one case where the stream itself is gone: with no encoder, an init is not
+   * "the stream" any more, it is a dead encoder's, and keeping it makes
+   * `snapshot()` answer a request that has nothing behind it.
+   */
+  clear(): void {
+    this.init = undefined
+    this.fragments = []
+  }
 }
 
 /** HomeKit's own default, and what this hardware was measured against. */
@@ -140,17 +151,28 @@ export const RESTART_DELAY_MS = 10_000
 /** An encoder that lived at least this long counts as having worked. */
 const HEALTHY_RUN_MS = 60_000
 /**
- * Consecutive short-lived runs before restarting is abandoned. A camera that is
- * unplugged, re-addressed or simply broken must not be respawned forever: five
- * tries spans a minute of retrying, which covers a reboot, and stopping after
- * that costs only the next `updateRecordingActive(true)` to resume.
+ * Consecutive short-lived runs before the retry drops to the slow cadence. Five
+ * fast tries spans about a minute, which covers a stream that dropped once; a
+ * camera that is unplugged, re-addressed or reflashing takes far longer than
+ * that and must not be respawned every 10 s while it does.
  */
 export const MAX_RESTARTS = 5
+/**
+ * The cadence after that. Long enough that a permanently broken camera costs one
+ * spawn and one log line per ten minutes, short enough that a camera which comes
+ * back is recording again without anybody touching Homebridge.
+ */
+export const SLOW_RESTART_DELAY_MS = 600_000
 
 /**
  * Feeds HomeKit Secure Video: one continuously running ffmpeg per active
  * camera, its fragmented-MP4 stdout split into pieces and kept in a ring, so a
  * recording can begin before the motion that triggered it.
+ *
+ * CEILING (rides with the mounting task): there is no disposal path. An
+ * accessory removed while a restart is pending leaves a timer that will spawn
+ * ffmpeg for a camera that no longer exists. Whatever mounts this delegate has
+ * to own a `dispose()` that clears the timer and stops the process.
  */
 export class RecordingDelegate implements CameraRecordingDelegate {
   readonly ring = new PrebufferRing()
@@ -210,14 +232,21 @@ export class RecordingDelegate implements CameraRecordingDelegate {
    *
    * Open streams are closed and woken: a generator parked on a `wake` that only
    * a fragment can resolve is a stream hap-nodejs has to time out, and it warns
-   * about exactly that after 10 s. The ring keeps its init segment — that
-   * describes the stream rather than a moment in it, and `onPiece` replaces it
-   * when a restart produces a new one — but the fragments go, because serving
-   * the next clip footage from a dead encoder is stale at best and mismatched
-   * against a replaced init at worst.
+   * about exactly that after 10 s.
+   *
+   * The ring is CLEARED, init included. Keeping the init made `snapshot()`
+   * answer requests that arrived between an exit and its restart: the request
+   * succeeded, registered a stream, and parked with no encoder to wake it —
+   * precisely the state this method exists to prevent — and when the restart
+   * landed, that generator emitted a DEAD encoder's init followed by fragments
+   * encoded against the new one, which is silent corruption. With no init,
+   * `handleRecordingStreamRequest` takes its existing no-init branch and returns
+   * empty, which is the honest answer when there is no encoder. Nothing is lost
+   * by it: there is no encoder for at least RESTART_DELAY_MS, so the prebuffer
+   * would cover a window HKSV cannot record in anyway.
    */
   private teardown(): void {
-    this.ring.reset()
+    this.ring.clear()
     for (const [id, state] of this.streams) {
       state.closed = true
       state.wake?.()
@@ -278,11 +307,26 @@ export class RecordingDelegate implements CameraRecordingDelegate {
             // Kill it, but leave the restart path alone: a corrupt box may well
             // be a one-off, and stopEncoder() here would take HKSV down for
             // this camera until HomeKit next toggled Active.
+            //
+            // CEILING (rides with the mounting task): the boolean is ignored
+            // here, the one place in this file where a failed kill is not
+            // honoured — and the splitter is wedged either way, because it
+            // concatenated the chunk before throwing and the throw consumes
+            // nothing, so `pending` grows with every further chunk. A `broken`
+            // flag in Fmp4Splitter that drops subsequent chunks closes both.
             proc.stop()
           }
         },
         onExit: () => {
           // A newer process means this exit belongs to one already replaced.
+          //
+          // CEILING (rides with the mounting task): the `undefined` case lets a
+          // STALE process through — updateRecordingActive(false) then (true)
+          // clears the field, so the old process's late `close` passes here and
+          // logs a spurious stop and one phantom failure. Gating strictly on
+          // `this.proc === proc` closes it, but that also drops the exit of a
+          // process stopEncoder killed, which is the exit this restart path
+          // reads; the two want untangling together, not in a fix wave.
           if (this.proc !== undefined && this.proc !== proc)
             return
           this.proc = undefined
@@ -302,6 +346,12 @@ export class RecordingDelegate implements CameraRecordingDelegate {
     catch (error) {
       this.proc = undefined
       this.options.log.warn(`Could not start the recording encoder for "${this.options.label}": ${redactStreamUrls(errorMessage(error))}`)
+      // A failed START must retry too, not only a failed RUN. Everything from
+      // the stream-url fetch onwards lands here without a process, so without
+      // this a single console blip during a retry would end recording for this
+      // camera permanently. Counted as a failed run of zero length, so the same
+      // ceiling applies.
+      this.scheduleRestart(0)
     }
     finally {
       this.starting = false
@@ -312,27 +362,35 @@ export class RecordingDelegate implements CameraRecordingDelegate {
    * Recording is the one feature that is supposed to run unattended for weeks,
    * so an exit nobody restarts means HKSV is dead for that camera until HomeKit
    * happens to toggle Active — which it may not do for days. It restarts, but
-   * NOT unconditionally: a camera that is unplugged or misconfigured would
-   * otherwise be respawned forever, and a fast-failing loop is worse than being
-   * down, because it also fills the log. So a run that lasted counts as working
-   * and clears the tally, and MAX_RESTARTS short runs in a row stop the loop
-   * with one line saying so.
+   * NOT at one rate forever: a camera that is unplugged or misconfigured fails
+   * fast, and retrying it every 10 s fills the log without ever succeeding. So
+   * a run that lasted HEALTHY_RUN_MS clears the tally, and after MAX_RESTARTS
+   * short runs in a row the interval drops to SLOW_RESTART_DELAY_MS.
    *
-   * ponytail: a fixed delay, not exponential backoff — five tries and stop is
-   * already bounded; add backoff only if the retries themselves become a cost.
+   * It SLOWS DOWN rather than stopping. Stopping was terminal in practice: a
+   * camera rebooting after a firmware update takes longer than the ~60 s the
+   * fast tally spans and fails fast throughout, so the tally never cleared, and
+   * nothing retried again until `updateRecordingActive(true)` — which usually
+   * means a Homebridge restart, days later — while the Home app went on showing
+   * recording as enabled. A retry every ten minutes costs one spawn per ten
+   * minutes and recovers by itself; the log says which cadence it is on.
+   *
+   * ponytail: two fixed intervals, not exponential backoff — the slow one is
+   * already cheap enough to run indefinitely.
    */
   private scheduleRestart(lifetimeMs: number): void {
     if (!this.active)
       return
     this.failures = lifetimeMs >= HEALTHY_RUN_MS ? 0 : this.failures + 1
-    if (this.failures > MAX_RESTARTS) {
-      this.options.log.warn(`Giving up on the recording encoder for "${this.options.label}" after ${MAX_RESTARTS} failed restarts. Recording will resume if HomeKit re-enables it.`)
-      return
-    }
+    const slow = this.failures > MAX_RESTARTS
+    // Once, on the transition: this is the line that tells a user looking at the
+    // log that recording is down and no longer retrying quickly.
+    if (this.failures === MAX_RESTARTS + 1)
+      this.options.log.warn(`The recording encoder for "${this.options.label}" has failed ${MAX_RESTARTS} times in a row. Still retrying, but only every ${SLOW_RESTART_DELAY_MS / 60_000} minutes now.`)
     this.restartTimer = setTimeout(() => {
       this.restartTimer = undefined
       void this.startEncoder()
-    }, RESTART_DELAY_MS)
+    }, slow ? SLOW_RESTART_DELAY_MS : RESTART_DELAY_MS)
     // Never hold the event loop open for a retry.
     this.restartTimer.unref?.()
   }
