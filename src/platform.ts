@@ -177,14 +177,26 @@ const HKSV_FRAGMENT_MS = 4000
  * in Home.app. With an empty trigger set HomeKit has nothing to start a
  * recording on, so the additive override supplies the trigger and no service.
  *
+ * DOORBELL is added the same additive way, for a doorbell only. The alternative
+ * — a `DoorbellController`, whose only functional difference is that its
+ * `retrieveEventTriggerOptions()` adds this very bit — also constructs and OWNS
+ * a primary Doorbell service, which would land beside the subtyped `ring` one
+ * `camera.ts` already drives. Nothing in hap-nodejs 2.1.9 couples the bit to
+ * that service: `RecordingManagement` only ORs the set into the
+ * `SupportedCameraRecordingConfiguration` bitmask, and neither it nor the HDS
+ * recording path ever looks for a Doorbell. The press itself still reaches
+ * HomeKit through the `ring` service on the same accessory, exactly as before.
+ *
  * The resolutions are the two HAP requires. `selectQuality` maps 1920x1080 to
  * the high substream and 1280x720 to medium, so both are promises the encoder
  * keeps.
  */
-function recordingOptions(hap: HAP): CameraRecordingOptions {
+function recordingOptions(hap: HAP, doorbell: boolean): CameraRecordingOptions {
   return {
     prebufferLength: HKSV_FRAGMENT_MS,
-    overrideEventTriggerOptions: [hap.EventTriggerOption.MOTION],
+    overrideEventTriggerOptions: doorbell
+      ? [hap.EventTriggerOption.MOTION, hap.EventTriggerOption.DOORBELL]
+      : [hap.EventTriggerOption.MOTION],
     mediaContainerConfiguration: {
       type: hap.MediaContainerType.FRAGMENTED_MP4,
       fragmentLength: HKSV_FRAGMENT_MS,
@@ -678,6 +690,11 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
       return
 
     const label = accessory.displayName
+    // The SAME predicate `camera.ts`'s `desiredSubtypes` uses to decide whether
+    // this device gets a `ring` Doorbell service at all — only a doorbell has a
+    // speaker on this hardware. Reused so the DOORBELL recording trigger is
+    // advertised exactly when a Doorbell service exists to fire it.
+    const isDoorbell = device.featureFlags?.hasSpeaker === true
     const delegate = new StreamingDelegate({
       deviceId: device.id,
       label,
@@ -695,7 +712,7 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
         const settings = settingsFor(this.config!, device.id)
         return { quality: settings.quality, audio: settings.audio, talkback: settings.talkback }
       },
-      hasSpeaker: device.featureFlags?.hasSpeaker === true,
+      hasSpeaker: isDoorbell,
     })
     // Claimed before the await below, so a discovery arriving mid-probe cannot
     // build a second controller for the same accessory.
@@ -750,7 +767,7 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
         // still make hap-nodejs build the whole RecordingManagement. hap-nodejs
         // creates the CameraOperatingMode service itself from this; never add
         // it by hand.
-        ...(recorder ? { recording: { options: recordingOptions(this.api.hap), delegate: recorder } } : {}),
+        ...(recorder ? { recording: { options: recordingOptions(this.api.hap, isDoorbell), delegate: recorder } } : {}),
       }))
       // AFTER configureController, so a throw from it leaves nothing registered
       // that the removal sweep would have to clean up.

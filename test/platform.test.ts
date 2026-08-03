@@ -1902,11 +1902,53 @@ describe('uniFiProtectPlatform', () => {
   // hap-nodejs derives MOTION from a CONTROLLER-owned sensor — which camera.ts
   // already builds itself, off the event pipeline.
   it('declares the motion trigger without letting the controller build a second motion sensor', async () => {
+    const { accessories } = await withCameras(cameras, { config: hksvOn(DRIVEWAY) })
+    const driveway = accessories.find(a => a.UUID === `uuid-${DRIVEWAY}`)!
+
+    expect(recordingOf(driveway)!.options.overrideEventTriggerOptions).toEqual([hap.EventTriggerOption.MOTION])
+    expect(controllerOf(driveway).options.sensors).toBeUndefined()
+  })
+
+  // A button press could not start a recording: hap-nodejs ORs exactly this set
+  // into the SupportedCameraRecordingConfiguration bitmask, and without the
+  // DOORBELL bit HomeKit is told the camera records on motion alone.
+  it('declares the doorbell trigger as well as motion on a camera with a speaker', async () => {
+    const { accessories } = await withCameras(cameras, { config: hksvOn(DOORBELL) })
+    const doorbell = doorbellOf(accessories)
+    const triggers = recordingOf(doorbell)!.options.overrideEventTriggerOptions
+
+    expect(triggers).toContain(hap.EventTriggerOption.DOORBELL)
+    expect(triggers).toContain(hap.EventTriggerOption.MOTION)
+  })
+
+  // Scope: `hasSpeaker` is false on all four of the real fixture's plain
+  // cameras. Advertising DOORBELL there tells HomeKit about a button that does
+  // not exist.
+  it('declares no doorbell trigger on a camera without a speaker', async () => {
+    const speakerless = [DRIVEWAY, GARAGE]
+    const { accessories } = await withCameras(cameras, { config: hksvOn(...speakerless) })
+
+    for (const id of speakerless) {
+      const camera = accessories.find(a => a.UUID === `uuid-${id}`)!
+      expect(recordingOf(camera)!.options.overrideEventTriggerOptions).not.toContain(hap.EventTriggerOption.DOORBELL)
+    }
+  })
+
+  // The trap on the rejected route: a `DoorbellController` adds the DOORBELL
+  // trigger by owning its own primary Doorbell service, which would land beside
+  // the subtyped `ring` one the event pipeline already rings — a duplicate
+  // control in Home.app on the very accessory the user tests first.
+  it('still has exactly one doorbell service, still the ring one, once the doorbell trigger is declared', async () => {
     const { accessories } = await withCameras(cameras, { config: hksvOn(DOORBELL) })
     const doorbell = doorbellOf(accessories)
 
-    expect(recordingOf(doorbell)!.options.overrideEventTriggerOptions).toEqual([hap.EventTriggerOption.MOTION])
-    expect(controllerOf(doorbell).options.sensors).toBeUndefined()
+    expect(recordingOf(doorbell)!.options.overrideEventTriggerOptions).toContain(hap.EventTriggerOption.DOORBELL)
+    expect(doorbell.services.filter(s => s.type === S.Doorbell)).toHaveLength(1)
+    expect(doorbell.getServiceById(S.Doorbell, 'ring')).toBeDefined()
+    expect(controllerOf(doorbell)).not.toBeInstanceOf(FakeDoorbellController)
+    // And a speakerless camera gains none at all.
+    const driveway = accessories.find(a => a.UUID === `uuid-${DRIVEWAY}`)!
+    expect(driveway.services.filter(s => s.type === S.Doorbell)).toHaveLength(0)
   })
 
   // HAP builds CameraOperatingMode from the `recording` option alone. Adding one
