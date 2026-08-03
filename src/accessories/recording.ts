@@ -131,9 +131,16 @@ export interface RecordingDelegateOptions {
   urls: Pick<StreamUrls, 'get'>
   caps: FfmpegCapabilities
   /**
-   * The live value of `RecordingAudioActive`. A function, not a boolean: HomeKit
-   * can flip it at any time, and the encoder must honour whatever it reads at
-   * the moment it starts.
+   * A function that returns the plugin's live audio setting (from
+   * `settingsFor(...).audio`), read once per encoder start. NOT the
+   * `RecordingAudioActive` characteristic, which this plugin does not read or
+   * honour: toggling recording audio in the Home app has no effect. This is a
+   * known limitation — fixing it would require access to the `CameraController`
+   * instance to read the characteristic, but `attachStreaming` constructs it
+   * inline and discards it. Clips are recorded with or without audio according
+   * to the plugin setting, while hap-nodejs defaults `RecordingAudioActive` to
+   * `false`, so users see "recording audio off" in the Home app even when clips
+   * contain audio.
    */
   audioActive: () => boolean
   /**
@@ -169,10 +176,10 @@ export const SLOW_RESTART_DELAY_MS = 600_000
  * camera, its fragmented-MP4 stdout split into pieces and kept in a ring, so a
  * recording can begin before the motion that triggered it.
  *
- * CEILING (rides with the mounting task): there is no disposal path. An
- * accessory removed while a restart is pending leaves a timer that will spawn
- * ffmpeg for a camera that no longer exists. Whatever mounts this delegate has
- * to own a `dispose()` that clears the timer and stops the process.
+ * Disposed via `UniFiProtectPlatform.disposeRecorder`, which calls
+ * `updateRecordingActive(false)` to clear the restart timer, stop the process,
+ * and run teardown. This is called both from the accessory-removal sweep and
+ * from shutdown.
  */
 export class RecordingDelegate implements CameraRecordingDelegate {
   readonly ring = new PrebufferRing()
@@ -317,8 +324,14 @@ export class RecordingDelegate implements CameraRecordingDelegate {
             //
             // Warned at most once per process: `Fmp4Splitter` latches `broken`
             // and drops every later chunk, so this catch cannot run again.
-            if (!proc.stop())
+            if (!proc.stop()) {
+              // ponytail: if kill fails, this.proc stays set, the splitter keeps
+              // dropping chunks (broken latch), onExit never fires, scheduleRestart
+              // is unreached, and the camera's recording is dead for the life of
+              // Homebridge. Upgrade: escalate to a full stopEncoder() + restart if
+              // the kill fails consistently.
               this.options.log.warn(`Could not stop the unreadable recording encoder for "${this.options.label}". It may still be running.`)
+            }
           }
         },
         onExit: () => {
