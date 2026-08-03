@@ -242,6 +242,57 @@ describe('renderDetail', () => {
     expect(heading.focusCount).toBe(1)
   })
 
+  // Found by driving the real UI: selecting a chime drew "Live view",
+  // "Recording" and "Extra accessories" as bordered dividers with nothing
+  // under them, because capability gating leaves those bodies empty. Same
+  // defect the device list already fixes for its group headings.
+  it('hides a section whose body has no controls, label and all', () => {
+    const container = doc.createElement('div')
+    doc.root.append(container)
+    const { bodies, mount, pane } = renderDetail(doc, DEVICES[2]!) as unknown as {
+      bodies: Record<string, FakeElement>
+      pane: FakeElement
+      mount: (container: FakeElement) => void
+    }
+    // Only General gets a control for a chime, exactly as the caller fills it.
+    bodies.General!.append(doc.createElement('input'))
+    mount(container)
+
+    const labelOf = (name: string) =>
+      (pane.children as FakeElement[]).find(c => c.textContent === name)
+    expect(labelOf('General')!.style.display).toBe('')
+    expect(bodies.General!.style.display).toBe('')
+    for (const empty of ['Live view', 'Recording', 'Extra accessories']) {
+      expect(labelOf(empty)!.style.display, empty).toBe('none')
+      expect(bodies[empty]!.style.display, empty).toBe('none')
+    }
+  })
+
+  // The Recording body ALWAYS carries the tier-warning element, which hides
+  // itself when there is nothing to warn about — so "has children" is not the
+  // same question as "has anything to show".
+  it('treats a section holding only a hidden element as empty', () => {
+    const container = doc.createElement('div')
+    doc.root.append(container)
+    const { bodies, mount, pane } = renderDetail(doc, DEVICES[1]!) as unknown as {
+      bodies: Record<string, FakeElement>
+      pane: FakeElement
+      mount: (container: FakeElement) => void
+    }
+    const hiddenWarning = doc.createElement('div')
+    hiddenWarning.style.display = 'none'
+    bodies.Recording!.append(hiddenWarning)
+    mount(container)
+
+    const label = (pane.children as FakeElement[]).find(c => c.textContent === 'Recording')
+    expect(label!.style.display).toBe('none')
+
+    // ...and it comes back the moment the warning has something to say.
+    hiddenWarning.style.display = ''
+    mount(container)
+    expect(label!.style.display).toBe('')
+  })
+
   it('replaces whatever the detail pane held before', () => {
     const container = doc.createElement('div')
     doc.root.append(container)

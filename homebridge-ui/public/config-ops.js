@@ -9,6 +9,14 @@ export const DEFAULTS = { exposeNewDevices: true, quality: 'auto', hksv: false, 
 export const RECORDING_LIMITS = { '50gb': 1, '200gb': 5, '2tb': Number.POSITIVE_INFINITY }
 
 /**
+ * How each tier is written for a human. The keys are config values, not prose —
+ * without this the warning read "…supports 1 on the 50gb tier", printing the
+ * raw config key back at someone who chose "50 GB" from a menu. Must cover
+ * every key of RECORDING_LIMITS; a test pins the two together.
+ */
+export const TIER_LABELS = { '50gb': '50 GB', '200gb': '200 GB', '2tb': '2 TB or more' }
+
+/**
  * Normalises the platform block WITHOUT dropping anything it does not know
  * about. `updatePluginConfig` replaces the whole block ("Existing blocks not
  * included will be removed"), and Homebridge stores the child bridge's
@@ -378,7 +386,7 @@ export function tierWarning(config, devices) {
   const count = recordingCount(config, devices)
   if (count <= limit)
     return undefined
-  return `${count} accessories are set to record, but your iCloud+ plan supports ${limit} on the ${tier} tier. HomeKit will refuse the extras — this is a heads-up, not a block.`
+  return `${count} accessories are set to record, but your iCloud+ plan supports ${limit} on the ${TIER_LABELS[tier]} tier. HomeKit will refuse the extras — this is a heads-up, not a block.`
 }
 
 /**

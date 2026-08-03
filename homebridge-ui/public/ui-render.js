@@ -187,6 +187,9 @@ export function renderDetail(doc, device) {
   heading.textContent = device.name
   pane.append(heading)
   const bodies = {}
+  // Kept so `mount` can hide a section whose body ends up with no visible
+  // controls — the label and its body have to disappear together.
+  const labels = {}
   for (const name of SECTIONS) {
     const labelId = `detail-section-${sectionSeq++}`
     const label = doc.createElement('div')
@@ -198,8 +201,24 @@ export function renderDetail(doc, device) {
     body.setAttribute('aria-labelledby', labelId)
     pane.append(label, body)
     bodies[name] = body
+    labels[name] = label
   }
   const mount = (container) => {
+    // A section label over nothing is the same defect the device list already
+    // fixes for its group headings: selecting a chime drew "Live view",
+    // "Recording" and "Extra accessories" as bordered dividers with no controls
+    // under them, because capability gating leaves those bodies empty. The
+    // caller fills the bodies AFTER renderDetail returns, so mount is the first
+    // moment this can be decided.
+    //
+    // "Empty" means no VISIBLE children, not no children: the Recording body
+    // always carries the tier-warning element, which hides itself with
+    // `style.display = 'none'` when there is nothing to warn about.
+    for (const [name, body] of Object.entries(bodies)) {
+      const visible = [...body.children].some(child => child.style?.display !== 'none')
+      labels[name].style.display = visible ? '' : 'none'
+      body.style.display = visible ? '' : 'none'
+    }
     container.replaceChildren(pane)
     heading.focus()
     // Selecting a device swaps the whole right-hand pane, which changes the

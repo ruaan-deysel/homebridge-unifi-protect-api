@@ -1,6 +1,6 @@
 import type { DeviceOverride, IcloudTier } from '../homebridge-ui/public/config-ops.js'
 import { describe, expect, it, vi } from 'vitest'
-import { AUDIO_LABEL, cameraToggles, clearDeviceSetting, debounce, defaultFor, DEFAULTS, ensureConfig, HKSV_LABEL, isOverridden, MAX_STREAMS_RANGE, NEEDS_RESTART, PACKAGE_LABEL, parseIcloudTier, parseMaxStreams, QUALITY_OPTIONS, RECORDING_LIMITS, recordingCount, renderDeviceHeader, renderQualitySelect, renderToggle, SAVE_DEBOUNCE_MS, setDeviceSetting, setGlobalSetting, shouldOfferPackageCamera, TALKBACK_LABEL, tierWarning } from '../homebridge-ui/public/config-ops.js'
+import { AUDIO_LABEL, cameraToggles, clearDeviceSetting, debounce, defaultFor, DEFAULTS, ensureConfig, HKSV_LABEL, isOverridden, MAX_STREAMS_RANGE, NEEDS_RESTART, PACKAGE_LABEL, parseIcloudTier, parseMaxStreams, QUALITY_OPTIONS, RECORDING_LIMITS, recordingCount, renderDeviceHeader, renderQualitySelect, renderToggle, SAVE_DEBOUNCE_MS, setDeviceSetting, setGlobalSetting, shouldOfferPackageCamera, TALKBACK_LABEL, TIER_LABELS, tierWarning } from '../homebridge-ui/public/config-ops.js'
 import { parseConfig, settingsFor } from '../src/config.js'
 
 // Minimal fake DOM — just enough to prove renderDeviceHeader never turns
@@ -639,6 +639,15 @@ describe('iCloud tier recording limits', () => {
     expect(RECORDING_LIMITS['200gb']).toBe(5)
     expect(RECORDING_LIMITS['2tb']).toBe(Number.POSITIVE_INFINITY)
   })
+
+  // Found by driving the real UI: the warning printed the raw config key back
+  // at a user who had chosen "50 GB" from a menu — "…supports 1 on the 50gb
+  // tier". A tier with no label would reintroduce that, so cover the whole set.
+  it('has a human label for every tier it knows a limit for', () => {
+    expect(Object.keys(TIER_LABELS).sort()).toEqual(Object.keys(RECORDING_LIMITS).sort())
+    for (const label of Object.values(TIER_LABELS))
+      expect(label).toMatch(/\d/)
+  })
 })
 
 // U6: a hand-edited config.json can carry any string. Without validation,
@@ -769,10 +778,13 @@ describe('recordingCount / tierWarning', () => {
     const over = withDevices(many, '1tb' as unknown as IcloudTier)
     const message = tierWarning(over, devices(['a', 'b', 'c', 'd', 'e', 'f']))
     // And when it does warn, it names the tier and limit actually in force —
-    // never the string 'undefined', and never the unrecognised tier.
-    expect(message).toContain(DEFAULTS.icloudTier)
+    // never the string 'undefined', and never the unrecognised tier. The tier
+    // is named the way the user picked it ("200 GB"), not by its config key —
+    // this assertion used to require the key, which pinned that defect in place.
+    expect(message).toContain(TIER_LABELS[DEFAULTS.icloudTier as keyof typeof TIER_LABELS])
     expect(message).not.toContain('undefined')
     expect(message).not.toContain('1tb')
+    expect(message).not.toContain('200gb')
     expect(message).toContain('5')
   })
 

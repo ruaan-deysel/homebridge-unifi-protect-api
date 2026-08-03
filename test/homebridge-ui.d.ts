@@ -121,6 +121,11 @@ declare module '*/homebridge-ui/public/config-ops.js' {
 
   export const DEFAULTS: Defaults
   export const RECORDING_LIMITS: Record<IcloudTier, number>
+  /**
+   * `Record<IcloudTier, string>`, so adding a tier without a label is a type
+   * error rather than a warning that prints the raw config key at the user.
+   */
+  export const TIER_LABELS: Record<IcloudTier, string>
   export function ensureConfig(raw?: Partial<ConfigShape> | null): ConfigShape
   export function parseIcloudTier(raw: unknown): IcloudTier
   export function setDeviceSetting(
