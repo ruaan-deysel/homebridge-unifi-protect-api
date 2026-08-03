@@ -162,6 +162,14 @@ export const AUDIO_LABEL = 'Live view audio'
 export const TALKBACK_LABEL = 'Two-way audio'
 
 /**
+ * The HKSV recording toggle's label. Recording settings take effect only after
+ * a restart, just like audio and talkback, so the restart is signalled by
+ * renderToggle's marker (driven off NEEDS_RESTART) rather than baked into
+ * this text — see AUDIO_LABEL for why that avoids duplication.
+ */
+export const HKSV_LABEL = 'HomeKit Secure Video (restart to enable)'
+
+/**
  * Builds the per-camera quality selector with DOM APIs only — never
  * `innerHTML`. `device.id` is console-supplied and therefore
  * attacker-controlled, exactly like the name in `renderDeviceHeader`, and it is
@@ -227,7 +235,7 @@ export function cameraToggles(device) {
   const toggles = []
   if (device.hasMic)
     toggles.push({ key: 'audio', label: AUDIO_LABEL, section: 'Live view' })
-  toggles.push({ key: 'hksv', label: 'HomeKit Secure Video', comingLater: true, section: 'Recording' })
+  toggles.push({ key: 'hksv', label: HKSV_LABEL, section: 'Recording' })
   if (device.hasSpeaker)
     toggles.push({ key: 'talkback', label: TALKBACK_LABEL, section: 'Live view' })
   if (shouldOfferPackageCamera(device))

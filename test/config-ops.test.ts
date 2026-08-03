@@ -451,9 +451,9 @@ describe('package camera toggle', () => {
     // store an explicit `false` override instead of clearing the key.
     expect(defaultFor(ensureConfig(null), 'packageCamera')).toBe(false)
     expect(pkg.input.checked).toBe(false)
-    // Live, unlike the "arriving later" controls beside it.
+    // All toggles are now live — neither the package lens nor recording are "arriving later" anymore.
     expect(pkg.wrap.className).not.toBe('up-muted')
-    expect(rendered.find(control => control.key === 'hksv')?.wrap.className).toBe('up-muted')
+    expect(rendered.find(control => control.key === 'hksv')?.wrap.className).not.toBe('up-muted')
   })
 
   it('renders no package checkbox for a camera without the lens', () => {
@@ -527,6 +527,15 @@ describe('cameraToggles sections', () => {
       talkback: 'Live view',
       packageCamera: 'Extra accessories',
     })
+  })
+})
+
+describe('recording toggle', () => {
+  it('offers recording as a live control', () => {
+    const entry = cameraToggles({ hasSpeaker: false, hasMic: true, hasPackageCamera: false }).find(t => t.key === 'hksv')
+    expect(entry!.comingLater).toBeUndefined()
+    expect(entry!.label).toContain('restart')
+    expect(entry!.section).toBe('Recording')
   })
 })
 
