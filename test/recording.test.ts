@@ -4,6 +4,7 @@ import type { FfmpegCapabilities, SpawnFn } from '../src/protect/ffmpeg.js'
 import { Buffer } from 'node:buffer'
 import { EventEmitter } from 'node:events'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { ADVERTISED_RECORDING_SIZE, selectQuality } from '../src/accessories/quality.js'
 import { HEALTHY_RUN_MS, MAX_RESTARTS, PREBUFFER_FRAGMENTS, PrebufferRing, recordingArgs, RecordingDelegate, RESTART_DELAY_MS, SLOW_RESTART_DELAY_MS } from '../src/accessories/recording.js'
 import { FfmpegProcess } from '../src/protect/ffmpeg.js'
 
@@ -590,6 +591,18 @@ describe('recordingDelegate encoder', () => {
     h.delegate.handleRecordingStreamRequest(1)
     expect(h.log.info.mock.calls.flat().join(' ')).toContain(`3 of ${PREBUFFER_FRAGMENTS} prebuffered`)
     h.close(1)
+  })
+
+  // Observed live: "Garage" started its encoder before HomeKit sent a
+  // configuration and recorded on the HIGH substream - 2688x1512 - while
+  // recordingOptions advertises only 1280x720. recordingArgs applies no scale
+  // filter, so the fallback has to be the advertised size or the plugin ships
+  // four times the pixels it promised, and pays the GPU for them.
+  it('falls back to the advertised size, not the high substream, before HomeKit configures it', async () => {
+    const h = await harnessStarted()
+
+    expect(h.get).toHaveBeenCalledWith('cam-1', selectQuality(...ADVERTISED_RECORDING_SIZE))
+    expect(h.log.info.mock.calls.flat().join(' ')).toContain('medium substream')
   })
 
   it('logs a clean exit, which ffmpeg itself never reports', async () => {

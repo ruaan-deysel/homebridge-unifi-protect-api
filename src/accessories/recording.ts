@@ -7,7 +7,7 @@ import { Buffer } from 'node:buffer'
 import { errorMessage } from '../protect/errors.js'
 import { FfmpegProcess, redactStreamUrls } from '../protect/ffmpeg.js'
 import { Fmp4Splitter } from '../protect/fmp4.js'
-import { selectQuality } from './quality.js'
+import { ADVERTISED_RECORDING_SIZE, selectQuality } from './quality.js'
 
 /**
  * Bounded by COUNT, not by time: a stalled or slow stream must not be able to
@@ -280,9 +280,15 @@ export class RecordingDelegate implements CameraRecordingDelegate {
       // `Resolution` is a [width, height, fps] tuple.
       const resolution = this.config?.videoCodec.resolution
       const preference = this.options.quality?.()
+      // No negotiated configuration yet: fall back to the ONE resolution
+      // `recordingOptions` advertises, 1280x720, which `selectQuality` maps to
+      // the medium substream at exactly that size. This used to fall back to
+      // 'high' — 2688x1512 — so a camera whose encoder started before HomeKit
+      // sent a configuration recorded at more than four times the advertised
+      // pixel count, and paid the GPU for it. Observed live on "Garage".
       const quality = resolution
         ? selectQuality(resolution[0], resolution[1], preference)
-        : (preference === undefined || preference === 'auto' ? 'high' : preference)
+        : (preference === undefined || preference === 'auto' ? selectQuality(...ADVERTISED_RECORDING_SIZE) : preference)
       const url = await this.options.urls.get(this.options.deviceId, quality)
       // Re-checked after the await: updateRecordingActive(false) may have landed
       // while the stream URL was being fetched, and a process spawned after it

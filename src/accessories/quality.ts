@@ -22,6 +22,17 @@ export const SUBSTREAM_SIZE: Record<Quality, [number, number]> = {
 }
 
 /**
+ * The ONLY size the HKSV recording path advertises, and therefore the only one
+ * it may deliver — `recordingArgs` applies no scale filter. Both the
+ * advertisement in `recordingOptions` and the recording encoder's
+ * no-configuration-yet fallback read this, so the promise and the delivery
+ * cannot drift apart. They did once: the ladder was trimmed to 1280x720 while
+ * the fallback still said 'high', and a camera whose encoder started before
+ * HomeKit sent a configuration recorded 2688x1512.
+ */
+export const ADVERTISED_RECORDING_SIZE: [number, number] = SUBSTREAM_SIZE.medium
+
+/**
  * HomeKit's most common request is 1280x720, which maps to medium and therefore
  * needs no scaling — only the mandatory HEVC to H.264 transcode.
  */

@@ -5,6 +5,7 @@ import type { SensorChange } from './accessories/tracker.js'
 import type { ProtectPluginConfig } from './config.js'
 import type { FfmpegCapabilities, RunFfmpeg } from './protect/ffmpeg.js'
 import { applyChange, buildCameraServices, isUnderstood } from './accessories/camera.js'
+import { ADVERTISED_RECORDING_SIZE } from './accessories/quality.js'
 import { RecordingDelegate } from './accessories/recording.js'
 import { routeEvent } from './accessories/router.js'
 import { StreamingDelegate } from './accessories/streaming.js'
@@ -221,8 +222,8 @@ function recordingOptions(hap: HAP, doorbell: boolean): CameraRecordingOptions {
         levels: [hap.H264Level.LEVEL3_1, hap.H264Level.LEVEL3_2, hap.H264Level.LEVEL4_0],
       },
       resolutions: [
-        [1280, 720, 30],
-        [1280, 720, 15],
+        [...ADVERTISED_RECORDING_SIZE, 30],
+        [...ADVERTISED_RECORDING_SIZE, 15],
       ],
     },
     audio: {
