@@ -30,6 +30,8 @@ coverage/
 .superpowers/
 
 # Internal planning artefacts — not part of the published project
+docs/superpowers/
+docs/plans/
 
 # Remember plugin session scratch — never publish
 .remember/
