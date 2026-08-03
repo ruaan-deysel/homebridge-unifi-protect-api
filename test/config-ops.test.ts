@@ -34,7 +34,13 @@ export class FakeElement {
   style: { display: string } = { display: '' }
   /** Mirrors the real DOM's `dataset` — a property bag, never markup. */
   dataset: Record<string, string> = {}
-  tabIndex = 0
+  /**
+   * `-1`, matching what a real `div` reports when it carries no `tabindex`
+   * attribute — NOT `0`. Defaulting to `0` made "every pane is in the Tab
+   * order" pass against a renderer that never set it (a green mutation), which
+   * is the same class of defect as the `focus()` counter below.
+   */
+  tabIndex = -1
   private listeners = new Map<string, ((event: Record<string, unknown>) => void)[]>()
   private _text = ''
   private _html?: string
