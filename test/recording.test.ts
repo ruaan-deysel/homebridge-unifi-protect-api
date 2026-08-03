@@ -605,6 +605,27 @@ describe('recordingDelegate encoder', () => {
     expect(h.log.info.mock.calls.flat().join(' ')).toContain('medium substream')
   })
 
+  // `??` passes 0 and NaN through, and both silently restore the whole-ring
+  // bug: 0 divides to Infinity, and slice(-NaN) is slice(0). The configuration
+  // arrives from a controller, so it is not this plugin's to trust.
+  it.each([
+    ['a zero fragment length', 0],
+    ['a NaN fragment length', Number.NaN],
+    ['a negative fragment length', -4000],
+  ])('does not send the whole ring on %s', async (_label, fragmentLength) => {
+    const h = await harnessStarted()
+    h.delegate.updateRecordingConfiguration(configuration(fragmentLength as number))
+    h.proc.stdout.emit('data', init('one'))
+    for (let i = 0; i < PREBUFFER_FRAGMENTS; i++)
+      h.proc.stdout.emit('data', fragment(`old${i}`))
+
+    h.delegate.handleRecordingStreamRequest(1)
+
+    // Falls back to the 4000ms default against a 4000ms prebuffer = one.
+    expect(h.log.info.mock.calls.flat().join(' ')).toContain(`1 of ${PREBUFFER_FRAGMENTS} prebuffered`)
+    h.close(1)
+  })
+
   it('logs a clean exit, which ffmpeg itself never reports', async () => {
     const h = await harnessStarted()
     h.proc.emit('close', 0)

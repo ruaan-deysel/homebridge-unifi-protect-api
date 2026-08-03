@@ -554,9 +554,19 @@ export class RecordingDelegate implements CameraRecordingDelegate {
    * prevent.
    */
   private prebufferFragments(): number {
-    const wanted = this.config?.prebufferLength ?? DEFAULT_FRAGMENT_MS
-    const fragmentMs = this.config?.mediaContainerConfiguration.fragmentLength ?? DEFAULT_FRAGMENT_MS
-    return Math.max(1, Math.ceil(wanted / fragmentMs))
+    // `??` is not enough: it passes 0 and NaN straight through, and BOTH make
+    // this function silently restore the very bug it exists to fix. A
+    // `fragmentLength` of 0 divides to Infinity, and NaN makes `slice(-NaN)`
+    // equal `slice(0)` — either way the whole 16-fragment ring goes out again.
+    // The configuration comes off the wire from a controller, so it is not this
+    // plugin's to trust.
+    const positive = (value: unknown): number | undefined =>
+      typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined
+    const wanted = positive(this.config?.prebufferLength) ?? DEFAULT_FRAGMENT_MS
+    const fragmentMs = positive(this.config?.mediaContainerConfiguration.fragmentLength) ?? DEFAULT_FRAGMENT_MS
+    // Capped at the ring's own depth: asking for more pre-roll than is held is
+    // not an error, it just means "all of it".
+    return Math.min(PREBUFFER_FRAGMENTS, Math.max(1, Math.ceil(wanted / fragmentMs)))
   }
 
   /**
