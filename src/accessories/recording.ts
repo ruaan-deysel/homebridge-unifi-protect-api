@@ -1,9 +1,9 @@
 import type { CameraRecordingConfiguration, CameraRecordingDelegate, RecordingPacket } from 'homebridge'
-import type { Buffer } from 'node:buffer'
 import type { FfmpegCapabilities, SpawnFn } from '../protect/ffmpeg.js'
 import type { Fmp4Piece } from '../protect/fmp4.js'
 import type { StreamUrls } from '../protect/stream.js'
 import type { QualityPreference } from './quality.js'
+import { Buffer } from 'node:buffer'
 import { errorMessage } from '../protect/errors.js'
 import { FfmpegProcess, redactStreamUrls } from '../protect/ffmpeg.js'
 import { Fmp4Splitter } from '../protect/fmp4.js'
@@ -73,6 +73,9 @@ export class PrebufferRing {
 
 /** HomeKit's own default, and what this hardware was measured against. */
 const DEFAULT_FRAGMENT_MS = 4000
+
+/** The body of a clip with nothing in it. See `handleRecordingStreamRequest`. */
+const EMPTY_PACKET = Buffer.alloc(0)
 
 export interface RecordingArgsOptions {
   url: string
@@ -291,7 +294,14 @@ export class RecordingDelegate implements CameraRecordingDelegate {
       const audio = this.options.audioActive()
       // No logging of `url` or `args` from here to the spawn. The RTSPS URL
       // carries an auth token, and ffmpeg echoes its own argv on failure.
-      const splitter = new Fmp4Splitter((kind, data) => this.onPiece(kind, data))
+      // Per-process, deliberately not a field: it answers "did THIS run produce
+      // anything", and a field would still hold the previous run's answer when
+      // the next one exits without producing.
+      let produced = false
+      const splitter = new Fmp4Splitter((kind, data) => {
+        produced = true
+        this.onPiece(kind, data)
+      })
       const startedAt = Date.now()
       const proc = new FfmpegProcess({
         path: this.options.caps.path,
@@ -364,7 +374,7 @@ export class RecordingDelegate implements CameraRecordingDelegate {
           // FfmpegProcess, which only warns on a non-zero code. The one feature
           // whose point is running continuously must say when it stopped.
           this.options.log.info(`Recording prebuffer for "${this.options.label}" stopped after ${seconds}s.`)
-          this.scheduleRestart(Date.now() - startedAt)
+          this.scheduleRestart(Date.now() - startedAt, produced)
         },
       })
       this.proc = proc
@@ -377,9 +387,9 @@ export class RecordingDelegate implements CameraRecordingDelegate {
       // A failed START must retry too, not only a failed RUN. Everything from
       // the stream-url fetch onwards lands here without a process, so without
       // this a single console blip during a retry would end recording for this
-      // camera permanently. Counted as a failed run of zero length, so the same
-      // ceiling applies.
-      this.scheduleRestart(0)
+      // camera permanently. Counted as a failed run of zero length that produced
+      // nothing, so the same ceiling applies.
+      this.scheduleRestart(0, false)
     }
     finally {
       this.starting = false
@@ -392,8 +402,16 @@ export class RecordingDelegate implements CameraRecordingDelegate {
    * happens to toggle Active — which it may not do for days. It restarts, but
    * NOT at one rate forever: a camera that is unplugged or misconfigured fails
    * fast, and retrying it every 10 s fills the log without ever succeeding. So
-   * a run that lasted HEALTHY_RUN_MS clears the tally, and after MAX_RESTARTS
-   * short runs in a row the interval drops to SLOW_RESTART_DELAY_MS.
+   * a run that lasted HEALTHY_RUN_MS **and produced media** clears the tally,
+   * and after MAX_RESTARTS unhealthy runs in a row the interval drops to
+   * SLOW_RESTART_DELAY_MS.
+   *
+   * Both halves are load-bearing. Uptime alone was the whole test: an ffmpeg
+   * that connects, stalls, and sits there for 60 s emitting no init segment and
+   * no fragment reset the tally every single time, so the genuinely broken
+   * camera the slow cadence exists for never reached it — it respawned every
+   * 10 s forever. `produced` is the evidence that the process actually did the
+   * job, and the job is bytes, not staying alive.
    *
    * It SLOWS DOWN rather than stopping. Stopping was terminal in practice: a
    * camera rebooting after a firmware update takes longer than the ~60 s the
@@ -406,7 +424,7 @@ export class RecordingDelegate implements CameraRecordingDelegate {
    * ponytail: two fixed intervals, not exponential backoff — the slow one is
    * already cheap enough to run indefinitely.
    */
-  private scheduleRestart(lifetimeMs: number): void {
+  private scheduleRestart(lifetimeMs: number, producedMedia: boolean): void {
     if (!this.active)
       return
     // A pending retry is REPLACED, never shadowed. HomeKit re-delivers the same
@@ -418,7 +436,7 @@ export class RecordingDelegate implements CameraRecordingDelegate {
     // for it. `unref()` keeps it from holding the process open, so what is at
     // stake is a stray fetch and a retained delegate, not a hang.
     clearTimeout(this.restartTimer)
-    this.failures = lifetimeMs >= HEALTHY_RUN_MS ? 0 : this.failures + 1
+    this.failures = (lifetimeMs >= HEALTHY_RUN_MS && producedMedia) ? 0 : this.failures + 1
     const slow = this.failures > MAX_RESTARTS
     // Once, on the transition: this is the line that tells a user looking at the
     // log that recording is down and no longer retrying quickly.
@@ -486,10 +504,26 @@ export class RecordingDelegate implements CameraRecordingDelegate {
   handleRecordingStreamRequest(streamId: number): AsyncGenerator<RecordingPacket> {
     const snapshot = this.ring.snapshot()
     if (!snapshot) {
-      // Nothing decodable to send. Returning empty is what tells HomeKit the
-      // clip is over; yielding a fragment without its init segment would not be.
+      // Nothing decodable to send: no init segment means no clip, and yielding a
+      // fragment without one would be worse than nothing.
+      //
+      // But an EMPTY generator is a contract violation, not an empty clip.
+      // hap-nodejs's `_startStreaming` tracks `lastFragmentWasMarkedLast` and,
+      // on a generator that returns without it, logs "Delegate finished
+      // streaming ... without setting RecordingPacket.isLast. Can't notify
+      // Controller about endOfStream!" — an unredacted console.warn from a
+      // library, per request, for a state this plugin reaches routinely at
+      // startup and across every encoder restart. It recovers, but only via the
+      // 12 s `kickOffCloseTimeout` force-close.
+      //
+      // A zero-length final packet is the honest empty clip AND satisfies the
+      // contract: hap-nodejs's chunk loop is `while (offset < fragment.length)`,
+      // so nothing at all goes on the wire, `isLast` is recorded, and the stream
+      // ends without the warning.
       this.options.log.warn(`Cannot record "${this.options.label}": the encoder has not produced an init segment yet.`)
-      return (async function* () {})()
+      return (async function* () {
+        yield { data: EMPTY_PACKET, isLast: true }
+      })()
     }
     const state: StreamState = { closed: false, queue: [...snapshot.fragments] }
     this.streams.set(streamId, state)

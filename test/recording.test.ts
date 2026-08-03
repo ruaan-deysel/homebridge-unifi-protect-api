@@ -309,9 +309,19 @@ describe('recordingDelegate stream generator', () => {
     expect(packet.value!.isLast).toBe(false)
   })
 
-  it('yields nothing when no init segment has been produced yet', async () => {
+  // An EMPTY generator is not an empty clip, it is a contract violation:
+  // hap-nodejs's `_startStreaming` tracks `lastFragmentWasMarkedLast` and warns
+  // "Delegate finished streaming ... without setting RecordingPacket.isLast"
+  // when a generator returns without it — for a state this plugin reaches at
+  // every startup and every encoder restart. A zero-length final packet sends
+  // nothing on the wire (hap's chunk loop is `while (offset < length)`) and
+  // still ends the stream properly.
+  it('ends the stream with a flagged empty packet when no init segment exists yet', async () => {
     const { delegate, log } = harness()
-    expect(await drain(delegate.handleRecordingStreamRequest(1))).toEqual([])
+    const packets = await drain(delegate.handleRecordingStreamRequest(1))
+    expect(packets).toHaveLength(1)
+    expect(packets[0]!.isLast).toBe(true)
+    expect(packets[0]!.data).toHaveLength(0)
     expect(log.warn.mock.calls.some(([m]) => (m as string).includes('init segment'))).toBe(true)
   })
 
@@ -496,7 +506,10 @@ describe('recordingDelegate encoder', () => {
     h.proc.stdout.emit('data', fragment('a'))
     h.proc.emit('close', 0)
     expect(h.ring.snapshot()).toBeUndefined()
-    expect(await drain(h.delegate.handleRecordingStreamRequest(1))).toEqual([])
+    // No media, but a properly terminated stream — see the empty-packet test
+    // above for why an empty generator is not an acceptable answer here.
+    const packets = await drain(h.delegate.handleRecordingStreamRequest(1))
+    expect(packets.map(p => [p.data.length, p.isLast])).toEqual([[0, true]])
   })
 
   // Never awaited: the point is what the generator YIELDS once the new encoder
@@ -520,7 +533,9 @@ describe('recordingDelegate encoder', () => {
     // released it rather than sitting on the lookahead.
     h.proc.stdout.emit('data', fragment('c'))
     await flush()
-    expect(packets.map(p => p.data.toString('latin1'))).toEqual([])
+    // The empty terminator and nothing else: not one byte of the NEW encoder's
+    // media reaches a stream opened against the old one.
+    expect(packets.map(p => [p.data.toString('latin1'), p.isLast])).toEqual([['', true]])
     h.close(1)
   })
 
@@ -595,12 +610,13 @@ describe('recordingDelegate encoder', () => {
     expect(h.delegate.encoding).toBe(true)
   })
 
-  // The single load-bearing claim of "slow down, never stop": without this
-  // reset a camera that comes back stays on the ten-minute cadence for the life
-  // of the process, which is worse than the fast loop it replaced. Untestable
-  // under this file's default fake timers, because the tally compares real
-  // timestamps — hence Date is faked here and nowhere else.
-  it('returns to the fast retry after a run that actually lasted', async () => {
+  /**
+   * Drives the delegate onto the slow cadence and leaves a fresh encoder
+   * running, so the two tests below differ only in whether that encoder
+   * produces anything. Date is faked here and nowhere else in this file: the
+   * tally compares real timestamps.
+   */
+  async function onSlowCadence() {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
     const h = await harnessStarted()
     for (let i = 0; i <= MAX_RESTARTS; i++) {
@@ -613,15 +629,46 @@ describe('recordingDelegate encoder', () => {
     await vi.advanceTimersByTimeAsync(SLOW_RESTART_DELAY_MS)
     await flush()
     expect(h.spawn.mock.calls.length).toBe(beforeSlow + 1)
+    return h
+  }
 
-    // A run that lasted, then a failure: the tally is cleared, so the retry is
-    // fast again rather than ten minutes away.
+  // The single load-bearing claim of "slow down, never stop": without this
+  // reset a camera that comes back stays on the ten-minute cadence for the life
+  // of the process, which is worse than the fast loop it replaced.
+  it('returns to the fast retry after a run that lasted AND produced media', async () => {
+    const h = await onSlowCadence()
+
+    // The half that makes it a healthy run rather than merely a long one.
+    h.proc.stdout.emit('data', init('recovered'))
     await vi.advanceTimersByTimeAsync(HEALTHY_RUN_MS)
     const healthy = h.spawn.mock.calls.length
     h.proc.emit('close', 1)
     await vi.advanceTimersByTimeAsync(RESTART_DELAY_MS)
     await flush()
     expect(h.spawn.mock.calls.length).toBe(healthy + 1)
+    expect(h.delegate.encoding).toBe(true)
+  })
+
+  // The other direction, and the reason uptime alone was the wrong test: ffmpeg
+  // connects, stalls, and sits there emitting nothing. It is alive for a full
+  // healthy run every time, so an uptime-only reset cleared the tally on every
+  // attempt and a genuinely broken camera respawned every 10 s forever —
+  // exactly what the slow cadence exists to prevent.
+  it('stays on the slow cadence after a long run that produced no media', async () => {
+    const h = await onSlowCadence()
+
+    // Alive for a full healthy run, and silent throughout. No stdout at all.
+    await vi.advanceTimersByTimeAsync(HEALTHY_RUN_MS)
+    const silent = h.spawn.mock.calls.length
+    h.proc.emit('close', 1)
+    await vi.advanceTimersByTimeAsync(RESTART_DELAY_MS)
+    await flush()
+    // Nothing at the fast interval...
+    expect(h.spawn.mock.calls.length).toBe(silent)
+    // ...and the retry is still pending, not abandoned: it lands at the slow one.
+    await vi.advanceTimersByTimeAsync(SLOW_RESTART_DELAY_MS - RESTART_DELAY_MS)
+    await flush()
+    expect(h.spawn.mock.calls.length).toBe(silent + 1)
     expect(h.delegate.encoding).toBe(true)
   })
 

@@ -236,6 +236,95 @@ describe('splitOnLastToken', () => {
     // The default bound is the one FfmpegProcess actually runs with.
     expect(splitOnLastToken('x'.repeat(100_000)).pending).toBe('')
   })
+
+  // `-srtp_out_params SECRET` is TWO tokens, so holding back only the last one
+  // is not enough: a chunk ending at the space looks complete (a flag with
+  // nothing after it to redact) and the next chunk arrives as a bare key with no
+  // flag in front of it for redactStreamUrls to match on.
+  it('holds back a dangling srtp flag whose value has not arrived yet', () => {
+    expect(splitOnLastToken('opening -srtp_out_params ')).toEqual({
+      complete: 'opening ',
+      pending: '-srtp_out_params ',
+    })
+    expect(splitOnLastToken('opening -srtp_in_params SEC')).toEqual({
+      complete: 'opening ',
+      pending: '-srtp_in_params SEC',
+    })
+  })
+
+  it('releases an srtp flag once its value is terminated', () => {
+    expect(splitOnLastToken('-srtp_out_params KEY== -f rtp\n')).toEqual({
+      complete: '-srtp_out_params KEY== -f rtp\n',
+      pending: '',
+    })
+  })
+})
+
+// Codex reproduced the leak this describes against the checkout: the key
+// survived a chunk boundary between the flag and its value and reached
+// log.warn. Every plausible boundary is exercised, because the one that leaked
+// was the one nobody had thought of.
+describe('an srtp key split across chunk boundaries', () => {
+  const SENTINEL = 'PLANTED-SRTP-SENTINEL-DO-NOT-LOG=='
+  const lines = [
+    `Error: -srtp_out_params ${SENTINEL} -f rtp\n`,
+    `Error: -srtp_in_params ${SENTINEL} -i srtp://127.0.0.1:5000\n`,
+    `a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:${SENTINEL}\r\n`,
+    // No trailing whitespace at all: ffmpeg's last line often has none, so the
+    // key is never terminated by anything but the process ending.
+    `Error: -srtp_out_params ${SENTINEL}`,
+  ]
+
+  /** Runs one two-chunk split and returns what actually reached the log. */
+  function leakThrough(line: string, split: number): string {
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }
+    const { proc, spawn } = fakeSpawn()
+    const p = new FfmpegProcess({ path: '/usr/bin/ffmpeg', args: [], log, spawn })
+    p.start()
+    proc.stderr.emit('data', Buffer.from(line.slice(0, split)))
+    proc.stderr.emit('data', Buffer.from(line.slice(split)))
+    proc.emit('close', 1)
+    // Positive first: an empty log satisfies every negative assertion below.
+    expect(log.warn).toHaveBeenCalledTimes(1)
+    expect(inspect(log.warn.mock.calls, { depth: 10 })).not.toContain(SENTINEL.slice(0, 10))
+    return log.warn.mock.calls[0]![0] as string
+  }
+
+  for (const line of lines) {
+    // EVERY index, not a hand-picked few: the boundary that leaked in
+    // production — between the flag and its value — is precisely the one a
+    // hand-picked list had missed.
+    it(`survives every split of ${JSON.stringify(line.slice(0, 30))}…`, () => {
+      for (let split = 0; split <= line.length; split++) {
+        const message = leakThrough(line, split)
+        const where = `split at ${split}: ${JSON.stringify(message)}`
+        expect(message, where).toContain('ffmpeg exited with code 1')
+        // The VALUE, not merely the absence of the key: a redactor that dropped
+        // the whole line would leak nothing and diagnose nothing either.
+        expect(message, where).toContain('<srtp-key-redacted>')
+        expect(message, where).not.toContain(SENTINEL)
+        // Fragments count too — half a key is still key material.
+        expect(message, where).not.toContain(SENTINEL.slice(0, 10))
+      }
+    })
+  }
+
+  // Three chunks, so the flag, the key and the terminator each land alone: the
+  // middle chunk is a bare key with no context on either side.
+  it('never leaks a key that arrives entirely on its own', () => {
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }
+    const { proc, spawn } = fakeSpawn()
+    const p = new FfmpegProcess({ path: '/usr/bin/ffmpeg', args: [], log, spawn })
+    p.start()
+    proc.stderr.emit('data', Buffer.from('Error: -srtp_out_params '))
+    proc.stderr.emit('data', Buffer.from(SENTINEL))
+    proc.stderr.emit('data', Buffer.from(' -f rtp\n'))
+    proc.emit('close', 1)
+
+    const message = log.warn.mock.calls[0]?.[0] as string
+    expect(message).toContain('-srtp_out_params <srtp-key-redacted>')
+    expect(message).not.toContain(SENTINEL.slice(0, 10))
+  })
 })
 
 describe('ffmpegProcess', () => {

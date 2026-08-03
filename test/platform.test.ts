@@ -2043,6 +2043,44 @@ describe('uniFiProtectPlatform', () => {
     expect(recorder.encoding).toBe(false)
   })
 
+  // A kill that was not delivered is honoured everywhere else in this feature:
+  // stopEncoder deliberately KEEPS the process handle so a later stop can retry.
+  // disposeRecorder deleted the platform's entry BEFORE stopping, so after a
+  // failed kill nothing held the delegate any more, no later attempt could
+  // exist, and the ffmpeg outlived the accessory and the whole plugin.
+  it('keeps a recorder whose kill failed, so a later attempt can still stop it', async () => {
+    const { api, accessories } = await withCameras(cameras, { config: hksvOn(DOORBELL) })
+    const recorder = recorderOf(doorbellOf(accessories))!
+    const spawns = await startRecorder(recorder)
+    const child = spawns[0]!.child
+
+    // The signal is never delivered — kill() returns false and the child lives.
+    let kills = 0
+    child.kill = () => {
+      kills++
+      return false
+    }
+
+    api.emit('shutdown')
+    expect(kills).toBe(1)
+    // `encoding` must not lie about a process that is still running.
+    expect(recorder.encoding).toBe(true)
+
+    // The retry the old code made impossible: the delegate is still reachable,
+    // so the next disposal reaches the same child.
+    child.kill = () => {
+      kills++
+      child.killed = true
+      child.emit('close', 0)
+      return true
+    }
+    api.emit('shutdown')
+
+    expect(kills).toBe(2)
+    expect(child.killed).toBe(true)
+    expect(recorder.encoding).toBe(false)
+  })
+
   /** The console stops reporting the doorbell; everything else stays. */
   const withoutDoorbell = () => makeClient(cameras.filter(c => c.id !== DOORBELL))
 

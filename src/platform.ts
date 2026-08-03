@@ -929,13 +929,20 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
    *
    * Guarded, for the same reason the live-view stop beside it is: one throwing
    * must not abandon the rest of the shutdown or the unregistration.
+   *
+   * The entry is dropped LAST, and only once the encoder is really gone. A
+   * `kill()` that was not delivered is honoured everywhere else in this feature
+   * — `stopEncoder` keeps the process handle precisely so a later stop can retry
+   * — and deleting the map entry first defeated that: the delegate holding the
+   * only handle became unreachable, no later attempt could exist, and the ffmpeg
+   * outlived the accessory and the plugin. `encoding` is the runtime observable
+   * of exactly that state, so a delegate that still has a live process stays in
+   * the map for the next disposal (accessory removal, then shutdown) to retry.
    */
   private disposeRecorder(uuid: string): void {
     const recorder = this.recorders.get(uuid)
     if (!recorder)
       return
-    // Dropped first, so a throw below cannot leave an entry nothing will retry.
-    this.recorders.delete(uuid)
     try {
       recorder.updateRecordingActive(false)
     }
@@ -943,6 +950,11 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
       // errorMessage, and the STRING — see prepareStreaming.
       this.log.warn(`Could not stop the recording encoder of "${this.accessories.get(uuid)?.displayName ?? uuid}" cleanly: ${errorMessage(error)}`)
     }
+    if (recorder.encoding) {
+      this.log.warn(`The recording encoder of "${this.accessories.get(uuid)?.displayName ?? uuid}" could not be stopped and may still be running; it will be retried on shutdown.`)
+      return
+    }
+    this.recorders.delete(uuid)
   }
 
   private async reconcile(devices: DiscoveredDevice[]): Promise<void> {
