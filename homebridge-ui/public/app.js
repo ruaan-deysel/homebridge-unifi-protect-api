@@ -12,6 +12,22 @@ import { cameraToggles, clearDeviceSetting, debounce, defaultFor, ensureConfig, 
 import { renderBadge, renderDetail, renderDeviceList, renderTabs } from './ui-render.js'
 
 /**
+ * Adds `id` to a control's accessible DESCRIPTION, once. Everything the page
+ * appends beside a control rather than inside its `<label>` — the restart
+ * marker, the default/overridden badge — stays out of the accessible NAME by
+ * design, and would otherwise be announced to nobody: a screen-reader user
+ * heard "Two-way audio" and was never told a restart was required, while
+ * sighted users saw the badge. Idempotent, because the badge is rebuilt in
+ * place on every change and keeps the same id.
+ */
+function describe(control, id) {
+  const ids = (control.getAttribute('aria-describedby') ?? '').split(' ').filter(Boolean)
+  if (!ids.includes(id))
+    ids.push(id)
+  control.setAttribute('aria-describedby', ids.join(' '))
+}
+
+/**
  * Wires the whole settings page.
  *
  * @param doc The document holding index.html's markup.
@@ -46,8 +62,50 @@ export async function startUi(doc, homebridge, win = globalThis) {
   // `config` BEFORE calling `save()`, so a rejected write has to put this back
   // — otherwise the page goes on showing a value that never reached disk.
   let savedConfig = config
-  hostEl.value = config.host
-  keyEl.value = config.apiKey
+
+  /**
+   * Transient outcomes go to Homebridge's own toast, which is what a user
+   * watching the page notices. The `aria-live` status line stays and carries
+   * the SAME text: a toast disappears on a timer and is not something a screen
+   * reader user can go back to, so removing the region would be a regression.
+   * `error.message` is server-supplied text and lands as an argument, never
+   * as markup.
+   *
+   * Declared up here because both halves of saving — the immediate
+   * `updatePluginConfig` and the debounced config.json write — report their
+   * failures through it.
+   */
+  const report = (text, ok) => {
+    statusEl.textContent = text
+    // Called as METHODS, deliberately. Selecting one with a ternary and calling
+    // the result — `(ok ? toast.success : toast.error)(text)` — detaches it from
+    // `homebridge.toast`, and plugin-ui-utils' implementation does
+    // `this._postMessage(...)`, so every call threw
+    // "Cannot read properties of undefined (reading '_postMessage')". `report`
+    // is the shared status reporter and runs BEFORE discovery, so that one
+    // throw took out Test Connection and the whole device list with it.
+    if (ok)
+      homebridge.toast.success(text)
+    else
+      homebridge.toast.error(text)
+  }
+
+  /** What the trust panel says while the pinned certificate is the current one. */
+  const PINNED_NOTICE = 'This console\'s certificate is trusted and pinned. Press Test Connection to verify it still matches.'
+
+  // Puts the whole Connection tab back on what `config` holds. It sets the
+  // initial values AND is the `resync` the connection test hands `save()`, so
+  // there is one expression of "what should this tab show" — a rejected write
+  // rolls `config` back, and the typed host, the API key and a freshly pinned
+  // certificate have to roll back on screen with it.
+  const syncConnection = () => {
+    hostEl.value = config.host
+    keyEl.value = config.apiKey
+    // renderTrust is a hoisted function declaration; this runs before its
+    // source position deliberately, so the panel has one owner.
+    renderTrust(config.consoleCert ? [{ text: PINNED_NOTICE }] : [])
+  }
+  syncConnection()
 
   // savePluginConfig() writes config.json, and Homebridge's own chrome then
   // offers a restart for every write — so a burst of clicks (or dragging a
@@ -62,7 +120,13 @@ export async function startUi(doc, homebridge, win = globalThis) {
   // so the UI agreed with the user and config.json never changed.
   const debouncedSavePluginConfig = debounce(() => {
     homebridge.savePluginConfig().catch((error) => {
-      homebridge.toast.error(`Could not save config.json: ${error.message}`)
+      // `save()` returned `true` long before this ran — `updatePluginConfig`
+      // only updates the runtime's in-memory copy, and THIS is the call that
+      // writes config.json. There is nothing honest to roll back to (the
+      // runtime is holding the new value, so restoring the controls would only
+      // make screen and runtime disagree the other way), so the failure is
+      // stated plainly instead: what is on screen is not what a reload shows.
+      report(`Could not write config.json: ${error.message}. The settings on screen are not saved — reopen this page to see what is on disk.`, false)
     })
   }, SAVE_DEBOUNCE_MS)
 
@@ -102,21 +166,33 @@ export async function startUi(doc, homebridge, win = globalThis) {
    * @param resync Restores the changed control from `config`. Callers reuse
    * the same closure that set the control's initial value, so there is only
    * ever one expression of "what should this control show".
-   * @returns Whether the write went through — a caller that reports success
-   * has to ask.
+   * @returns Whether the runtime ACCEPTED the change — a caller that reports
+   * success has to ask. It is not a promise that config.json is on disk: that
+   * write is debounced (see `debouncedSavePluginConfig`) and reports its own
+   * failure, because it happens long after this has returned.
    */
   const save = async (resync) => {
+    // Snapshotted BEFORE the await, and written back afterwards instead of
+    // `config`: `config` is a shared binding another control can replace while
+    // this write is in flight. Recording `savedConfig = config` on the way out
+    // marked the NEWEST value as saved, so when that second, still-pending
+    // write was then refused, the rollback restored the very value the runtime
+    // had rejected — and the next unrelated save persisted it.
+    const attempted = config
     let ok = true
     try {
-      await homebridge.updatePluginConfig([config])
-      savedConfig = config
+      await homebridge.updatePluginConfig([attempted])
+      savedConfig = attempted
       debouncedSavePluginConfig()
     }
     catch (error) {
       ok = false
       config = savedConfig
       resync?.()
-      homebridge.toast.error(`Could not save config.json: ${error.message}`)
+      // Through `report`, not the toast alone: a toast is gone on a timer, and
+      // a failed save is exactly the thing a screen-reader user needs left in
+      // the aria-live region.
+      report(`Could not save config.json: ${error.message}`, false)
     }
     // Any device's recording setting can push the tier count over the edge,
     // not just the one being edited — recompute whenever config changes, the
@@ -229,7 +305,12 @@ export async function startUi(doc, homebridge, win = globalThis) {
     // `resync` is the caller's "put this control on the value `config` says",
     // the same closure that set its initial value: clearing the override makes
     // that the default, and a failed write makes it the override again.
-    const attachBadge = (wrap, key, resync, label) => {
+    // `control` is the input/select the badge describes. Unnesting the badge
+    // took it out of the accessible NAME, which is right — and left it
+    // announced to nobody, which is not. `aria-describedby` puts it back in the
+    // accessible DESCRIPTION: the id is derived from the control's, so the
+    // rebuild below reuses it and the list never points at a removed node.
+    const attachBadge = (control, wrap, key, resync, label) => {
       let current
       const refresh = () => {
         current?.badge.remove()
@@ -240,15 +321,17 @@ export async function startUi(doc, homebridge, win = globalThis) {
           await save(resync)
           refresh()
         }, label)
+        current.badge.id = `${control.id}-state`
         wrap.append(current.badge)
         if (current.reset)
           wrap.append(current.reset)
+        describe(control, current.badge.id)
       }
       refresh()
       return refresh
     }
 
-    const toggle = (body, key, label, comingLater) => {
+    const toggle = (body, key, label) => {
       // id embeds device.id (console-supplied) — renderToggle builds it with
       // DOM APIs only, and carries the injection test for this path.
       const { wrap, input } = renderToggle(doc, `${device.id}-${key}`, label, NEEDS_RESTART.has(key))
@@ -256,37 +339,16 @@ export async function startUi(doc, homebridge, win = globalThis) {
         input.checked = Boolean(settingOf(device.id, key, defaultFor(config, key)))
       }
       sync()
-      if (comingLater) {
-        // Shown, but inert and said so plainly. This release has no camera
-        // services yet, so honouring the flag is impossible — offering a
-        // live checkbox that quietly does nothing would be the dishonest
-        // option, and hiding it entirely hides the roadmap.
-        // Sub-project 2 must drop `comingLater` when the services land, or
-        // the settings stay permanently unreachable. A hand-edited
-        // `<key>: true` for a still-`comingLater` toggle renders
-        // checked-but-disabled and cannot be cleared here — harmless while
-        // nothing reads it, but it must not outlive this release. No badge
-        // either: there is nothing a reset button could meaningfully do to
-        // a disabled control.
-        input.disabled = true
-        // Appended, never replaced: `renderToggle`'s own `form-check
-        // form-switch` is what makes this a switch rather than a 13 px
-        // checkbox, and overwriting className would silently undo it.
-        wrap.className += ' text-body-secondary small'
-        wrap.append(' — arriving in a later release')
-      }
-      else {
-        // Defaults vs overrides were otherwise invisible — the flat UI only
-        // ever showed the resolved value. `refreshBadge` re-reads
-        // `isOverridden` after every change, so the badge and the checkbox
-        // never disagree.
-        const refreshBadge = attachBadge(wrap, key, sync, label)
-        input.addEventListener('change', async () => {
-          config = setDeviceSetting(config, device.id, key, input.checked)
-          await save(sync)
-          refreshBadge()
-        })
-      }
+      // Defaults vs overrides were otherwise invisible — the flat UI only
+      // ever showed the resolved value. `refreshBadge` re-reads
+      // `isOverridden` after every change, so the badge and the checkbox
+      // never disagree.
+      const refreshBadge = attachBadge(input, wrap, key, sync, label)
+      input.addEventListener('change', async () => {
+        config = setDeviceSetting(config, device.id, key, input.checked)
+        await save(sync)
+        refreshBadge()
+      })
       body.append(wrap)
     }
 
@@ -296,14 +358,11 @@ export async function startUi(doc, homebridge, win = globalThis) {
     // honour it, so the UI never lets someone flip a setting that will
     // silently do nothing.
     if (device.type === 'camera') {
-      // Live and enabled, like audio, talkback and hksv below: these
-      // genuinely work now, so a disabled control would be the dishonest
-      // one. No toggle currently carries `comingLater`.
       const { wrap, select } = renderQualitySelect(doc, device, settingOf(device.id, 'quality', defaultFor(config, 'quality')))
       const syncQuality = () => {
         select.value = settingOf(device.id, 'quality', defaultFor(config, 'quality'))
       }
-      const refreshQualityBadge = attachBadge(wrap, 'quality', syncQuality, 'Live view quality')
+      const refreshQualityBadge = attachBadge(select, wrap, 'quality', syncQuality, 'Live view quality')
       select.addEventListener('change', async () => {
         config = setDeviceSetting(config, device.id, 'quality', select.value)
         await save(syncQuality)
@@ -323,8 +382,8 @@ export async function startUi(doc, homebridge, win = globalThis) {
       // Which checkboxes a camera gets, and which section each files under
       // — including whether the package lens is offered — is decided in
       // config-ops.js, where a test can reach it.
-      for (const { key, label, comingLater, section } of cameraToggles(device))
-        toggle(bodies[section ?? 'Live view'], key, label, comingLater)
+      for (const { key, label, section } of cameraToggles(device))
+        toggle(bodies[section ?? 'Live view'], key, label)
     }
 
     mount(deviceDetailEl)
@@ -387,32 +446,6 @@ export async function startUi(doc, homebridge, win = globalThis) {
     trustEl.append(card)
   }
 
-  if (config.consoleCert)
-    renderTrust([{ text: 'This console\'s certificate is trusted and pinned. Press Test Connection to verify it still matches.' }])
-
-  /**
-   * Transient outcomes go to Homebridge's own toast, which is what a user
-   * watching the page notices. The `aria-live` status line stays and carries
-   * the SAME text: a toast disappears on a timer and is not something a screen
-   * reader user can go back to, so removing the region would be a regression.
-   * `error.message` is server-supplied text and lands as an argument, never
-   * as markup.
-   */
-  const report = (text, ok) => {
-    statusEl.textContent = text
-    // Called as METHODS, deliberately. Selecting one with a ternary and calling
-    // the result — `(ok ? toast.success : toast.error)(text)` — detaches it from
-    // `homebridge.toast`, and plugin-ui-utils' implementation does
-    // `this._postMessage(...)`, so every call threw
-    // "Cannot read properties of undefined (reading '_postMessage')". `report`
-    // is the shared status reporter and runs BEFORE discovery, so that one
-    // throw took out Test Connection and the whole device list with it.
-    if (ok)
-      homebridge.toast.success(text)
-    else
-      homebridge.toast.error(text)
-  }
-
   const testEl = doc.getElementById('test')
 
   /**
@@ -459,8 +492,15 @@ export async function startUi(doc, homebridge, win = globalThis) {
     const credentials = { host: config.host, apiKey: config.apiKey, consoleCert: config.consoleCert }
     try {
       const info = await homebridge.request('/test-connection', credentials)
+      // Store BEFORE claiming success. A refused write rolls `config` back —
+      // taking the typed host, the API key and any certificate just pinned
+      // above with it — so a "Connected" toast, a trust panel still saying
+      // "every later connection is pinned to it", and a discovery run against
+      // credentials the page no longer holds would all be lies. `save()`
+      // reports the failure itself.
+      if (!await save(syncConnection))
+        return
       report(`Connected — ${info.nvrName}, Protect ${info.version}`, true)
-      await save()
       const { devices } = await homebridge.request('/discover', credentials)
       render(devices)
     }

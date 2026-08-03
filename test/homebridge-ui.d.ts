@@ -32,6 +32,7 @@ interface UiElement {
   dataset: Record<string, string>
   tabIndex: number
   setAttribute: (name: string, value: string) => void
+  getAttribute: (name: string) => string | null
   addEventListener: (type: 'click' | 'keydown' | 'change', handler: (event: { key?: string }) => void) => void
   focus: () => void
   // `append` and `replaceChildren` are deliberately NOT declared, even though
@@ -185,7 +186,7 @@ declare module '*/homebridge-ui/public/config-ops.js' {
   export function clearDeviceSetting(config: ConfigShape, deviceId: string, key: string): ConfigShape
   export function cameraToggles(
     device: { type?: string, hasMic?: boolean, hasSpeaker?: boolean, hasPackageCamera?: boolean },
-  ): { key: string, label: string, comingLater?: boolean, section: 'Live view' | 'Recording' | 'Extra accessories' }[]
+  ): { key: string, label: string, section: 'Live view' | 'Recording' | 'Extra accessories' }[]
 }
 
 // index.html's behaviour, extracted so eslint and the tests can both reach it.
@@ -198,9 +199,28 @@ declare module '*/homebridge-ui/public/app.js' {
     addEventListener: (type: string, handler: () => void) => void
     visibilityState: string
   }
+  /**
+   * The slice of plugin-ui-utils' runtime the page uses. It was `unknown`,
+   * which type-checked every fake — including one missing `toast` entirely, or
+   * with `request` taking the wrong arguments — and the test beside it claimed
+   * "the fakes satisfy the shapes the .d.ts declares" on the strength of that.
+   * `toast` is declared as METHODS, matching the real object: both are
+   * implemented as `this._postMessage(...)`, and detaching one is the outage
+   * this whole harness exists to catch.
+   */
+  export interface HomebridgeRuntime {
+    toast: {
+      success: (text: string) => void
+      error: (text: string) => void
+    }
+    getPluginConfig: () => Promise<Record<string, unknown>[]>
+    updatePluginConfig: (config: [Record<string, unknown>]) => Promise<void>
+    savePluginConfig: () => Promise<void>
+    request: (path: string, payload: Record<string, unknown>) => Promise<unknown>
+  }
   export function startUi(
     doc: UiPageDocument,
-    homebridge: unknown,
+    homebridge: HomebridgeRuntime,
     win?: { addEventListener: (type: string, handler: () => void) => void },
   ): Promise<void>
 }

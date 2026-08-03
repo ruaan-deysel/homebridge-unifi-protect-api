@@ -244,10 +244,10 @@ export function shouldOfferPackageCamera(device) {
  * Which per-device checkboxes a camera gets, in render order — index.html
  * renders exactly this list and nothing else, so the package toggle's
  * appearance is decided in tested code rather than in an untestable inline
- * branch. `comingLater` renders the control inert: the setting exists in the
- * schema but nothing reads it yet — which no toggle currently sets. Audio,
- * talkback, the package lens and hksv are all live; do not add the flag back
- * to them.
+ * branch. Audio, talkback, the package lens and hksv are all live: every
+ * toggle here is a working control, and there is no "inert, arriving later"
+ * rendering path any more — bring one back with a test when something needs
+ * it, not before.
  *
  * `section` names the detail-pane section (see `renderDetail`'s `SECTIONS`
  * in ui-render.js) index.html files the toggle under. It lives here, next
@@ -307,8 +307,16 @@ export function renderToggle(doc, id, label, needsRestart = false) {
   if (needsRestart) {
     const marker = doc.createElement('span')
     marker.className = 'badge text-bg-warning ms-2'
+    marker.id = `${id}-restart`
     marker.textContent = 'restart required'
     wrap.append(marker)
+    // The marker sits outside the `<label>` so it stays out of the accessible
+    // NAME — correct, and on its own it left the requirement announced to
+    // nobody: sighted users saw the badge, a screen-reader user heard "Two-way
+    // audio" and nothing more. `aria-describedby` puts it in the accessible
+    // DESCRIPTION, which is where a restart requirement belongs. Never bake it
+    // into `label`; that is the duplication NEEDS_RESTART exists to avoid.
+    input.setAttribute('aria-describedby', marker.id)
   }
   return { wrap, input, caption }
 }
