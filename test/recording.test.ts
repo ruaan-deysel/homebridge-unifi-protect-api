@@ -190,12 +190,20 @@ describe('recordingArgs', () => {
     const args = recordingArgs(caps, { url: URL, audio: true, fragmentMs: 4000 })
     const output = args.indexOf('pipe:1')
     expect(output).toBe(args.length - 1)
-    for (const option of ['-c:v', '-c:a', '-f', '-movflags', '-frag_duration', '-b:v'])
+    for (const option of ['-c:v', '-c:a', '-f', '-movflags', '-frag_duration', '-b:v']) {
+      // PRESENCE first: indexOf returns -1 for an option that was deleted
+      // outright, and -1 is less than every index, so the ordering assertion
+      // alone passes for an option that is not there at all.
+      expect(args).toContain(option)
       expect(args.indexOf(option)).toBeLessThan(output)
+    }
   })
 
   it('puts the hwaccel options before the input, where ffmpeg still reads them', () => {
     const args = recordingArgs(caps, { url: URL, audio: true, fragmentMs: 4000 })
+    // Presence first, for the same reason as above.
+    expect(args).toContain('-hwaccel')
+    expect(args).toContain('-hwaccel_output_format')
     expect(args.indexOf('-hwaccel')).toBeLessThan(args.indexOf('-i'))
     expect(args.indexOf('-hwaccel_output_format')).toBeLessThan(args.indexOf('-i'))
     expect(args[args.indexOf('-i') + 1]).toBe(URL)
@@ -645,6 +653,32 @@ describe('recordingDelegate encoder', () => {
     await flush()
     expect(h.spawn).toHaveBeenCalledTimes(1)
     expect(h.delegate.encoding).toBe(true)
+  })
+
+  // HomeKit re-delivers `Active = true` on a CameraOperatingMode write, so a
+  // start can run while an earlier retry is still pending. When that start also
+  // fails, scheduleRestart used to assign straight over `restartTimer` — the
+  // FIRST timer was then unreachable, and disposal cleared only the second. It
+  // fired afterwards and fetched a stream URL for a camera that may already have
+  // been removed. `get` is the observable: with the fix it stops at two calls.
+  it('does not leave an orphaned restart timer behind when a retry lands on a pending one', async () => {
+    const h = harness({ url: async () => {
+      throw new Error(`console unreachable for ${URL}`)
+    } })
+    await h.start()
+    expect(h.get).toHaveBeenCalledTimes(1)
+
+    // The re-delivered write: startEncoder runs, fails, and schedules a SECOND
+    // retry while the first is still pending.
+    h.delegate.updateRecordingActive(true)
+    await flush()
+    expect(h.get).toHaveBeenCalledTimes(2)
+
+    // Disposal. It can only clear the timer the field points at.
+    h.delegate.updateRecordingActive(false)
+    await vi.advanceTimersByTimeAsync(SLOW_RESTART_DELAY_MS)
+    await flush()
+    expect(h.get).toHaveBeenCalledTimes(2)
   })
 
   it('honours the configured quality preference, which live view already does', async () => {

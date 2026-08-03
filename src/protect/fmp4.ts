@@ -30,7 +30,8 @@ export class Fmp4Splitter {
   private init: Buffer[] = []
   private fragment: Buffer[] = []
   /**
-   * Latched by the length guard below. A corrupt box length is not recoverable:
+   * Latched by the guards below — a corrupt box length, or a box where the
+   * muxer cannot have put one. A corrupt box length is not recoverable:
    * the cursor cannot advance past it, so without this every LATER chunk would
    * be concatenated onto `pending` and re-throw against the same bad prefix —
    * `pending` growing without limit and the caller warning once per chunk. The
@@ -39,11 +40,6 @@ export class Fmp4Splitter {
   private broken = false
 
   constructor(private readonly emit: (kind: Fmp4Piece, data: Buffer) => void) {}
-
-  /** True once a corrupt box length was seen. Every further chunk is dropped. */
-  get wedged(): boolean {
-    return this.broken
-  }
 
   push(chunk: Buffer): void {
     if (this.broken)
@@ -78,12 +74,17 @@ export class Fmp4Splitter {
   }
 
   private take(type: string, box: Buffer): void {
-    if (type === 'ftyp' || type === 'moov') {
-      this.init.push(box)
-      if (type === 'moov') {
-        this.emit('init', Buffer.concat(this.init))
-        this.init = []
-      }
+    // REPLACED on ftyp, not appended — bounded exactly the way `fragment` is
+    // bounded by `moof`. `init` is released only when a `moov` arrives, so
+    // appending would let a stream emitting repeated `ftyp` and no `moov`
+    // accumulate 64 MiB per box without limit.
+    if (type === 'ftyp') {
+      this.init = [box]
+      return
+    }
+    if (type === 'moov') {
+      this.emit('init', Buffer.concat([...this.init, box]))
+      this.init = []
       return
     }
     if (type === 'moof') {
@@ -94,6 +95,23 @@ export class Fmp4Splitter {
       this.fragment.push(box)
       this.emit('fragment', Buffer.concat(this.fragment))
       this.fragment = []
+      return
+    }
+    // Anything else BETWEEN a moof and its mdat used to fall off the end here
+    // and be dropped, and with `default_base_moof` the sample offsets then no
+    // longer line up: HomeKit gets a fragment that decodes as corruption rather
+    // than one that fails. Silent corruption is the worst outcome, so this is
+    // loud. Unreachable with the muxer flags this plugin sets — `-movflags
+    // frag_keyframe+empty_moov+default_base_moof` emits moof+mdat and nothing
+    // between them — so it is an assertion about that assumption, not a path.
+    // Latched and released like the length guard, so a kill that fails cannot
+    // warn once per chunk forever. Outside a fragment, an unknown top-level box
+    // is still ignored, which is what ISO-BMFF asks of a reader.
+    if (this.fragment.length > 0) {
+      this.broken = true
+      this.pending = Buffer.alloc(0)
+      this.fragment = []
+      throw new Error(`refusing a "${type}" box between moof and mdat`)
     }
   }
 }

@@ -14,8 +14,15 @@ import { selectQuality } from './quality.js'
  * grow this without limit. At the 4000 ms fragment length HomeKit negotiates,
  * 16 fragments is about 64 s — far more than the 4000 ms `prebufferLength`
  * requires, with room for fragments that run long because a keyframe arrived
- * late. Measured at roughly 250 KB per fragment on the high substream, so
- * about 4 MB per recording camera.
+ * late.
+ *
+ * MEASURED: roughly 250 KB per fragment on the high substream, so about 4 MB
+ * per recording camera. ENFORCED: nothing caps a fragment except `MAX_BOX`
+ * (64 MiB) in the splitter, so the guaranteed ceiling is
+ * PREBUFFER_FRAGMENTS x MAX_BOX = 1 GiB per camera — doubled again while a slow
+ * HDS consumer holds a queue of the same depth (see `onPiece`). The gap between
+ * the two is fine in practice only because ffmpeg cannot produce a 64 MiB
+ * fragment from this hardware; it is not something this constant enforces.
  */
 export const PREBUFFER_FRAGMENTS = 16
 
@@ -402,6 +409,15 @@ export class RecordingDelegate implements CameraRecordingDelegate {
   private scheduleRestart(lifetimeMs: number): void {
     if (!this.active)
       return
+    // A pending retry is REPLACED, never shadowed. HomeKit re-delivers the same
+    // `Active = true` on a `CameraOperatingMode` write, so a start can run — and
+    // fail — while an earlier retry is still pending; assigning over the field
+    // would leave that earlier timer with nothing holding it, and `stopEncoder`
+    // and disposal would then clear only the newer one. The orphan later fires
+    // for an accessory HomeKit may no longer know about and fetches a stream URL
+    // for it. `unref()` keeps it from holding the process open, so what is at
+    // stake is a stray fetch and a retained delegate, not a hang.
+    clearTimeout(this.restartTimer)
     this.failures = lifetimeMs >= HEALTHY_RUN_MS ? 0 : this.failures + 1
     const slow = this.failures > MAX_RESTARTS
     // Once, on the transition: this is the line that tells a user looking at the
