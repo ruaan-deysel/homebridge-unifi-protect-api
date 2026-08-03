@@ -202,6 +202,11 @@ export function renderDetail(doc, device) {
   const mount = (container) => {
     container.replaceChildren(pane)
     heading.focus()
+    // Selecting a device swaps the whole right-hand pane, which changes the
+    // document's height. The parent sizes the iframe from a mutation observer,
+    // but it is watching its own side — without this the modal keeps the old
+    // height and grows a scrollbar instead of the iframe growing.
+    globalThis.homebridge?.fixScrollHeight?.()
   }
   return { pane, heading, bodies, mount }
 }

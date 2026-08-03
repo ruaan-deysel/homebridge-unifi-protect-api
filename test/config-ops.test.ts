@@ -447,8 +447,12 @@ describe('renderQualitySelect', () => {
     const options = select.children as FakeElement[]
     expect(options.map(o => o.value)).toEqual(QUALITY_OPTIONS.map(([value]) => value))
     expect(options.filter(o => o.selected).map(o => o.value)).toEqual(['medium'])
-    // The label is wired to the control, or clicking it does nothing.
-    expect(wrap.attributes.for).toBe('cam1-quality')
+    // The label is wired to the control, or clicking it does nothing. It is a
+    // CHILD of the wrapper now, not the wrapper itself: the wrapper became a
+    // flex row so the caller's badge sits on the same line as the select
+    // instead of being pushed below it.
+    const caption = (wrap.children as FakeElement[]).find(c => c.tagName === 'LABEL')
+    expect(caption?.attributes.for).toBe('cam1-quality')
     expect(select.id).toBe('cam1-quality')
     // Real measured resolutions, so "low" is an informed choice.
     expect(wrap.textContent).toContain('640 × 360')
@@ -465,7 +469,8 @@ describe('renderQualitySelect', () => {
 
     const { wrap, select } = renderQualitySelect(fakeDocument, { id: payload }, 'auto') as unknown as { wrap: FakeElement, select: FakeElement }
 
-    expect(wrap.attributes.for).toBe(`${payload}-quality`)
+    const caption = (wrap.children as FakeElement[]).find(c => c.tagName === 'LABEL')
+    expect(caption?.attributes.for).toBe(`${payload}-quality`)
     // The id/for pair is a property assignment (`select.id =`, `setAttribute`),
     // never markup — this equality check IS the guard: it holds only if the
     // payload landed as a literal id string, and fails if it were ever

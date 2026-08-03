@@ -181,12 +181,26 @@ export const HKSV_LABEL = 'HomeKit Secure Video'
  */
 export function renderQualitySelect(doc, device, value) {
   const id = `${device.id}-quality`
-  const wrap = doc.createElement('label')
-  wrap.setAttribute('for', id)
-  wrap.append('Live view quality ')
+  // A flex row that WRAPS, not a bare label: the caller appends the
+  // default/overridden badge to `wrap`, and with a full-width block select in
+  // between, the badge was pushed onto its own line below the box. Label,
+  // select and badge now sit on one line and wrap together when the pane is
+  // narrow. All Bootstrap utilities — this plugin ships no CSS.
+  const wrap = doc.createElement('div')
+  wrap.className = 'd-flex flex-wrap align-items-center gap-2 mb-2'
+  const caption = doc.createElement('label')
+  caption.className = 'form-label mb-0'
+  caption.setAttribute('for', id)
+  caption.textContent = 'Live view quality'
+  wrap.append(caption)
 
   const select = doc.createElement('select')
-  select.className = 'form-control'
+  // `form-select`, not `form-control`: Bootstrap 5 styles selects with the
+  // former (it carries the dropdown chevron and the right padding). A select
+  // wearing `form-control` renders as a bare native control against the rest
+  // of the themed form. `w-auto` because `form-select` is width:100%, which
+  // inside the flex row would eat the whole line and push the badge off it.
+  select.className = 'form-select w-auto'
   select.id = id
   for (const [optionValue, label] of QUALITY_OPTIONS) {
     const option = doc.createElement('option')
