@@ -139,11 +139,12 @@ about half a core across five. (The 15% figure quoted during design was measured
 the 2688×1512 high substream; recording advertises and delivers 1280×720, so it costs
 less.)
 
-Two caveats on that. **Pinning a camera's quality to `high` overrides this** — an explicit
-preference wins, so that camera records 2688×1512 and costs roughly the 15% figure instead.
-And a **quality change does not reach a camera that is already recording**: the setting is
-read when the encoder starts, and nothing restarts a healthy one, so it applies from the
-next Homebridge restart.
+**The per-camera quality setting does not apply to recording.** It governs live view only.
+Recording advertises 1280×720 to HomeKit and applies no scale filter, so it always opens
+the medium substream — pinning a camera to `high` or `low` changes what you see when you
+open the camera, not what is recorded. Advertising the high substream per camera instead is
+not an option: 2688×1512 needs H.264 Level 5.1, and HomeKit's recording profile stops at
+Level 4.0, so it would be a promise the negotiation cannot carry.
 
 The continuous encode is a consequence of this plugin being API-key only. Plugins that
 prebuffer from UniFi's private livestream WebSocket avoid it, but that channel requires a

@@ -1,10 +1,10 @@
 import type { CameraRecordingConfiguration, RecordingPacket } from 'homebridge'
-import type { QualityPreference } from '../src/accessories/quality.js'
+import type { Quality } from '../src/accessories/quality.js'
 import type { FfmpegCapabilities, SpawnFn } from '../src/protect/ffmpeg.js'
 import { Buffer } from 'node:buffer'
 import { EventEmitter } from 'node:events'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ADVERTISED_RECORDING_SIZE, selectQuality } from '../src/accessories/quality.js'
+import { ADVERTISED_RECORDING_QUALITY, ADVERTISED_RECORDING_SIZE, SUBSTREAM_SIZE } from '../src/accessories/quality.js'
 import { HEALTHY_RUN_MS, MAX_RESTARTS, PREBUFFER_FRAGMENTS, PrebufferRing, recordingArgs, RecordingDelegate, RESTART_DELAY_MS, SLOW_RESTART_DELAY_MS } from '../src/accessories/recording.js'
 import { FfmpegProcess } from '../src/protect/ffmpeg.js'
 
@@ -111,10 +111,13 @@ function fakeSpawn() {
 
 const flush = () => new Promise(resolve => setImmediate(resolve))
 
-function harness(options: { audio?: boolean, url?: () => Promise<string>, quality?: () => QualityPreference } = {}) {
+function harness(options: { audio?: boolean, url?: (deviceId: string, quality: Quality) => Promise<string> } = {}) {
   const log = { info: vi.fn(), warn: vi.fn(), debug: vi.fn() }
   const { proc, spawn } = fakeSpawn()
-  const get = vi.fn(options.url ?? (async () => URL))
+  // Declared WITH its parameters: inferred from a zero-arg implementation,
+  // `get.mock.calls[0]` types as an empty tuple and reading [1] needs a cast
+  // that hides the very argument these tests exist to check.
+  const get = vi.fn<(deviceId: string, quality: Quality) => Promise<string>>(options.url ?? (async () => URL))
   const delegate = new RecordingDelegate({
     deviceId: 'cam-1',
     label: 'Front Door',
@@ -122,7 +125,6 @@ function harness(options: { audio?: boolean, url?: () => Promise<string>, qualit
     urls: { get },
     caps,
     audioActive: () => options.audio ?? true,
-    quality: options.quality,
     spawn,
   })
   return {
@@ -618,7 +620,7 @@ describe('recordingDelegate encoder', () => {
   it('falls back to the advertised size, not the high substream, before HomeKit configures it', async () => {
     const h = await harnessStarted()
 
-    expect(h.get).toHaveBeenCalledWith('cam-1', selectQuality(...ADVERTISED_RECORDING_SIZE))
+    expect(h.get).toHaveBeenCalledWith('cam-1', ADVERTISED_RECORDING_QUALITY)
     expect(h.log.info.mock.calls.flat().join(' ')).toContain('medium substream')
   })
 
@@ -876,18 +878,27 @@ describe('recordingDelegate encoder', () => {
     expect(h.get).toHaveBeenCalledTimes(2)
   })
 
-  it('honours the configured quality preference, which live view already does', async () => {
-    const h = harness({ quality: () => 'low' })
-    h.delegate.updateRecordingConfiguration(configuration(4000))
+  // THE invariant of this path: `recordingArgs` applies no scale filter, so the
+  // substream opened must be the one `recordingOptions` advertised, whatever
+  // configuration a controller sends. It used to be neither — a negotiated
+  // resolution went through `selectQuality`, and a per-camera preference
+  // short-circuited even that, so a pinned `high` recorded 2688x1512 against a
+  // 1280x720 contract. The preference is no longer an option on this delegate
+  // at all (the compiler enforces that half); this covers the configuration.
+  it.each([
+    ['the advertised size', 1280, 720],
+    ['the high substream', 2688, 1512],
+    ['a size no substream serves', 1920, 1080],
+    ['the low substream', 640, 360],
+  ])('opens the advertised substream when HomeKit negotiates %s', async (_name, width, height) => {
+    const h = harness()
+    h.delegate.updateRecordingConfiguration(configuration(4000, width, height))
     await h.start()
-    expect(h.get).toHaveBeenCalledWith('cam-1', 'low')
-  })
 
-  it('falls back to the requested resolution when the preference is auto', async () => {
-    const h = harness({ quality: () => 'auto' })
-    h.delegate.updateRecordingConfiguration(configuration(4000, 1280, 720))
-    await h.start()
-    expect(h.get).toHaveBeenCalledWith('cam-1', 'medium')
+    expect(h.get).toHaveBeenCalledWith('cam-1', ADVERTISED_RECORDING_QUALITY)
+    // The size, not just the name: what was advertised is what is delivered.
+    const opened = h.get.mock.calls[0]![1]
+    expect(SUBSTREAM_SIZE[opened]).toEqual(ADVERTISED_RECORDING_SIZE)
   })
 
   // An async generator's body does not run until the first next(), so

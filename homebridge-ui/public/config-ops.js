@@ -244,10 +244,10 @@ export function shouldOfferPackageCamera(device) {
  * Which per-device checkboxes a camera gets, in render order — index.html
  * renders exactly this list and nothing else, so the package toggle's
  * appearance is decided in tested code rather than in an untestable inline
- * branch. `comingLater` renders the control inert: the setting exists in the
- * schema but nothing reads it yet — which no toggle currently sets. Audio,
- * talkback, the package lens and hksv are all live; do not add the flag back
- * to them.
+ * branch. Audio, talkback, the package lens and hksv are all live: every
+ * toggle here is a working control, and there is no "inert, arriving later"
+ * rendering path any more — bring one back with a test when something needs
+ * it, not before.
  *
  * `section` names the detail-pane section (see `renderDetail`'s `SECTIONS`
  * in ui-render.js) index.html files the toggle under. It lives here, next
@@ -282,23 +282,43 @@ export function cameraToggles(device) {
  * Homebridge injects and themes — this plugin ships no CSS of its own, so
  * dropping these classes silently reverts the control to a tiny checkbox.
  * Callers that restyle the wrapper must APPEND to `className`, never replace it.
+ *
+ * The wrapper is a `div`, and the text sits in its own `form-check-label` —
+ * Bootstrap's documented switch markup. It used to be the `<label>` itself
+ * with the text appended straight into it, which meant everything the caller
+ * appended afterwards (the restart marker, the default/overridden badge, the
+ * reset BUTTON) landed inside the label: a button nested in a label is
+ * invalid HTML, and the checkbox's accessible name read "Live view audio
+ * restart required overridden reset". `caption` is returned so callers can
+ * assert on the accessible name; badges and buttons go on `wrap`, beside it.
  */
 export function renderToggle(doc, id, label, needsRestart = false) {
-  const wrap = doc.createElement('label')
+  const wrap = doc.createElement('div')
   wrap.className = 'form-check form-switch'
-  wrap.setAttribute('for', id)
   const input = doc.createElement('input')
   input.className = 'form-check-input'
   input.type = 'checkbox'
   input.id = id
-  wrap.append(input, ` ${label}`)
+  const caption = doc.createElement('label')
+  caption.className = 'form-check-label'
+  caption.setAttribute('for', id)
+  caption.textContent = label
+  wrap.append(input, caption)
   if (needsRestart) {
     const marker = doc.createElement('span')
     marker.className = 'badge text-bg-warning ms-2'
+    marker.id = `${id}-restart`
     marker.textContent = 'restart required'
     wrap.append(marker)
+    // The marker sits outside the `<label>` so it stays out of the accessible
+    // NAME — correct, and on its own it left the requirement announced to
+    // nobody: sighted users saw the badge, a screen-reader user heard "Two-way
+    // audio" and nothing more. `aria-describedby` puts it in the accessible
+    // DESCRIPTION, which is where a restart requirement belongs. Never bake it
+    // into `label`; that is the duplication NEEDS_RESTART exists to avoid.
+    input.setAttribute('aria-describedby', marker.id)
   }
-  return { wrap, input }
+  return { wrap, input, caption }
 }
 
 /**

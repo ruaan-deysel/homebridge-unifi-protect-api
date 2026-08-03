@@ -11,10 +11,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { NEEDS_RESTART } from '../homebridge-ui/public/config-ops.js'
 import { selectQuality, SUBSTREAM_SIZE } from '../src/accessories/quality.js'
 import { RecordingDelegate, RESTART_DELAY_MS, SLOW_RESTART_DELAY_MS } from '../src/accessories/recording.js'
-import { UniFiProtectPlatform } from '../src/platform.js'
+import { safeText, UniFiProtectPlatform } from '../src/platform.js'
 import { fingerprintOf } from '../src/protect/cert.js'
 import { ProtectAuthError, ProtectUnavailableError } from '../src/protect/errors.js'
 import { FfmpegProcess } from '../src/protect/ffmpeg.js'
+import { StreamUrls } from '../src/protect/stream.js'
 import { C, FakeAccessory, FakeDoorbellController, hap, S } from './fake-hap.js'
 import { makeSelfSigned } from './support/tls.js'
 
@@ -197,6 +198,88 @@ describe('uniFiProtectPlatform', () => {
     await platform.discover()
 
     expect(api.registerPlatformAccessories).not.toHaveBeenCalled()
+  })
+
+  // A device name is whatever the Protect console says it is, and anyone who
+  // can rename a camera picks it — as are its `modelKey` and `id`, which the
+  // label fallback and several log lines interpolate raw. Homebridge's logger
+  // writes to console.log with no escaping, so a newline forges log lines and
+  // an ESC drives the operator's terminal. Sanitised at the LOGGER, so a line
+  // built anywhere — here, camera.ts's own label, a cached displayName — is
+  // clean without that site having to know about it.
+  it('strips control characters out of every console-supplied field that reaches a log line', async () => {
+    const forged = {
+      id: 'cam1\u2028\u001B[2Jid',
+      name: 'Cam\nera\u001B]0;pwned\u0007',
+      modelKey: 'camera',
+    }
+    const { platform } = makePlatform(validConfig, [])
+    platform.client.getCameras = vi.fn(async () => [forged]) as never
+
+    await platform.discover()
+
+    // Readable, and inert: the ESC that introduced the OSC sequence is gone, so
+    // what is left is printable text no terminal will act on.
+    const label = 'Cam era ]0;pwned'
+    expect(platform.accessories.get(`uuid-${forged.id}`)!.displayName).toBe(label)
+    // The exact strings handed to the logger.
+    const added = log.info.mock.calls.flat().filter(line => typeof line === 'string' && line.startsWith('Added'))
+    expect(added).toEqual([`Added camera "${label}".`])
+    // camera.ts builds its own label straight from `device.name` and never
+    // touches safeText — this line proves the wrapper covers it regardless.
+    const services = log.debug.mock.calls.flat().filter(line => typeof line === 'string' && line.includes('service to'))
+    // Trailing space, not a typo: camera.ts keeps the BEL that terminated the
+    // OSC sequence, and the wrapper turns it into a space mid-message.
+    expect(services).toEqual([`Added motion service to "${label} ".`])
+    const everything = [...log.info.mock.calls, ...log.debug.mock.calls, ...log.warn.mock.calls].flat()
+    for (const line of everything.filter(v => typeof v === 'string'))
+      // eslint-disable-next-line no-control-regex -- control characters are the point.
+      expect(line).not.toMatch(/[\u0000-\u001F\u007F-\u009F\u2028\u2029\u202A-\u202E\u2066-\u2069]/)
+  })
+
+  // With no usable name the label falls back to `Protect <modelKey> <id>`, and
+  // both of those come off the wire too. This one becomes displayName, which
+  // HomeKit renders — the log wrapper cannot reach that copy.
+  it('keeps ordinary names untouched and sanitises the generated fallback', async () => {
+    expect(safeText('Front Door 2')).toBe('Front Door 2')
+    const forged = { id: 'cam1\u001B]0;x', name: '\u001B\u001B', modelKey: 'camera\nreboot' }
+    const { platform } = makePlatform(validConfig, [])
+    platform.client.getCameras = vi.fn(async () => [forged]) as never
+
+    await platform.discover()
+
+    expect(platform.accessories.get(`uuid-${forged.id}`)!.displayName).toBe('Protect camera reboot cam1 ]0;x')
+    // `Added ${device.modelKey}` interpolates the raw field; the wrapper is the
+    // only thing between it and console.log.
+    const added = log.info.mock.calls.flat().filter(line => typeof line === 'string' && line.startsWith('Added'))
+    expect(added).toEqual(['Added camera reboot "Protect camera reboot cam1 ]0;x".'])
+  })
+
+  // Bidi controls forge nothing, they REORDER the line, so an operator reads
+  // text nobody wrote; U+2028 splits a line in the Homebridge UI's browser log
+  // viewer even though a terminal ignores it.
+  it('strips bidi and line-separator characters, not only C0/C1 controls', async () => {
+    expect(safeText('Gate\u202Ereverse\u2066d\u2069\u2028name next')).toBe('Gate reverse d name next')
+  })
+
+  // Entries carry credential-bearing RTSPS URLs and the cache is process-wide,
+  // so add/remove churn accumulated one per camera per quality for the life of
+  // the process. Dropped beside the recording delegate, on the same removal.
+  it('forgets a removed camera cached stream urls', async () => {
+    const evict = vi.spyOn(StreamUrls.prototype, 'evict')
+    const survivor = { id: 'cam2', name: 'Garage', modelKey: 'camera' }
+    const { platform } = makePlatform(validConfig, [{ id: 'cam1', name: 'Doorbell', modelKey: 'camera' }, survivor])
+    platform.confirmRemovalAfterMs = 0
+    await platform.discover()
+    platform.client = makeClient([survivor]) as never
+    await platform.discover()
+    await platform.discover()
+
+    expect(platform.accessories.has('uuid-cam1')).toBe(false)
+    expect(evict).toHaveBeenCalledWith('cam1')
+    // And only the camera that went: the survivor's urls are live view's too.
+    expect(evict).not.toHaveBeenCalledWith('cam2')
+    evict.mockRestore()
   })
 
   it('unregisters a device that vanished, but only once the confirmation window has passed', async () => {
@@ -2031,20 +2114,33 @@ describe('uniFiProtectPlatform', () => {
     expect(recorderOf(doorbell)).toBe(recorder)
   })
 
-  // The substream and the audio decision are only visible in the argv. Both are
-  // read at every encoder start, never snapshotted at construction: a user who
-  // pins `low` to save bandwidth must not go on paying for the high substream
-  // every minute of every day because the delegate copied the setting once.
-  it('encodes on the substream and with the audio the resolved settings ask for, re-read on every start', async () => {
+  // The substream and the audio decision are only visible in the argv.
+  //
+  // The SUBSTREAM is the advertised one whatever the per-camera preference says,
+  // and that is the whole invariant of this path: `recordingArgs` applies no
+  // scale filter, so a pinned `high` used to record 2688x1512 against a
+  // HomeKit-negotiated 1280x720 — a contract real controllers can refuse. The
+  // preference still governs live view, where scaling and the full ladder exist.
+  //
+  // AUDIO is still re-read at every encoder start rather than snapshotted at
+  // construction, so a setting saved in the UI reaches the next start.
+  it('records the advertised substream whatever quality is pinned, and re-reads audio on every start', async () => {
     const config = { ...validConfig, devices: { [DOORBELL]: { hksv: true, audio: true, quality: 'low' } } }
     const { platform, accessories } = await withCameras(cameras, { config })
-    const recorder = recorderOf(doorbellOf(accessories))!
+    const doorbell = doorbellOf(accessories)
+    const recorder = recorderOf(doorbell)!
+    const advertised = recordingOf(doorbell)!.options.video.resolutions
+    // The quality is the last path segment of the stream URL the fake console
+    // hands out, so the argv says which substream was really opened.
+    const openedBy = (args: string[]) => /-(low|medium|high)\?/.exec(args[args.indexOf('-i') + 1]!)?.[1] as keyof typeof SUBSTREAM_SIZE
 
     const spawns = await startRecorder(recorder)
 
     expect(spawns).toHaveLength(1)
     const first = spawns[0]!.args
-    expect(first[first.indexOf('-i') + 1]).toContain(`${DOORBELL}-low`)
+    // Pinned `low`, and still the advertised size — compared as PIXELS against
+    // what HomeKit was actually offered, not against a copy of the constant.
+    expect(SUBSTREAM_SIZE[openedBy(first)]).toEqual([advertised[0]![0], advertised[0]![1]])
     expect(first).toContain('-c:a')
     expect(first).not.toContain('-an')
     // A recording START is logged, not only the failures.
@@ -2061,7 +2157,8 @@ describe('uniFiProtectPlatform', () => {
     await vi.waitFor(() => expect(spawns).toHaveLength(2))
 
     const second = spawns[1]!.args
-    expect(second[second.indexOf('-i') + 1]).toContain(`${DOORBELL}-high`)
+    // Pinned `high` now, and still the advertised size.
+    expect(SUBSTREAM_SIZE[openedBy(second)]).toEqual([advertised[0]![0], advertised[0]![1]])
     expect(second).toContain('-an')
     expect(second).not.toContain('-c:a')
 

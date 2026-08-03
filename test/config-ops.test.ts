@@ -51,10 +51,27 @@ export class FakeElement {
     this.listeners.set(type, forType)
   }
 
-  /** Fires a synthetic event at every listener registered for `type`. */
-  dispatch(type: string, event: Record<string, unknown> = {}) {
-    for (const handler of this.listeners.get(type) ?? [])
-      handler(event)
+  /**
+   * Fires a synthetic event at every listener registered for `type`, and
+   * RETURNS what each handler returned. The page's handlers are `async`, so
+   * without the returned promises a test could only await guesswork — and a
+   * handler that threw would surface as an unhandled rejection long after the
+   * assertion it should have failed.
+   */
+  dispatch(type: string, event: Record<string, unknown> = {}): unknown[] {
+    const results: unknown[] = (this.listeners.get(type) ?? []).map(handler => handler(event))
+    // A real event also runs the `on<type>` PROPERTY, not just the registered
+    // listeners. `oninput` is the one the page assigns (the device filter), and
+    // firing only the listeners meant filtering could not be driven through the
+    // page at all — deleting the assignment left every test green.
+    if (type === 'input' && this.oninput)
+      results.push(this.oninput())
+    return results
+  }
+
+  /** Awaits every handler, so a rejecting one fails the test that fired it. */
+  async fire(type: string, event: Record<string, unknown> = {}) {
+    await Promise.all(this.dispatch(type, event))
   }
 
   /**
@@ -145,12 +162,61 @@ export class FakeElement {
     this.attributes[name] = value
   }
 
+  /** `null` for an absent attribute, as the real DOM returns. */
+  getAttribute(name: string): string | null {
+    return this.attributes[name] ?? null
+  }
+
   append(...nodes: (FakeElement | string)[]) {
+    for (const node of nodes) {
+      // A real `append` MOVES an already-parented node, it does not clone it.
+      // The page relies on exactly that when it relocates each static pane
+      // into the tab shell, so a fake that left the node in both places would
+      // model a document the browser never produces.
+      if (node instanceof FakeElement)
+        node.remove()
+    }
     this.children.push(...nodes)
     for (const node of nodes) {
       if (node instanceof FakeElement)
         node.parent = this
     }
+  }
+
+  /** `<input disabled>`, as a property — the `comingLater` toggles set it. */
+  disabled = false
+  /**
+   * The one legacy `on*` handler the page assigns (the device filter). A
+   * property, like the real DOM's.
+   */
+  oninput: (() => void) | null = null
+
+  /** Inserts nodes ahead of this one, as `Element.before` does. */
+  before(...nodes: (FakeElement | string)[]) {
+    if (!this.parent)
+      return
+    // Detached first, exactly as `append` does: `before` MOVES an already
+    // parented node too, and a fake that left it in both places models a
+    // document no browser produces. The index is read afterwards, since
+    // removing an earlier sibling shifts it.
+    for (const node of nodes) {
+      if (node instanceof FakeElement)
+        node.remove()
+    }
+    const at = this.parent.children.indexOf(this)
+    this.parent.children.splice(at, 0, ...nodes)
+    for (const node of nodes) {
+      if (node instanceof FakeElement)
+        node.parent = this.parent
+    }
+  }
+
+  /** Detaches this node, as `Element.remove` does. */
+  remove() {
+    if (!this.parent)
+      return
+    this.parent.children.splice(this.parent.children.indexOf(this), 1)
+    this.parent = null
   }
 
   replaceChildren(...nodes: (FakeElement | string)[]) {
@@ -208,6 +274,39 @@ export function makeDoc() {
 }
 
 const fakeDocument = { createElement: (tag: string) => new FakeElement(tag) }
+
+// The harness itself, where the page depends on the real DOM's behaviour. The
+// tab shell is built with `tabRoot.before(tablist, ...panes)` and then moves
+// the static panes into it with `append` — a fake that copied instead of moved
+// would model a document with two of every control, and every id lookup below
+// would be testing the wrong node.
+describe('the fake DOM moves nodes, as the real one does', () => {
+  it('detaches an already-parented node on before(), not just on append()', () => {
+    const oldParent = new FakeElement('div')
+    const moved = new FakeElement('span')
+    oldParent.append(moved)
+
+    const newParent = new FakeElement('div')
+    const anchor = new FakeElement('p')
+    newParent.append(anchor)
+    anchor.before(moved)
+
+    expect(oldParent.children).toEqual([])
+    expect(newParent.children).toEqual([moved, anchor])
+    expect(moved.parent).toBe(newParent)
+  })
+
+  it('keeps the insertion point right when the moved node is an earlier sibling', () => {
+    const parent = new FakeElement('div')
+    const first = new FakeElement('span')
+    const anchor = new FakeElement('p')
+    parent.append(first, anchor)
+
+    anchor.before(first)
+
+    expect(parent.children).toEqual([first, anchor])
+  })
+})
 
 describe('ensureConfig', () => {
   it('fills in the shape the UI expects', () => {
@@ -491,12 +590,10 @@ describe('package camera toggle', () => {
    */
   function renderControls(device: { id: string, type?: string, hasMic?: boolean, hasSpeaker?: boolean, hasPackageCamera?: boolean }) {
     const doc = makeDoc()
-    return cameraToggles(device).map(({ key, label, comingLater }) => {
-      const { wrap, input } = renderToggle(doc, `${device.id}-${key}`, label) as unknown as { wrap: FakeElement, input: FakeElement }
+    return cameraToggles(device).map(({ key, label }) => {
+      const { wrap, input, caption } = renderToggle(doc, `${device.id}-${key}`, label, NEEDS_RESTART.has(key as 'audio')) as unknown as { wrap: FakeElement, input: FakeElement, caption: FakeElement }
       input.checked = Boolean(defaultFor(ensureConfig(null), key))
-      if (comingLater)
-        wrap.className = 'up-muted'
-      return { key, wrap, input }
+      return { key, wrap, input, caption }
     })
   }
 
@@ -510,24 +607,24 @@ describe('package camera toggle', () => {
     // The id/for pair is what makes clicking the label do anything, and it
     // carries the device the setting is written against.
     expect(pkg.input.id).toBe('cam1-packageCamera')
-    expect(pkg.wrap.attributes.for).toBe('cam1-packageCamera')
+    // The id/for pair now lives on the caption label — the wrapper is a div,
+    // so the badge and reset button the detail pane appends to it are not
+    // swallowed into the checkbox's accessible name.
+    expect(pkg.caption.attributes.for).toBe('cam1-packageCamera')
+    expect(pkg.wrap.tagName).toBe('DIV')
     expect(pkg.wrap.textContent).toContain(PACKAGE_LABEL)
     // Off by default — a second accessory per doorbell is opt-in. The default
     // is `false` and not merely absent: `undefined` would make setDeviceSetting
     // store an explicit `false` override instead of clearing the key.
     expect(defaultFor(ensureConfig(null), 'packageCamera')).toBe(false)
     expect(pkg.input.checked).toBe(false)
-    // All toggles are now live — neither the package lens nor recording are
-    // "arriving later" anymore. Asserted on the classes `renderToggle` actually
-    // puts on the wrapper: `renderControls` REPLACES className with 'up-muted'
-    // for a comingLater toggle, so these survive only while the flag is unset.
-    // (The previous `.not.toBe('up-muted')` here passed against `wrap.className`
-    // that the renderer never wrote at all — it was testing the fake's default.)
+    // Bootstrap renders a switch only while these two survive on the wrapper —
+    // without them the control silently reverts to a 13 px checkbox, and this
+    // plugin ships no CSS of its own to put it back.
     for (const key of ['packageCamera', 'hksv']) {
       const wrap = rendered.find(control => control.key === key)?.wrap
       expect(wrap?.className.split(' '), key).toEqual(expect.arrayContaining(['form-check', 'form-switch']))
     }
-    expect(cameraToggles(doorbell).every(t => t.comingLater === undefined)).toBe(true)
   })
 
   it('renders no package checkbox for a camera without the lens', () => {
@@ -554,10 +651,10 @@ describe('renderToggle (XSS regression)', () => {
   const payload = '<img src=x onerror=alert(1)>'
 
   it('renders a console-supplied device name and id as inert text, never as markup', () => {
-    const { wrap, input } = renderToggle(makeDoc(), `${payload}-packageCamera`, `${payload} ${PACKAGE_LABEL}`) as unknown as { wrap: FakeElement, input: FakeElement }
+    const { wrap, input, caption } = renderToggle(makeDoc(), `${payload}-packageCamera`, `${payload} ${PACKAGE_LABEL}`) as unknown as { wrap: FakeElement, input: FakeElement, caption: FakeElement }
 
     expect(input.id).toBe(`${payload}-packageCamera`)
-    expect(wrap.attributes.for).toBe(`${payload}-packageCamera`)
+    expect(caption.attributes.for).toBe(`${payload}-packageCamera`)
     // Load-bearing: textContent only returns the payload if it was assigned
     // via `.append(text)`/`textContent`, and outerHTML only stays free of a
     // raw `<img` if nothing here ever assigned `innerHTML`. Both fail under
@@ -607,7 +704,7 @@ describe('cameraToggles sections', () => {
 describe('recording toggle', () => {
   it('offers recording as a live control', () => {
     const entry = cameraToggles({ hasSpeaker: false, hasMic: true, hasPackageCamera: false }).find(t => t.key === 'hksv')
-    expect(entry!.comingLater).toBeUndefined()
+    expect(entry).toBeDefined()
     // The restart warning is carried by renderToggle's marker (driven off
     // NEEDS_RESTART), not by the label text — see 'restart labels do not
     // duplicate the marker' for the other half of that split.
@@ -620,7 +717,7 @@ describe('talkback toggle', () => {
   it('offers talkback on a speaker camera, enabled and marked as needing a restart', () => {
     const toggles = cameraToggles({ hasSpeaker: true, hasMic: true, hasPackageCamera: false })
     const talkback = toggles.find(t => t.key === 'talkback')
-    expect(talkback?.comingLater).toBeUndefined()
+    expect(talkback).toBeDefined()
     // The restart warning is now carried by renderToggle's marker (driven off
     // NEEDS_RESTART), not by the label text — see 'restart labels do not
     // duplicate the marker' below for the other half of that split.
@@ -924,6 +1021,84 @@ describe('renderToggle is a real switch', () => {
     const { wrap, input } = renderToggle(makeDoc(), 'cam1-hksv', 'Some setting') as unknown as { wrap: FakeElement, input: FakeElement }
     expect(wrap.className.split(' ')).toEqual(expect.arrayContaining(['form-check', 'form-switch']))
     expect(input.className.split(' ')).toContain('form-check-input')
+  })
+})
+
+// The checkbox's accessible name is the text of the `<label for>` bound to it.
+// While the wrapper WAS that label, everything appended afterwards — the
+// restart marker, and the badge and reset button the detail pane adds — sat
+// inside it, so a screen reader announced "Live view audio restart required
+// overridden reset" as the switch's name, and the reset button was a button
+// nested in a label (invalid, and label activation is suppressed for it).
+describe('renderToggle accessible name', () => {
+  /** Stands in for `renderBadge`'s output without importing ui-render here. */
+  function renderBadgeLike(doc: ReturnType<typeof makeDoc>) {
+    const badge = doc.createElement('span')
+    badge.textContent = 'overridden'
+    const reset = doc.createElement('button')
+    reset.textContent = 'reset'
+    return { badge, reset }
+  }
+
+  it('names the control with its label alone, marker and badges outside it', () => {
+    const doc = makeDoc()
+    const { wrap, caption, input } = renderToggle(doc, 'cam1-audio', AUDIO_LABEL, true) as unknown as {
+      wrap: FakeElement
+      caption: FakeElement
+      input: FakeElement
+    }
+    // What a caller appends afterwards, exactly as the detail pane does.
+    const { badge, reset } = renderBadgeLike(doc)
+    wrap.append(badge, reset)
+
+    expect(caption.tagName).toBe('LABEL')
+    expect(caption.attributes.for).toBe(input.id)
+    // The whole accessible name, and nothing else in it.
+    expect(caption.textContent).toBe(AUDIO_LABEL)
+    // The wrapper still shows the marker and the badge — they moved out of the
+    // name, not off the page.
+    expect(wrap.textContent).toContain('restart required')
+    expect(wrap.textContent).toContain('overridden')
+    // A button inside a label is the invalid part; it must be a sibling.
+    expect(caption.children).toHaveLength(0)
+    expect(wrap.children).toContain(reset)
+    // Bootstrap only renders a switch while these survive the restructure.
+    expect(wrap.className.split(' ')).toEqual(expect.arrayContaining(['form-check', 'form-switch']))
+    expect(input.className.split(' ')).toContain('form-check-input')
+    expect(caption.className.split(' ')).toContain('form-check-label')
+  })
+
+  // The other half of that fix, and the half it originally shipped without:
+  // moving the marker out of the name left it announced to NOBODY. The name is
+  // the label alone AND the restart requirement reaches the control — one
+  // without the other is the regression.
+  it('reaches the control with the restart requirement through its description', () => {
+    const doc = makeDoc()
+    const { wrap, caption, input } = renderToggle(doc, 'cam1-talkback', TALKBACK_LABEL, true) as unknown as {
+      wrap: FakeElement
+      caption: FakeElement
+      input: FakeElement
+    }
+
+    // Still just the label — the description must not leak back into the name.
+    expect(caption.textContent).toBe(TALKBACK_LABEL)
+
+    const describedBy = (input.getAttribute('aria-describedby') ?? '').split(' ').filter(Boolean)
+    expect(describedBy).not.toHaveLength(0)
+    // Resolved against the DOM, not compared to a string: an id pointing at no
+    // element describes nothing, which is what a screen reader would find.
+    const described = describedBy.map((id) => {
+      const target = (wrap.children.filter(child => child instanceof FakeElement) as FakeElement[]).find(child => child.id === id)
+      if (!target)
+        throw new Error(`aria-describedby points at #${id}, which is not on the control`)
+      return target.textContent
+    })
+    expect(described).toContain('restart required')
+  })
+
+  it('describes nothing when the setting takes effect immediately', () => {
+    const { input } = renderToggle(makeDoc(), 'cam1-expose', 'Some setting', false) as unknown as { input: FakeElement }
+    expect(input.getAttribute('aria-describedby')).toBeNull()
   })
 })
 
