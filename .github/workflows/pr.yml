@@ -1,23 +1,18 @@
-name: build
+name: Test
 
 on:
-  push:
-    branches: [main]
   pull_request:
+    branches: [main]
 
 permissions:
   contents: read
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  build:
+  test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node: [22, 24]
+        node: [22.x, 24.x]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -26,8 +21,6 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run lint
-      # The generated schemas are committed; a hand-edit or a stale run must
-      # not survive review.
       - run: npm run gen:zod && git diff --exit-code src/protect/schemas.ts
       - run: npm test
       - run: npm run build

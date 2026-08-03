@@ -1,0 +1,168 @@
+name: Test, Release & Publish
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [22.x, 24.x]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run gen:zod && git diff --exit-code src/protect/schemas.ts
+      - run: npm test
+      - run: npm run build
+
+  # package.json is the version authority. npm trusted publishing is bound to
+  # this exact workflow filename (.github/workflows/publish.yml) and the
+  # release environment.
+  release:
+    needs: test
+    if: github.repository == 'ruaan-deysel/homebridge-unifi-protect-api'
+    runs-on: ubuntu-latest
+    environment: release
+    concurrency:
+      group: release-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      id-token: write
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22.x
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Inspect release state
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          VERSION="$(node -p "require('./package.json').version")"
+          NAME="$(node -p "require('./package.json').name")"
+          NOTES="$RUNNER_TEMP/release-notes-$VERSION.md"
+
+          node scripts/release-notes.mjs "$VERSION" "$NOTES"
+
+          printf 'version=%s\n' "$VERSION" >> "$GITHUB_OUTPUT"
+          printf 'notes=%s\n' "$NOTES" >> "$GITHUB_OUTPUT"
+
+          NPM_METADATA="$RUNNER_TEMP/npm-metadata-$VERSION.json"
+          if ! NPM_STATUS="$(curl --silent --show-error --output "$NPM_METADATA" \
+            --write-out '%{http_code}' "https://registry.npmjs.org/$NAME/$VERSION")"; then
+            echo "::error title=npm registry check failed::Could not query the npm registry."
+            exit 1
+          fi
+          case "$NPM_STATUS" in
+            200) PUBLISHED=true ;;
+            404) PUBLISHED=false ;;
+            *)
+              echo "::error title=npm registry check failed::Unexpected HTTP status $NPM_STATUS."
+              exit 1
+              ;;
+          esac
+
+          set +e
+          git ls-remote --exit-code --refs origin "refs/tags/v$VERSION" > /dev/null 2>&1
+          TAG_STATUS=$?
+          set -e
+          case "$TAG_STATUS" in
+            0) TAGGED=true ;;
+            2) TAGGED=false ;;
+            *)
+              echo "::error title=Git tag check failed::git ls-remote exited with status $TAG_STATUS."
+              exit "$TAG_STATUS"
+              ;;
+          esac
+
+          RELEASE_RESPONSE="$RUNNER_TEMP/github-release-$VERSION.json"
+          if ! RELEASE_STATUS="$(curl --silent --show-error --output "$RELEASE_RESPONSE" \
+            --write-out '%{http_code}' \
+            --header 'Accept: application/vnd.github+json' \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/v$VERSION")"; then
+            echo "::error title=GitHub release check failed::Could not query the GitHub releases API."
+            exit 1
+          fi
+          case "$RELEASE_STATUS" in
+            200) RELEASED=true ;;
+            404) RELEASED=false ;;
+            *)
+              echo "::error title=GitHub release check failed::Unexpected HTTP status $RELEASE_STATUS."
+              exit 1
+              ;;
+          esac
+
+          printf 'published=%s\n' "$PUBLISHED" >> "$GITHUB_OUTPUT"
+          printf 'tagged=%s\n' "$TAGGED" >> "$GITHUB_OUTPUT"
+          printf 'released=%s\n' "$RELEASED" >> "$GITHUB_OUTPUT"
+          echo "::notice title=Release state::version=$VERSION published=$PUBLISHED tagged=$TAGGED released=$RELEASED"
+
+          if [[ "$TAGGED" == true && "$PUBLISHED" == false ]]; then
+            echo "::error title=Invalid release state::Tag v$VERSION exists, but $NAME@$VERSION is not published to npm."
+            exit 1
+          fi
+
+          if [[ "$PUBLISHED" == true && "$TAGGED" == false ]]; then
+            echo "::notice title=Verifying published source::Rebuilding $NAME@$VERSION before creating its tag."
+            npm install -g npm@latest
+            npm ci
+            npm run build
+
+            PACK_RESULT="$RUNNER_TEMP/npm-pack-$VERSION.json"
+            npm pack --ignore-scripts --json --pack-destination "$RUNNER_TEMP" > "$PACK_RESULT"
+            if ! LOCAL_INTEGRITY="$(node -p \
+              "JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'))[0].integrity" \
+              "$PACK_RESULT")"; then
+              echo "::error title=Source identity check failed::Could not read the rebuilt package integrity."
+              exit 1
+            fi
+            if ! PUBLISHED_INTEGRITY="$(node -p \
+              "JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8')).dist?.integrity ?? ''" \
+              "$NPM_METADATA")"; then
+              echo "::error title=Source identity check failed::Could not read the published package integrity."
+              exit 1
+            fi
+            if [[ -z "$PUBLISHED_INTEGRITY" || "$LOCAL_INTEGRITY" != "$PUBLISHED_INTEGRITY" ]]; then
+              echo "::error title=Source identity mismatch::Published package bytes do not match commit $GITHUB_SHA."
+              exit 1
+            fi
+          fi
+
+      - name: Upgrade npm
+        if: steps.check.outputs.published == 'false'
+        run: npm install -g npm@latest
+      - name: Install dependencies
+        if: steps.check.outputs.published == 'false'
+        run: npm ci
+      - name: Publish to npm
+        if: steps.check.outputs.published == 'false'
+        run: npm publish --access public
+      - name: Create GitHub release
+        if: steps.check.outputs.released == 'false'
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          tag_name: v${{ steps.check.outputs.version }}
+          name: v${{ steps.check.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          body_path: ${{ steps.check.outputs.notes }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
