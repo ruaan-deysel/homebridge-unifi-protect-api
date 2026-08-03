@@ -2,12 +2,11 @@ import type { CameraRecordingConfiguration, CameraRecordingDelegate, RecordingPa
 import type { FfmpegCapabilities, SpawnFn } from '../protect/ffmpeg.js'
 import type { Fmp4Piece } from '../protect/fmp4.js'
 import type { StreamUrls } from '../protect/stream.js'
-import type { QualityPreference } from './quality.js'
 import { Buffer } from 'node:buffer'
 import { errorMessage } from '../protect/errors.js'
 import { FfmpegProcess, redactStreamUrls } from '../protect/ffmpeg.js'
 import { Fmp4Splitter } from '../protect/fmp4.js'
-import { ADVERTISED_RECORDING_SIZE, selectQuality } from './quality.js'
+import { ADVERTISED_RECORDING_QUALITY } from './quality.js'
 
 /**
  * Bounded by COUNT, not by time: a stalled or slow stream must not be able to
@@ -187,20 +186,6 @@ export interface RecordingDelegateOptions {
    * contain audio.
    */
   audioActive: () => boolean
-  /**
-   * The per-camera `quality` setting, same shape and for the same reason as
-   * `audioActive`. Live view honours it; recording ignoring it would mean a user
-   * who pinned `low` to save bandwidth still paid for the high substream every
-   * minute of every day.
-   *
-   * READ ONCE PER ENCODER START, and in practice that means once. Nothing
-   * restarts a HEALTHY encoder — `updateRecordingActive` is called only by HAP
-   * and by `disposeRecorder` — and a healthy recording encoder is designed to
-   * run for weeks. So changing this in the settings UI does not reach a camera
-   * that is already recording until Homebridge itself restarts. Calling these
-   * "live" reads, as an earlier version of this comment did, was wrong.
-   */
-  quality?: () => QualityPreference
   spawn?: SpawnFn
 }
 
@@ -318,18 +303,16 @@ export class RecordingDelegate implements CameraRecordingDelegate {
       return
     this.starting = true
     try {
-      // `Resolution` is a [width, height, fps] tuple.
-      const resolution = this.config?.videoCodec.resolution
-      const preference = this.options.quality?.()
-      // No negotiated configuration yet: fall back to the ONE resolution
-      // `recordingOptions` advertises, 1280x720, which `selectQuality` maps to
-      // the medium substream at exactly that size. This used to fall back to
-      // 'high' — 2688x1512 — so a camera whose encoder started before HomeKit
-      // sent a configuration recorded at more than four times the advertised
-      // pixel count, and paid the GPU for it. Observed live on "Garage".
-      const quality = resolution
-        ? selectQuality(resolution[0], resolution[1], preference)
-        : (preference === undefined || preference === 'auto' ? selectQuality(...ADVERTISED_RECORDING_SIZE) : preference)
+      // ALWAYS the advertised substream — not the negotiated
+      // `videoCodec.resolution`, and not the per-camera `quality` preference.
+      // `recordingArgs` applies no scale filter, so the only honest thing to
+      // send is the one size `recordingOptions` advertises. Both of the inputs
+      // this used to take could disagree with it: a pinned `high` recorded
+      // 2688x1512 against a negotiated 720p contract, and a controller that
+      // asked for a resolution outside the advertised ladder was served
+      // whatever substream `selectQuality` mapped it to. Live view still
+      // honours the preference, where scaling and the full ladder exist.
+      const quality = ADVERTISED_RECORDING_QUALITY
       const url = await this.options.urls.get(this.options.deviceId, quality)
       // Re-checked after the await: updateRecordingActive(false) may have landed
       // while the stream URL was being fetched, and a process spawned after it

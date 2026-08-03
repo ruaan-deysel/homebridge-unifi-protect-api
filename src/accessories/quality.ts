@@ -22,24 +22,29 @@ export const SUBSTREAM_SIZE: Record<Quality, [number, number]> = {
 }
 
 /**
- * The ONLY size the HKSV recording path advertises, and therefore the only one
- * it may deliver — `recordingArgs` applies no scale filter. Both the
- * advertisement in `recordingOptions` and the recording encoder's
- * no-configuration-yet fallback read this, so those two cannot drift apart.
- * They did once: the ladder was trimmed to 1280x720 while the fallback still
- * said 'high', and a camera whose encoder started before HomeKit sent a
+ * The ONE substream the HKSV recording path opens, for every camera and every
+ * negotiated configuration. `recordingArgs` applies no scale filter, so what
+ * this substream measures is exactly what HomeKit receives.
+ */
+export const ADVERTISED_RECORDING_QUALITY: Quality = 'medium'
+
+/**
+ * The ONLY size the HKSV recording path advertises, and — because it is derived
+ * from the substream the encoder actually opens rather than chosen beside it —
+ * the only one it can deliver. The advertisement in `recordingOptions` and the
+ * encoder in `startEncoder` both read the constants above, so they cannot drift
+ * apart. They did once: the ladder was trimmed to 1280x720 while the fallback
+ * still said 'high', and a camera whose encoder started before HomeKit sent a
  * configuration recorded 2688x1512.
  *
- * This does NOT make the advertisement true in every case, and claiming so
- * would be worse than the original drift. A per-camera `quality` preference
- * short-circuits `selectQuality` on both branches, so a user who pins `high`
- * still records 2688x1512 against an advertised 1280x720. That is a deliberate
- * trade — a pinned preference is an explicit instruction, and ignoring it would
- * mean someone who pinned `low` to save bandwidth paid for the high substream
- * every minute of every day — but it is a gap in the invariant, not an
- * exception to it.
+ * A per-camera `quality` preference no longer reaches this path at all. It used
+ * to short-circuit `selectQuality`, so a user who pinned `high` recorded
+ * 2688x1512 against an advertised 1280x720 — and there is no honest way to
+ * advertise that instead: 2688x1512 is 15960 macroblocks, and HomeKit's HKSV
+ * level set stops at Level 4.0 (8192). The preference still governs live view,
+ * where scaling and the full ladder are available.
  */
-export const ADVERTISED_RECORDING_SIZE: [number, number] = SUBSTREAM_SIZE.medium
+export const ADVERTISED_RECORDING_SIZE: [number, number] = SUBSTREAM_SIZE[ADVERTISED_RECORDING_QUALITY]
 
 /**
  * HomeKit's most common request is 1280x720, which maps to medium and therefore

@@ -54,6 +54,36 @@ describe('streamUrls', () => {
     expect(client.getRtspsStream).toHaveBeenCalledTimes(2)
   })
 
+  // Entries carry credential-bearing RTSPS URLs and the cache lives as long as
+  // the process, so a removed camera has to be dropped by id — a TTL miss only
+  // refetches the entry, it never removes it.
+  it('evict() drops every quality of one camera and leaves the others alone', async () => {
+    const client = makeClient({ high: URL_HIGH, low: URL_HIGH })
+    const urls = new StreamUrls(client as never)
+    await Promise.all([urls.get('cam1', 'high'), urls.get('cam1', 'low'), urls.get('cam2', 'high')])
+    expect(client.getRtspsStream).toHaveBeenCalledTimes(3)
+
+    urls.evict('cam1')
+
+    // cam2 is still cached: eviction is per camera, and live view shares this.
+    await urls.get('cam2', 'high')
+    expect(client.getRtspsStream).toHaveBeenCalledTimes(3)
+    // Both of cam1's are gone, not just the one that happened to be first.
+    await Promise.all([urls.get('cam1', 'high'), urls.get('cam1', 'low')])
+    expect(client.getRtspsStream).toHaveBeenCalledTimes(5)
+  })
+
+  // The key is `${deviceId}:${quality}`, so a prefix match must not reach a
+  // camera whose id merely starts with the evicted one.
+  it('evict() does not touch a camera whose id shares a prefix', async () => {
+    const client = makeClient({ high: URL_HIGH })
+    const urls = new StreamUrls(client as never)
+    await Promise.all([urls.get('cam1', 'high'), urls.get('cam10', 'high')])
+    urls.evict('cam1')
+    await urls.get('cam10', 'high')
+    expect(client.getRtspsStream).toHaveBeenCalledTimes(2)
+  })
+
   it('coalesces concurrent misses into one request per camera and quality', async () => {
     const client = makeClient({})
     const urls = new StreamUrls(client as never)

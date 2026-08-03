@@ -75,6 +75,30 @@ export class StreamUrls {
     return url
   }
 
+  /**
+   * Forgets one camera's URLs, for when the accessory is removed. The cache
+   * lives as long as the process and its entries carry credentials, so without
+   * this a console churning cameras leaves a credential-bearing URL per camera
+   * per quality behind forever — a TTL miss does not drop the entry, it only
+   * refetches it.
+   *
+   * ponytail: no generation bump, so a fetch already in flight for this camera
+   * can still land one entry back. Deliberate — the generation is process-wide,
+   * and bumping it would make every OTHER camera's in-flight fetch skip the
+   * cache too, which is live view's path. Upgrade to per-key generations only
+   * if that one-entry race ever matters.
+   */
+  evict(deviceId: string): void {
+    for (const key of [...this.cache.keys()]) {
+      if (key.startsWith(`${deviceId}:`))
+        this.cache.delete(key)
+    }
+    for (const key of [...this.inFlight.keys()]) {
+      if (key.startsWith(`${deviceId}:`))
+        this.inFlight.delete(key)
+    }
+  }
+
   clear(): void {
     this.cache.clear()
     this.inFlight.clear()

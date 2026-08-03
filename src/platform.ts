@@ -88,8 +88,31 @@ const CONFIRM_MIN_MS = 60_000
  */
 const LED_WRITE_GRACE_MS = 10_000
 
+/**
+ * Strips every C0/C1 control character from console-supplied text.
+ *
+ * A device name is whatever the Protect console says it is, and anyone who can
+ * rename a camera chooses it. Homebridge's logger writes to `console.log` with
+ * no escaping, so a name containing a newline forges log lines and one
+ * containing ESC drives the operator's terminal (colour, title, cursor moves).
+ * Removing the controls is enough to neutralise BOTH: every ANSI/OSC sequence
+ * needs an ESC or a C1 introducer, and BEL — the OSC terminator — is a control
+ * too, so what is left is inert printable text. Ordinary names are untouched.
+ *
+ * Applied HERE rather than at each log call because this is the one door those
+ * names come through: `accessory.displayName`, the delegates' `label`, and
+ * every line either of them appears in all derive from this return value.
+ */
+export function safeText(value: string): string {
+  // eslint-disable-next-line no-control-regex -- control characters are the point.
+  return value.replace(/[\u0000-\u001F\u007F-\u009F]+/g, ' ').trim()
+}
+
 function labelFor(device: DiscoveredDevice): string {
-  return device.name?.trim() || `Protect ${device.modelKey} ${device.id}`
+  // `typeof`, not `?.`: `validate` degrades to the raw payload, so `name` is
+  // only probably a string, and a method call on a number would throw inside a
+  // fire-and-forget discovery.
+  return (typeof device.name === 'string' ? safeText(device.name) : '') || `Protect ${device.modelKey} ${device.id}`
 }
 
 /**
@@ -201,9 +224,12 @@ const HKSV_FRAGMENT_MS = 4000
  * A scale filter would let the full ladder be advertised, but `scale_vaapi`
  * fails on this host with `Cannot allocate memory`, so that is not a free fix.
  *
- * KNOWN GAP, for the hardware gate: a per-camera `quality` preference
- * short-circuits `selectQuality`, so a user who forces `high` still gets
- * 2688x1512 fragments against a negotiated 1280x720.
+ * The encoder therefore opens `ADVERTISED_RECORDING_QUALITY` unconditionally —
+ * no per-camera preference, no negotiated resolution — which is what makes this
+ * advertisement true rather than merely usually true. Advertising the high
+ * substream per camera instead is not an option: 2688x1512 is 15960 macroblocks
+ * and the levels below stop at 4.0 (8192), which is the whole set HomeKit
+ * defines for HKSV.
  */
 function recordingOptions(hap: HAP, doorbell: boolean): CameraRecordingOptions {
   return {
@@ -516,7 +542,8 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
     let devices: DiscoveredDevice[]
     try {
       const info = await this.client.getMetaInfo()
-      this.log.info(`Connected to UniFi Protect ${info.applicationVersion} at ${this.config.host}.`)
+      // Console-supplied, so through `safeText` like a device name is.
+      this.log.info(`Connected to UniFi Protect ${safeText(String(info.applicationVersion))} at ${this.config.host}.`)
       devices = await this.fetchInventory()
     }
     catch (error) {
@@ -759,11 +786,13 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
             log: this.log,
             urls: this.urls!,
             caps: this.caps,
-            // Both read on every encoder start, never snapshotted, so a setting
+            // Read on every encoder start, never snapshotted, so a setting
             // changed in the UI takes effect on the next restart rather than
-            // needing a whole Homebridge restart.
+            // needing a whole Homebridge restart. The per-camera `quality`
+            // preference is deliberately NOT passed: recording advertises one
+            // resolution and applies no scale filter, so it opens one substream
+            // regardless. Live view is where the preference applies.
             audioActive: () => settingsFor(this.config!, device.id).audio,
-            quality: () => settingsFor(this.config!, device.id).quality,
           })
         : undefined
 
@@ -1087,6 +1116,15 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
       // removed camera would never stop at all, because a long run zeroes the
       // failure tally.
       this.disposeRecorder(uuid)
+      // And the cached RTSPS URLs: process-wide, one entry per camera per
+      // quality, each carrying an auth token. Nothing else ever drops them, so
+      // add/remove churn accumulates credentials for cameras that are gone.
+      // A package accessory shares its parent's device id, so removing one also
+      // drops the parent's entries — that costs a refetch on the next stream,
+      // nothing more.
+      const removedId = (accessory.context.device as DiscoveredDevice | undefined)?.id
+      if (typeof removedId === 'string')
+        this.urls?.evict(removedId)
       this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory])
       this.accessories.delete(uuid)
       this.pendingRemoval.delete(uuid)
