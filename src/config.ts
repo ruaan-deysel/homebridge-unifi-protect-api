@@ -34,7 +34,14 @@ const defaultsSchema = z.object({
   // Footage does not count against the iCloud quota. Defaulting this
   // to true makes HomeKit silently refuse to record every camera after the first.
   hksv: z.boolean().default(false),
-}).default({ exposeNewDevices: true, quality: 'auto', hksv: false })
+  /**
+   * Apple caps HKSV by camera COUNT, not storage: 50GB=1, 200GB=5, 2TB+=unlimited,
+   * and footage never counts against the quota. The plugin cannot see the
+   * subscription, so this is the user telling us — used only to warn before they
+   * enable recording on more cameras than the tier allows.
+   */
+  icloudTier: z.enum(['50gb', '200gb', '2tb']).default('200gb'),
+}).default({ exposeNewDevices: true, quality: 'auto', hksv: false, icloudTier: '200gb' })
 
 export const configSchema = z.object({
   platform: z.string(),

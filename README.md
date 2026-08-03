@@ -24,7 +24,7 @@ camera's own microphone to HomeKit, and it has no effect on the audio setting ei
 Like the audio setting, **enabling talkback takes effect after a restart** — the same one
 Homebridge already prompts for when settings are saved.
 
-Still to come: HomeKit Secure Video and light accessories. See `CHANGELOG.md`.
+Still to come: light accessories. See `CHANGELOG.md`.
 
 ## Requirements
 
@@ -116,14 +116,56 @@ API currently has these gaps:
 
 ## HomeKit Secure Video
 
-HomeKit Secure Video (HKSV) support is planned for a later sub-project and is **not
-implemented in this release**. When it ships, it will be off by default and enabled per
-camera, because of an iCloud plan constraint that has nothing to do with this plugin.
-Apple's camera limits are: the 50 GB plan supports **one** camera, the 200 GB plan supports
-up to **five**, and the 2 TB plan and above support an **unlimited** number. HKSV footage
-does *not* count against your iCloud storage quota — the limit is on camera count, not
-gigabytes. Enabling HKSV for more cameras than your plan supports will cause Apple to
-silently stop recording some of them, so per-camera opt-in is deliberate.
+HomeKit Secure Video (HKSV) is **off by default and enabled per camera**, because of an
+iCloud plan constraint that has nothing to do with this plugin. Apple's camera limits are:
+the 50 GB plan supports **one** camera, the 200 GB plan supports up to **five**, and the
+2 TB plan and above support an **unlimited** number. HKSV footage does *not* count against
+your iCloud storage quota — the limit is on camera count, not gigabytes. Enabling HKSV for
+more cameras than your plan supports will cause Apple to silently stop recording some of
+them, so per-camera opt-in is deliberate. Set your plan on the **Defaults** tab and the
+settings UI warns before you exceed it.
+
+The package lens is a separate HomeKit accessory but **does not record** — it is offered for
+live view and snapshots only — so enabling it does not use one of your plan's cameras. A
+doorbell with a package lens still counts as one.
+
+### What it costs
+
+Each camera with recording enabled runs one continuous ffmpeg, whether or not anything ever
+moves — that is what fills the prebuffer so a clip starts *before* the motion rather than
+after it. Measured on this hardware with VAAPI H.264 and ffmpeg's native AAC encoder, that
+is **7–9% of one core per camera** on the medium substream, which is what recording uses —
+about half a core across five. (The 15% figure quoted during design was measured against
+the 2688×1512 high substream; recording advertises and delivers 1280×720, so it costs
+less.)
+
+Two caveats on that. **Pinning a camera's quality to `high` overrides this** — an explicit
+preference wins, so that camera records 2688×1512 and costs roughly the 15% figure instead.
+And a **quality change does not reach a camera that is already recording**: the setting is
+read when the encoder starts, and nothing restarts a healthy one, so it applies from the
+next Homebridge restart.
+
+The continuous encode is a consequence of this plugin being API-key only. Plugins that
+prebuffer from UniFi's private livestream WebSocket avoid it, but that channel requires a
+username/password UniFi OS login, which this plugin deliberately does not implement.
+
+Recording does **not** consume a live-view stream slot — the `maxStreams` cap protects
+interactive viewing, and a recording process is not an interactive viewer — but the two do
+share the GPU.
+
+### Two limitations worth knowing before you test
+
+**A doorbell press will not start a recording; motion will.** The press is correctly
+advertised as a trigger, but hap-nodejs documents that HomeKit HomeHubs never enable
+Doorbell triggers as of iOS 15-16, and considers it unsupported on Apple's side. The
+advertisement costs nothing and will work if Apple enables it. Until then, if you press the
+button and no clip appears, that is expected rather than a fault.
+
+**Recording audio follows the plugin setting, not the Home app toggle.** The
+`RecordingAudioActive` characteristic is never read — hap-nodejs does not push it to a
+recording delegate. hap-nodejs defaults it to off, so a camera with audio enabled records
+clips *with* sound while the Home app reports recording audio as off, and changing it there
+does nothing. Change it in the plugin settings.
 
 ## Bridging
 

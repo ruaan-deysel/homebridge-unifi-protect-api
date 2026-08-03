@@ -1,50 +1,182 @@
-<style>
-  .up-row { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; margin-bottom: .5rem; }
-  .up-card { border: 1px solid rgba(128,128,128,.3); border-radius: 6px; padding: .75rem; margin-bottom: .5rem; }
-  .up-muted { opacity: .7; font-size: .85rem; }
-  .up-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: .25rem .75rem; }
-  .up-warn { border-color: #b23; }
-  .up-fp { font-family: monospace; font-size: .8rem; word-break: break-all; }
-</style>
+<div id="connection-pane">
+  <!--
+    One field per row, label above input. Side by side, the two labels and two
+    inputs plus the button did not fit the settings modal: "API Key" wrapped to
+    two lines and every control was squeezed. `form-label`/`form-text` are
+    Bootstrap's own vertical form idiom, which Homebridge already themes.
+  -->
+  <div class="mb-3">
+    <label class="form-label" for="host">Console</label>
+    <input class="form-control" id="host" placeholder="192.168.1.1" style="max-width: 26rem">
+    <div class="form-text">The IP address or hostname of your UniFi console.</div>
+  </div>
 
-<div class="up-row">
-  <label for="host">Console</label>
-  <input class="form-control" id="host" placeholder="192.168.1.1" style="max-width: 14rem">
-  <label for="apiKey">API Key</label>
-  <input class="form-control" id="apiKey" type="password" style="max-width: 20rem">
-  <button class="btn btn-primary" id="test" type="button">Test Connection</button>
+  <div class="mb-3">
+    <label class="form-label" for="apiKey">API key</label>
+    <!--
+      autocomplete off: a password-typed field invites the browser to offer
+      saved logins, and this is a console API key, not an account password.
+    -->
+    <input class="form-control" id="apiKey" type="password" autocomplete="off" style="max-width: 26rem">
+    <div class="form-text">Create one in UniFi Site Manager → Integrations. It needs Protect access.</div>
+  </div>
+
+  <div class="mb-3">
+    <button class="btn btn-primary" id="test" type="button">Test Connection</button>
+  </div>
+
+  <div class="mb-2 text-body-secondary small" id="status" aria-live="polite"></div>
+  <div id="trust" aria-live="polite"></div>
 </div>
 
-<div class="up-row up-muted" id="status" aria-live="polite"></div>
-<div id="trust" aria-live="polite"></div>
-
-<!--
-  Host-wide settings, as opposed to the per-camera ones on each device card
-  below. Static markup only: every value here is typed by the user or read back
-  from their own config, never supplied by the console.
--->
-<div class="up-card">
-  <div><strong>Live view</strong> <span class="up-muted">applies to the whole host</span></div>
-  <div class="up-row">
-    <label for="maxStreams">Maximum concurrent live views</label>
-    <input class="form-control" id="maxStreams" type="number" min="1" max="16" step="1" placeholder="auto" style="max-width: 6rem">
-    <span class="up-muted">Blank picks from the encoder found: 6 with hardware, 2 with software.</span>
+<div id="defaults-pane">
+  <!--
+    Host-wide settings, as opposed to the per-camera ones on each device card
+    below. Static markup only: every value here is typed by the user or read back
+    from their own config, never supplied by the console.
+  -->
+  <div class="card card-body mb-2">
+    <div class="mb-3"><strong>Live view</strong> <span class="text-body-secondary small">applies to the whole host</span></div>
+    <div class="mb-3">
+      <label class="form-label" for="maxStreams">Maximum concurrent live views</label>
+      <input class="form-control" id="maxStreams" type="number" min="1" max="16" step="1" placeholder="auto" style="max-width: 8rem">
+      <div class="form-text">Blank picks from the encoder found: 6 with hardware, 2 with software.</div>
+    </div>
+    <div>
+      <label class="form-label" for="ffmpegPath">ffmpeg path</label>
+      <input class="form-control" id="ffmpegPath" placeholder="auto-detect" style="max-width: 26rem">
+      <div class="form-text">Blank searches /usr/bin, /usr/local/bin, then PATH.</div>
+    </div>
   </div>
-  <div class="up-row">
-    <label for="ffmpegPath">ffmpeg path</label>
-    <input class="form-control" id="ffmpegPath" placeholder="auto-detect" style="max-width: 20rem">
-    <span class="up-muted">Blank searches /usr/bin, /usr/local/bin, then PATH.</span>
+
+  <div class="card card-body mb-2">
+    <div class="mb-3"><strong>Recording</strong> <span class="text-body-secondary small">applies to the whole host</span></div>
+    <div>
+      <label class="form-label" for="icloudTier">iCloud+ plan</label>
+      <!--
+        Apple caps HomeKit Secure Video by camera COUNT, not storage, so each
+        option names the count — that is the number the warning is about.
+        Every `value` must be a key of RECORDING_LIMITS in config-ops.js;
+        anything else falls back to the default via `parseIcloudTier`.
+      -->
+      <select class="form-select" id="icloudTier" style="max-width: 26rem">
+        <option value="50gb">50 GB — 1 camera</option>
+        <option value="200gb">200 GB — up to 5 cameras</option>
+        <option value="2tb">2 TB or more — unlimited cameras</option>
+      </select>
+      <div class="form-text">Only drives the advisory warning; the plugin cannot see your subscription.</div>
+    </div>
+  </div>
+
+  <div class="card card-body mb-2">
+    <div><strong>Per-camera defaults</strong> <span class="text-body-secondary small">what every device inherits until it is overridden on the Devices tab</span></div>
+    <div id="defaults-controls"></div>
   </div>
 </div>
 
-<div id="devices"></div>
+<div id="devices-pane">
+  <!--
+    The `.row` MUST sit inside a container. Bootstrap gives every row negative
+    horizontal margins (`calc(-.5 * var(--bs-gutter-x))`) that a container's
+    padding is meant to absorb; without one the row is wider than the body and
+    the settings modal grows a horizontal scrollbar. `container-fluid` supplies
+    exactly that padding — do NOT add `px-0` to it, which removes the padding
+    and reinstates the overflow (measured: exactly 8px, half of `g-3`'s gutter).
+  -->
+  <div class="container-fluid">
+    <div class="row g-3">
+      <div class="col-12 col-md-4">
+        <input class="form-control mb-2" id="device-filter" type="search" placeholder="Filter devices…" aria-label="Filter devices">
+        <div id="device-list"></div>
+      </div>
+      <!--
+        `min-width: 0` is what lets a flex child shrink below its content's
+        intrinsic width. Without it a long setting label refuses to wrap and
+        pushes the column wider than the modal — the other half of the
+        horizontal scrollbar.
+      -->
+      <div class="col-12 col-md-8" style="min-width: 0">
+        <div id="device-detail" class="text-body-secondary">Select a device from the list.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="help-pane">
+  <p>UniFi Protect (API) talks to your console over its official Integration API using an API key — no username or password is stored.</p>
+
+  <h6>Connection</h6>
+  <dl>
+    <dt>Console</dt>
+    <dd>The IP address or hostname of your UniFi console. <strong>Restart required.</strong></dd>
+    <dt>API Key</dt>
+    <dd>Created in UniFi Site Manager under Integrations. It is sent only after the console's certificate matches the one this install trusts, and never appears in the log. <strong>Restart required.</strong></dd>
+    <dt>Test Connection</dt>
+    <dd>Checks the certificate, then the key, then lists your devices. The first successful test pins the certificate; if it ever changes, the connection is refused before the key is sent and you are asked to confirm the new one.</dd>
+  </dl>
+
+  <h6>Defaults</h6>
+  <dl>
+    <dt>Maximum concurrent live views</dt>
+    <dd>A cap for the whole host, not per camera. Blank picks from the encoder found — 6 with hardware, 2 with software. A request past the cap is refused with a logged reason instead of overloading the machine. <strong>Restart required.</strong></dd>
+    <dt>ffmpeg path</dt>
+    <dd>Blank searches /usr/bin, /usr/local/bin, then PATH. <strong>Restart required.</strong></dd>
+    <dt>iCloud+ plan</dt>
+    <dd>Drives the recording warning only. Apple caps HomeKit Secure Video by camera <em>count</em>: 1 on 50 GB, 5 on 200 GB, unlimited on 2 TB and above. Footage does not count against your iCloud storage quota.</dd>
+    <dt>Per-camera defaults</dt>
+    <dd>What every device inherits. Changing one moves every camera that has not overridden it on the Devices tab; a camera showing <em>overridden</em> keeps its own value until you press reset.</dd>
+  </dl>
+
+  <h6>Devices</h6>
+  <dl>
+    <dt>Expose in HomeKit</dt>
+    <dd>Whether this device is bridged at all. Takes effect on the next discovery.</dd>
+    <dt>Live view quality</dt>
+    <dd><em>Auto</em> follows the resolution HomeKit asks for: 640×360 and below uses the low substream, 1280×720 medium, larger high. Pinning a substream overrides that.</dd>
+    <dt>Live view audio</dt>
+    <dd>HomeKit is told which audio codecs a camera offers once, when the accessory is set up. Turning audio <em>on</em> therefore only reaches HomeKit after a restart; turning it off applies to the next live view. <strong>Restart required.</strong></dd>
+    <dt>Two-way audio</dt>
+    <dd>Talk back through a camera with a speaker. Fixed at accessory setup for the same reason as audio. <strong>Restart required.</strong></dd>
+    <dt>HomeKit Secure Video</dt>
+    <dd>Off by default and enabled per camera. A recording camera runs one continuous ffmpeg whether or not anything moves — that is what lets a clip start <em>before</em> the motion — costing roughly 15% of one core each on hardware encoding. <strong>Restart required.</strong></dd>
+    <dt>Package camera</dt>
+    <dd>Offered only for cameras whose payload reports the downward lens. It appears as a second accessory at 2 fps, does not record, and therefore does not use one of your iCloud plan's camera slots. Takes effect on the next discovery.</dd>
+  </dl>
+
+  <h6>Hardware transcoding</h6>
+  <p>Every Protect camera streams HEVC and HomeKit accepts only H.264, so every live view is a transcode. At startup the plugin probes ffmpeg, prefers Intel Quick Sync then VAAPI, and trial-encodes each one rather than trusting <code>-encoders</code> to list it; software is the last resort. The encoder it settled on is logged at startup.</p>
+  <p>The difference is not marginal: measured on an i7-8700K with UHD 630, 20 seconds of 2688×1512 costs 1.79 s of CPU via VAAPI and 49.1 s via libx264 — about 27×. That is why the live-view cap defaults to 6 on hardware and 2 on software.</p>
+  <p>Seeing <code>h264_vaapi</code> rather than <code>h264_qsv</code> on an Intel host is normal, not a fault. A warning naming <code>libx264</code> means hardware acceleration is not reaching the process — most often the render device is not passed into the Docker container (<code>--device=/dev/dri</code>), or the Homebridge user is not in the <code>render</code> group. Run Homebridge with DEBUG logging to see which candidates were rejected and why.</p>
+
+  <h6>Recording and live views share the GPU</h6>
+  <p>A recording camera does <strong>not</strong> consume one of the concurrent live-view slots — that cap exists to protect interactive viewing, and a recording process is not an interactive viewer. The two do however share the same encoder. Several cameras recording continuously reduce the headroom available to live views, so on a host near its limit, lower the live-view cap rather than assuming the two budgets are independent.</p>
+</div>
+
+<div id="tab-root"></div>
 
 <script type="module">
-  import { cameraToggles, defaultFor, ensureConfig, parseMaxStreams, renderDeviceHeader, renderQualitySelect, renderToggle, setDeviceSetting, setGlobalSetting } from './config-ops.js'
+  import { cameraToggles, clearDeviceSetting, debounce, defaultFor, ensureConfig, HKSV_LABEL, isOverridden, NEEDS_RESTART, parseIcloudTier, parseMaxStreams, renderQualitySelect, renderToggle, SAVE_DEBOUNCE_MS, setDeviceSetting, setGlobalSetting, tierWarning } from './config-ops.js'
+  import { renderBadge, renderDetail, renderDeviceList, renderTabs } from './ui-render.js'
+
+  // Build the tab shell, then move each pane's static markup into the empty
+  // pane element renderTabs created for it — the DOM nodes themselves are
+  // relocated (appendChild moves, it does not clone), so every id below
+  // still resolves exactly once.
+  const { tablist, panes } = renderTabs(document, ['Connection', 'Defaults', 'Devices', 'Help'])
+  const [connectionPane, defaultsPane, devicesPane, helpPane] = panes
+  const tabRoot = document.getElementById('tab-root')
+  tabRoot.before(tablist, ...panes)
+  tabRoot.remove()
+  connectionPane.append(document.getElementById('connection-pane'))
+  defaultsPane.append(document.getElementById('defaults-pane'))
+  devicesPane.append(document.getElementById('devices-pane'))
+  helpPane.append(document.getElementById('help-pane'))
 
   const statusEl = document.getElementById('status')
   const trustEl = document.getElementById('trust')
-  const devicesEl = document.getElementById('devices')
+  const deviceListEl = document.getElementById('device-list')
+  const deviceFilterEl = document.getElementById('device-filter')
+  const deviceDetailEl = document.getElementById('device-detail')
   const hostEl = document.getElementById('host')
   const keyEl = document.getElementById('apiKey')
 
@@ -52,9 +184,62 @@
   hostEl.value = config.host
   keyEl.value = config.apiKey
 
+  // savePluginConfig() writes config.json, and Homebridge's own chrome then
+  // offers a restart for every write — so a burst of clicks (or dragging a
+  // slider) does not need one disk write per click. updatePluginConfig stays
+  // synchronous with every change instead of being debounced too: it only
+  // updates the in-memory config the UI runtime holds, and losing an edit to
+  // a stray navigation before the debounce fires would be worse than an extra
+  // write.
+  //
+  // The promise is NOT discarded: a rejected write used to become an unhandled
+  // rejection inside the iframe while the page went on showing the new value,
+  // so the UI agreed with the user and config.json never changed.
+  const debouncedSavePluginConfig = debounce(() => {
+    homebridge.savePluginConfig().catch((error) => {
+      homebridge.toast.error(`Could not save config.json: ${error.message}`)
+    })
+  }, SAVE_DEBOUNCE_MS)
+
+  // The debounce window is a second wide, and closing the settings modal inside
+  // it dropped the pending write silently. `flush()` is a no-op when nothing is
+  // pending, so both handlers can fire unconditionally.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden')
+      debouncedSavePluginConfig.flush()
+  })
+  globalThis.addEventListener('pagehide', () => debouncedSavePluginConfig.flush())
+
+  // All discovered devices, kept around so the tier warning can count
+  // recording accessories host-wide, not just the one currently shown.
+  let allDevices = []
+  // The banner currently in the detail pane, if the selected device is a
+  // camera — `null` otherwise, so a stale/detached element from a previously
+  // selected device is never updated by mistake.
+  let tierWarningEl = null
+
+  const updateTierWarning = () => {
+    if (!tierWarningEl)
+      return
+    const message = tierWarning(config, allDevices)
+    tierWarningEl.textContent = message ?? ''
+    tierWarningEl.style.display = message ? '' : 'none'
+  }
+
   const save = async () => {
-    await homebridge.updatePluginConfig([config])
-    await homebridge.savePluginConfig()
+    // A failed write must not be followed by a UI that refreshes as though it
+    // succeeded — report it and leave everything showing what is on disk.
+    try {
+      await homebridge.updatePluginConfig([config])
+    }
+    catch (error) {
+      homebridge.toast.error(`Could not save config.json: ${error.message}`)
+      return
+    }
+    debouncedSavePluginConfig()
+    // Any device's recording setting can push the tier count over the edge,
+    // not just the one being edited — recompute whenever config changes.
+    updateTierWarning()
   }
 
   const settingOf = (id, key, fallback) => config.devices[id]?.[key] ?? fallback
@@ -82,69 +267,173 @@
     await save()
   })
 
-  function render(devices) {
-    devicesEl.replaceChildren()
-    for (const device of devices) {
-      const card = document.createElement('div')
-      card.className = 'up-card'
-      // device.name/device.type are console-supplied — never innerHTML them.
-      card.append(...renderDeviceHeader(document, device))
+  // The per-camera defaults every device inherits from. Without these the
+  // default/overridden badges pointed at values only a hand-edited config.json
+  // could change. Written into `config.defaults`, which is what `defaultFor`
+  // reads, so flipping one here moves every device that has not overridden it.
+  const setDefault = async (key, value) => {
+    config = { ...config, defaults: { ...config.defaults, [key]: value } }
+    await save()
+  }
 
-      const grid = document.createElement('div')
-      grid.className = 'up-grid'
+  const icloudTierEl = document.getElementById('icloudTier')
+  // Through parseIcloudTier so a hand-edited tier the schema does not know
+  // shows the default the config was actually normalised to, not a blank box.
+  icloudTierEl.value = parseIcloudTier(config.defaults.icloudTier)
+  // `save()` recomputes the tier warning, so changing the plan re-judges the
+  // count immediately rather than at the next toggle.
+  icloudTierEl.addEventListener('change', () => setDefault('icloudTier', icloudTierEl.value))
 
-      const toggle = (key, label, comingLater) => {
-        const fallback = defaultFor(config, key)
-        // id embeds device.id (console-supplied) — renderToggle builds it with
-        // DOM APIs only, and carries the injection test for this path.
-        const { wrap, input } = renderToggle(document, `${device.id}-${key}`, label)
-        input.checked = Boolean(settingOf(device.id, key, fallback))
-        if (comingLater) {
-          // Shown, but inert and said so plainly. This release has no camera
-          // services yet, so honouring the flag is impossible — offering a
-          // live checkbox that quietly does nothing would be the dishonest
-          // option, and hiding it entirely hides the roadmap.
-          // Sub-project 2 must drop `comingLater` when the services land, or
-          // the settings stay permanently unreachable. Note also that a
-          // hand-edited `hksv: true` renders checked-but-disabled and cannot
-          // be cleared here — harmless while nothing reads it, but it must not
-          // outlive this release.
-          input.disabled = true
-          wrap.className = 'up-muted'
-          wrap.append(' — arriving in a later release')
-        }
-        else {
-          input.addEventListener('change', async () => {
-            config = setDeviceSetting(config, device.id, key, input.checked)
-            await save()
-          })
-        }
-        grid.append(wrap)
-      }
+  const defaultsControlsEl = document.getElementById('defaults-controls')
 
-      toggle('expose', 'Expose in HomeKit')
-      // Capability-driven: a control is only offered when the hardware can
-      // honour it, so the UI never lets someone flip a setting that will
-      // silently do nothing.
-      if (device.type === 'camera') {
-        // Live and enabled, like audio and talkback below and unlike hksv:
-        // these genuinely work now, so a disabled control would be the
-        // dishonest one. Only hksv still carries `comingLater`.
-        const { wrap, select } = renderQualitySelect(document, device, settingOf(device.id, 'quality', config.defaults.quality))
-        select.addEventListener('change', async () => {
-          config = setDeviceSetting(config, device.id, 'quality', select.value)
+  // Built with the same helpers the per-device controls use, so the switches,
+  // the restart marker and the quality options cannot drift between the two
+  // tabs. No badge: a default is what a badge would be measured against.
+  const defaultToggle = (key, defaultsKey, label) => {
+    const { wrap, input } = renderToggle(document, `defaults-${defaultsKey}`, label, NEEDS_RESTART.has(key))
+    input.checked = Boolean(config.defaults[defaultsKey])
+    input.addEventListener('change', () => setDefault(defaultsKey, input.checked))
+    defaultsControlsEl.append(wrap)
+  }
+
+  defaultToggle('expose', 'exposeNewDevices', 'Expose new devices in HomeKit')
+  defaultToggle('hksv', 'hksv', HKSV_LABEL)
+
+  {
+    // `renderQualitySelect` keys its id off `device.id`; a literal stands in
+    // for the device here, since this select is the host-wide default.
+    const { wrap, select } = renderQualitySelect(document, { id: 'defaults' }, config.defaults.quality)
+    select.addEventListener('change', () => setDefault('quality', select.value))
+    defaultsControlsEl.append(wrap)
+  }
+
+  /**
+   * Renders one device's settings into the detail pane. `mount` inserts the
+   * pane and THEN moves focus to its heading — the list stays where it is, but
+   * the content the user asked for just replaced what used to be there, so
+   * focus has to follow it. That order is the whole point: focusing before
+   * insertion is a no-op.
+   */
+  function showDetail(device) {
+    const { bodies, mount } = renderDetail(document, device)
+    tierWarningEl = null
+
+    // Appends a badge (default/overridden) plus, when overridden, a reset
+    // button to `wrap` — and keeps it live across changes by tearing down
+    // and rebuilding it rather than mutating in place, since `renderBadge`
+    // owns both the label and whether a reset button exists at all.
+    const attachBadge = (wrap, key, applyValue, label) => {
+      let current
+      const refresh = () => {
+        current?.badge.remove()
+        current?.reset?.remove()
+        current = renderBadge(document, isOverridden(config, device.id, key), async () => {
+          config = clearDeviceSetting(config, device.id, key)
+          applyValue(defaultFor(config, key))
           await save()
-        })
-        grid.append(wrap)
-        // Which checkboxes a camera gets — including whether the package lens
-        // is offered — is decided in config-ops.js, where a test can reach it.
-        for (const { key, label, comingLater } of cameraToggles(device))
-          toggle(key, label, comingLater)
+          refresh()
+        }, label)
+        wrap.append(current.badge)
+        if (current.reset)
+          wrap.append(current.reset)
       }
-
-      card.append(grid)
-      devicesEl.append(card)
+      refresh()
+      return refresh
     }
+
+    const toggle = (body, key, label, comingLater) => {
+      const fallback = defaultFor(config, key)
+      // id embeds device.id (console-supplied) — renderToggle builds it with
+      // DOM APIs only, and carries the injection test for this path.
+      const { wrap, input } = renderToggle(document, `${device.id}-${key}`, label, NEEDS_RESTART.has(key))
+      input.checked = Boolean(settingOf(device.id, key, fallback))
+      if (comingLater) {
+        // Shown, but inert and said so plainly. This release has no camera
+        // services yet, so honouring the flag is impossible — offering a
+        // live checkbox that quietly does nothing would be the dishonest
+        // option, and hiding it entirely hides the roadmap.
+        // Sub-project 2 must drop `comingLater` when the services land, or
+        // the settings stay permanently unreachable. A hand-edited
+        // `<key>: true` for a still-`comingLater` toggle renders
+        // checked-but-disabled and cannot be cleared here — harmless while
+        // nothing reads it, but it must not outlive this release. No badge
+        // either: there is nothing a reset button could meaningfully do to
+        // a disabled control.
+        input.disabled = true
+        // Appended, never replaced: `renderToggle`'s own `form-check
+        // form-switch` is what makes this a switch rather than a 13 px
+        // checkbox, and overwriting className would silently undo it.
+        wrap.className += ' text-body-secondary small'
+        wrap.append(' — arriving in a later release')
+      }
+      else {
+        // Defaults vs overrides were otherwise invisible — the flat UI only
+        // ever showed the resolved value. `refreshBadge` re-reads
+        // `isOverridden` after every change, so the badge and the checkbox
+        // never disagree.
+        const refreshBadge = attachBadge(wrap, key, value => { input.checked = Boolean(value) }, label)
+        input.addEventListener('change', async () => {
+          config = setDeviceSetting(config, device.id, key, input.checked)
+          await save()
+          refreshBadge()
+        })
+      }
+      body.append(wrap)
+    }
+
+    toggle(bodies.General, 'expose', 'Expose in HomeKit')
+
+    // Capability-driven: a control is only offered when the hardware can
+    // honour it, so the UI never lets someone flip a setting that will
+    // silently do nothing.
+    if (device.type === 'camera') {
+      // Live and enabled, like audio, talkback and hksv below: these
+      // genuinely work now, so a disabled control would be the dishonest
+      // one. No toggle currently carries `comingLater`.
+      const { wrap, select } = renderQualitySelect(document, device, settingOf(device.id, 'quality', defaultFor(config, 'quality')))
+      const refreshQualityBadge = attachBadge(wrap, 'quality', value => { select.value = value }, 'Live view quality')
+      select.addEventListener('change', async () => {
+        config = setDeviceSetting(config, device.id, 'quality', select.value)
+        await save()
+        refreshQualityBadge()
+      })
+      bodies['Live view'].append(wrap)
+
+      // Advisory only (see tierWarning) — shown beside the recording toggle
+      // it is about, not buried in Help, since this is where the decision to
+      // turn recording on actually gets made.
+      tierWarningEl = document.createElement('div')
+      tierWarningEl.className = 'alert alert-warning small mb-2'
+      tierWarningEl.setAttribute('role', 'status')
+      bodies.Recording.append(tierWarningEl)
+      updateTierWarning()
+
+      // Which checkboxes a camera gets, and which section each files under
+      // — including whether the package lens is offered — is decided in
+      // config-ops.js, where a test can reach it.
+      for (const { key, label, comingLater, section } of cameraToggles(device))
+        toggle(bodies[section ?? 'Live view'], key, label, comingLater)
+    }
+
+    mount(deviceDetailEl)
+  }
+
+  function render(devices) {
+    allDevices = devices
+    // A rediscovery rebuilds the list, so the pane beside it can be showing a
+    // device that is no longer in it — and `tierWarningEl` would still be the
+    // detached banner from that pane. Both go back to the empty state.
+    deviceDetailEl.textContent = 'Select a device from the list.'
+    tierWarningEl = null
+    const { list, filter } = renderDeviceList(document, devices, (id) => {
+      const device = devices.find(d => d.id === id)
+      if (device)
+        showDetail(device)
+    })
+    deviceListEl.replaceChildren(list)
+    deviceFilterEl.value = ''
+    deviceFilterEl.oninput = () => filter(deviceFilterEl.value)
+    updateTierWarning()
   }
 
   /**
@@ -157,11 +446,11 @@
     if (lines.length === 0)
       return
     const card = document.createElement('div')
-    card.className = warn ? 'up-card up-warn' : 'up-card up-muted'
+    card.className = warn ? 'card card-body mb-2 border-danger' : 'card card-body mb-2 text-body-secondary small'
     for (const line of lines) {
       const p = document.createElement('div')
       if (line.fingerprint)
-        p.className = 'up-fp'
+        p.className = 'font-monospace small text-break'
       p.textContent = line.text
       card.append(p)
     }
@@ -185,7 +474,36 @@
   if (config.consoleCert)
     renderTrust([{ text: 'This console\'s certificate is trusted and pinned. Press Test Connection to verify it still matches.' }])
 
-  document.getElementById('test').addEventListener('click', async () => {
+  /**
+   * Transient outcomes go to Homebridge's own toast, which is what a user
+   * watching the page notices. The `aria-live` status line stays and carries
+   * the SAME text: a toast disappears on a timer and is not something a screen
+   * reader user can go back to, so removing the region would be a regression.
+   * `error.message` is server-supplied text and lands as an argument, never
+   * as markup.
+   */
+  const report = (text, ok) => {
+    statusEl.textContent = text
+    // Called as METHODS, deliberately. Selecting one with a ternary and calling
+    // the result — `(ok ? toast.success : toast.error)(text)` — detaches it from
+    // `homebridge.toast`, and plugin-ui-utils' implementation does
+    // `this._postMessage(...)`, so every call threw
+    // "Cannot read properties of undefined (reading '_postMessage')". `report`
+    // is the shared status reporter and runs BEFORE discovery, so that one
+    // throw took out Test Connection and the whole device list with it.
+    if (ok)
+      homebridge.toast.success(text)
+    else
+      homebridge.toast.error(text)
+  }
+
+  const testEl = document.getElementById('test')
+
+  /**
+   * Extracted from the click handler so the whole thing — every early return
+   * included — can sit inside one re-entrancy guard below.
+   */
+  const runConnectionTest = async () => {
     statusEl.textContent = 'Checking the console\'s certificate…'
     // The key is only ever sent to the local server-side handler over the
     // homebridge IPC channel — never logged, never echoed back into the DOM.
@@ -198,12 +516,12 @@
       cert = await homebridge.request('/console-cert', { host: config.host, consoleCert: config.consoleCert })
     }
     catch (error) {
-      statusEl.textContent = error.message
+      report(error.message, false)
       return
     }
 
     if (cert.matches === false) {
-      statusEl.textContent = 'Refused to connect — the console\'s certificate changed. The API key was not sent.'
+      report('Refused to connect — the console\'s certificate changed. The API key was not sent.', false)
       renderTrust([
         { text: `The certificate presented by ${config.host} does not match the one this plugin trusts, so the connection was refused before the API key was sent.` },
         { text: `Trusted: ${cert.trustedFingerprint}`, fingerprint: true },
@@ -225,13 +543,36 @@
     const credentials = { host: config.host, apiKey: config.apiKey, consoleCert: config.consoleCert }
     try {
       const info = await homebridge.request('/test-connection', credentials)
-      statusEl.textContent = `Connected — ${info.nvrName}, Protect ${info.version}`
+      report(`Connected — ${info.nvrName}, Protect ${info.version}`, true)
       await save()
       const { devices } = await homebridge.request('/discover', credentials)
       render(devices)
     }
     catch (error) {
-      statusEl.textContent = error.message
+      report(error.message, false)
+    }
+  }
+
+  /**
+   * One check at a time. Reading an unreachable console's certificate takes
+   * until the TCP timeout — measured at ~18s against 10.255.255.1 — and the
+   * button stayed live for all of it, so repeated clicks fired CONCURRENT
+   * certificate reads whose completions raced to write the same `config`
+   * object and the same aria-live status line. Disabling for the duration is
+   * the whole fix; the error path itself was already correct and does time out.
+   *
+   * `finally`, so a throw anywhere in the body still gives the button back —
+   * a permanently dead Test Connection would be worse than the race.
+   */
+  testEl.addEventListener('click', async () => {
+    if (testEl.disabled)
+      return
+    testEl.disabled = true
+    try {
+      await runConnectionTest()
+    }
+    finally {
+      testEl.disabled = false
     }
   })
 </script>

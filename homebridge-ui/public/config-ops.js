@@ -3,7 +3,18 @@
 // Must track `defaultsSchema` in src/config.ts: `ensureConfig` writes these into
 // config.json on every UI save, so a stale value here silently overrides the
 // plugin's own default for every user who touches the settings page.
-export const DEFAULTS = { exposeNewDevices: true, quality: 'auto', hksv: false }
+export const DEFAULTS = { exposeNewDevices: true, quality: 'auto', hksv: false, icloudTier: '200gb' }
+
+/** Cameras each iCloud tier permits to record. Apple caps by COUNT, not storage. */
+export const RECORDING_LIMITS = { '50gb': 1, '200gb': 5, '2tb': Number.POSITIVE_INFINITY }
+
+/**
+ * How each tier is written for a human. The keys are config values, not prose —
+ * without this the warning read "…supports 1 on the 50gb tier", printing the
+ * raw config key back at someone who chose "50 GB" from a menu. Must cover
+ * every key of RECORDING_LIMITS; a test pins the two together.
+ */
+export const TIER_LABELS = { '50gb': '50 GB', '200gb': '200 GB', '2tb': '2 TB or more' }
 
 /**
  * Normalises the platform block WITHOUT dropping anything it does not know
@@ -21,9 +32,21 @@ export function ensureConfig(raw) {
     name: config.name ?? 'UniFi Protect',
     host: config.host ?? '',
     apiKey: config.apiKey ?? '',
-    defaults: { ...DEFAULTS, ...(config.defaults ?? {}) },
+    defaults: { ...DEFAULTS, ...(config.defaults ?? {}), icloudTier: parseIcloudTier(config.defaults?.icloudTier) },
     devices: { ...(config.devices ?? {}) },
   }
+}
+
+/**
+ * Falls back to the default tier for anything `RECORDING_LIMITS` does not
+ * recognise. Mirrors `parseMaxStreams`: without this, a hand-edited
+ * `"1tb"` in config.json would be merged unvalidated by `ensureConfig`,
+ * written straight back on the next save, and then fail `parseConfig` at
+ * the next plugin start — the exact "UI wrote a value it can't load back"
+ * failure `parseMaxStreams` already exists to prevent.
+ */
+export function parseIcloudTier(raw) {
+  return Object.hasOwn(RECORDING_LIMITS, raw) ? raw : DEFAULTS.icloudTier
 }
 
 /**
@@ -77,6 +100,8 @@ export function defaultFor(config, key) {
     return config.defaults.quality
   if (key === 'hksv')
     return config.defaults.hksv
+  if (key === 'icloudTier')
+    return config.defaults.icloudTier
   if (key === 'smartDetect')
     return undefined
   // Both default off with no global override, exactly as `settingsFor` resolves
@@ -102,7 +127,7 @@ export function renderDeviceHeader(doc, device) {
   const nameEl = doc.createElement('strong')
   nameEl.textContent = device.name ?? ''
   const typeEl = doc.createElement('span')
-  typeEl.className = 'up-muted'
+  typeEl.className = 'text-body-secondary small'
   typeEl.textContent = device.type ?? ''
   return [nameEl, ' ', typeEl]
 }
@@ -125,21 +150,32 @@ export const QUALITY_OPTIONS = [
 ]
 
 /**
- * The audio toggle's label. It names the restart deliberately: HAP tells HomeKit
- * which audio codecs a camera offers when the controller is attached at startup
- * and gives no way to change it afterwards, so switching audio ON only reaches
- * HomeKit after a restart — the one Homebridge already prompts for on save.
- * Switching it OFF applies to the next live view immediately. A toggle that
- * silently did nothing until a restart would look broken.
+ * The audio toggle's label. HAP tells HomeKit which audio codecs a camera
+ * offers when the controller is attached at startup and gives no way to
+ * change it afterwards, so switching audio ON only reaches HomeKit after a
+ * restart. Switching it OFF applies to the next live view immediately. The
+ * restart itself is signalled by `renderToggle`'s marker (see `NEEDS_RESTART`)
+ * rather than baked into this text — putting it in both places doubled the
+ * warning on this exact control, which is the defect this file's `NEEDS_RESTART`
+ * set now exists to avoid.
  */
-export const AUDIO_LABEL = 'Live view audio (restart to enable)'
+export const AUDIO_LABEL = 'Live view audio'
 
 /**
- * Says "restart" for the same reason AUDIO_LABEL does: HAP fixes the advertised
+ * Restart-worthy for the same reason AUDIO_LABEL is: HAP fixes the advertised
  * codecs and two-way capability when the controller is configured, and
  * `CameraController.streamingOptions` is private and read-only afterwards.
+ * See AUDIO_LABEL for why that is not spelled out in the text itself.
  */
-export const TALKBACK_LABEL = 'Two-way audio (restart to enable)'
+export const TALKBACK_LABEL = 'Two-way audio'
+
+/**
+ * The HKSV recording toggle's label. Recording settings take effect only after
+ * a restart, just like audio and talkback, so the restart is signalled by
+ * renderToggle's marker (driven off NEEDS_RESTART) rather than baked into
+ * this text — see AUDIO_LABEL for why that avoids duplication.
+ */
+export const HKSV_LABEL = 'HomeKit Secure Video'
 
 /**
  * Builds the per-camera quality selector with DOM APIs only — never
@@ -153,12 +189,26 @@ export const TALKBACK_LABEL = 'Two-way audio (restart to enable)'
  */
 export function renderQualitySelect(doc, device, value) {
   const id = `${device.id}-quality`
-  const wrap = doc.createElement('label')
-  wrap.setAttribute('for', id)
-  wrap.append('Live view quality ')
+  // A flex row that WRAPS, not a bare label: the caller appends the
+  // default/overridden badge to `wrap`, and with a full-width block select in
+  // between, the badge was pushed onto its own line below the box. Label,
+  // select and badge now sit on one line and wrap together when the pane is
+  // narrow. All Bootstrap utilities — this plugin ships no CSS.
+  const wrap = doc.createElement('div')
+  wrap.className = 'd-flex flex-wrap align-items-center gap-2 mb-2'
+  const caption = doc.createElement('label')
+  caption.className = 'form-label mb-0'
+  caption.setAttribute('for', id)
+  caption.textContent = 'Live view quality'
+  wrap.append(caption)
 
   const select = doc.createElement('select')
-  select.className = 'form-control'
+  // `form-select`, not `form-control`: Bootstrap 5 styles selects with the
+  // former (it carries the dropdown chevron and the right padding). A select
+  // wearing `form-control` renders as a bare native control against the rest
+  // of the themed form. `w-auto` because `form-select` is width:100%, which
+  // inside the flex row would eat the whole line and push the badge off it.
+  select.className = 'form-select w-auto'
   select.id = id
   for (const [optionValue, label] of QUALITY_OPTIONS) {
     const option = doc.createElement('option')
@@ -195,18 +245,24 @@ export function shouldOfferPackageCamera(device) {
  * renders exactly this list and nothing else, so the package toggle's
  * appearance is decided in tested code rather than in an untestable inline
  * branch. `comingLater` renders the control inert: the setting exists in the
- * schema but nothing reads it yet — which is now hksv alone. Audio, talkback
- * and the package lens are all live; do not add the flag back to them.
+ * schema but nothing reads it yet — which no toggle currently sets. Audio,
+ * talkback, the package lens and hksv are all live; do not add the flag back
+ * to them.
+ *
+ * `section` names the detail-pane section (see `renderDetail`'s `SECTIONS`
+ * in ui-render.js) index.html files the toggle under. It lives here, next
+ * to the decision of which toggles a device gets, rather than in index.html's
+ * untested inline script — same file, same test seam.
  */
 export function cameraToggles(device) {
   const toggles = []
   if (device.hasMic)
-    toggles.push({ key: 'audio', label: AUDIO_LABEL })
-  toggles.push({ key: 'hksv', label: 'HomeKit Secure Video', comingLater: true })
+    toggles.push({ key: 'audio', label: AUDIO_LABEL, section: 'Live view' })
+  toggles.push({ key: 'hksv', label: HKSV_LABEL, section: 'Recording' })
   if (device.hasSpeaker)
-    toggles.push({ key: 'talkback', label: TALKBACK_LABEL })
+    toggles.push({ key: 'talkback', label: TALKBACK_LABEL, section: 'Live view' })
   if (shouldOfferPackageCamera(device))
-    toggles.push({ key: 'packageCamera', label: PACKAGE_LABEL })
+    toggles.push({ key: 'packageCamera', label: PACKAGE_LABEL, section: 'Extra accessories' })
   return toggles
 }
 
@@ -216,15 +272,149 @@ export function cameraToggles(device) {
  * `id` embeds `device.id` and the label can carry console-supplied text, both
  * attacker-controlled, and both land as property assignments — never markup.
  * The caller owns `checked`, `disabled` and the change listener.
+ *
+ * `needsRestart` renders an actual marker element (never baked into `label`
+ * text), so the signal survives even for a control whose label does not
+ * mention "restart" — pass `NEEDS_RESTART.has(key)`, not a guess.
+ *
+ * `form-check form-switch` + `form-check-input` are what turn Bootstrap's
+ * 13 px default checkbox into an actual switch. They come from the Bootstrap
+ * Homebridge injects and themes — this plugin ships no CSS of its own, so
+ * dropping these classes silently reverts the control to a tiny checkbox.
+ * Callers that restyle the wrapper must APPEND to `className`, never replace it.
  */
-export function renderToggle(doc, id, label) {
+export function renderToggle(doc, id, label, needsRestart = false) {
   const wrap = doc.createElement('label')
+  wrap.className = 'form-check form-switch'
   wrap.setAttribute('for', id)
   const input = doc.createElement('input')
+  input.className = 'form-check-input'
   input.type = 'checkbox'
   input.id = id
   wrap.append(input, ` ${label}`)
+  if (needsRestart) {
+    const marker = doc.createElement('span')
+    marker.className = 'badge text-bg-warning ms-2'
+    marker.textContent = 'restart required'
+    wrap.append(marker)
+  }
   return { wrap, input }
+}
+
+/**
+ * Homebridge offers a restart whenever config.json changes, so writing on every
+ * click made that banner appear for settings that take effect immediately.
+ * Each control still writes on change — losing an edit to a stray navigation
+ * would be worse — but the disk write collapses.
+ *
+ * `flush()` runs a pending call immediately and cancels the timer. Without it,
+ * closing the settings modal inside the window discarded the last write in
+ * silence: the UI had already shown the change, and config.json never got it.
+ * It is a no-op when nothing is pending, so an unload handler can call it
+ * unconditionally.
+ */
+export function debounce(fn, ms) {
+  let timer
+  let pending
+  const debounced = (...args) => {
+    clearTimeout(timer)
+    pending = args
+    timer = setTimeout(() => {
+      pending = undefined
+      fn(...args)
+    }, ms)
+  }
+  debounced.flush = () => {
+    if (!pending)
+      return
+    clearTimeout(timer)
+    const args = pending
+    pending = undefined
+    fn(...args)
+  }
+  return debounced
+}
+
+export const SAVE_DEBOUNCE_MS = 1000
+
+/**
+ * HAP fixes a camera's advertised codecs, two-way capability and recording
+ * options when the controller is configured, and `CameraController.streamingOptions`
+ * is private and read-only afterwards — so turning any of these ON needs a
+ * restart before it reaches HomeKit. Turning one OFF applies to the next
+ * session. `renderToggle`'s marker is driven off this set rather than off
+ * label text, so the signal is honest even for a toggle (like `hksv`) whose
+ * label does not spell out "restart" itself.
+ */
+export const NEEDS_RESTART = new Set(['audio', 'talkback', 'hksv'])
+
+/**
+ * Accessories that would record. The package lens is a separate HomeKit
+ * accessory but `attachPackageCamera` builds its `CameraController` with NO
+ * `recording` key, so it never advertises HKSV and can never occupy one of
+ * Apple's camera slots — enabling the lens must not move this count.
+ *
+ * Takes the discovered device list, not just `config.devices`: a device with
+ * no override entry still inherits `defaults.hksv`, and counting only the
+ * entries that happen to exist in config.json would miss every camera
+ * relying on the default (e.g. a user who flips `defaults.hksv` on).
+ */
+export function recordingCount(config, devices) {
+  let count = 0
+  for (const device of devices) {
+    if (device.type !== 'camera')
+      continue
+    const settings = config.devices?.[device.id]
+    if (settings?.hksv ?? defaultFor(config, 'hksv'))
+      count++
+  }
+  return count
+}
+
+/**
+ * Advisory, never enforcement: the plugin cannot see the user's iCloud
+ * subscription, and refusing a setting on a guess would be worse than a
+ * warning the user can ignore. Apple caps HKSV by camera COUNT, not
+ * storage — footage never touches the quota.
+ */
+export function tierWarning(config, devices) {
+  // Through `parseIcloudTier`, not raw: a hand-edited `"1tb"` has no entry in
+  // RECORDING_LIMITS, so `limit` was `undefined`, `count <= limit` was never
+  // true, and the banner read "…supports undefined on the 1tb tier" forever.
+  const tier = parseIcloudTier(config.defaults?.icloudTier)
+  const limit = RECORDING_LIMITS[tier]
+  const count = recordingCount(config, devices)
+  if (count <= limit)
+    return undefined
+  return `${count} accessories are set to record, but your iCloud+ plan supports ${limit} on the ${TIER_LABELS[tier]} tier. HomeKit will refuse the extras — this is a heads-up, not a block.`
+}
+
+/**
+ * True only when this device carries its OWN value for the key — the flat UI
+ * showed just the resolved value, with no way to tell whether it came from
+ * the global default or a per-device override.
+ */
+export function isOverridden(config, deviceId, key) {
+  return config.devices?.[deviceId]?.[key] !== undefined
+}
+
+/**
+ * Drops one override. An emptied device entry is removed rather than left as
+ * `{}`, so config.json does not accumulate husks for devices that are back on
+ * the defaults — the same rule `setDeviceSetting` already applies when a
+ * value is set back to the default.
+ */
+export function clearDeviceSetting(config, deviceId, key) {
+  const current = config.devices?.[deviceId]
+  if (!current || current[key] === undefined)
+    return config
+  const { [key]: _dropped, ...rest } = current
+  const devices = { ...config.devices }
+  if (Object.keys(rest).length === 0)
+    delete devices[deviceId]
+  else
+    devices[deviceId] = rest
+  return { ...config, devices }
 }
 
 /**

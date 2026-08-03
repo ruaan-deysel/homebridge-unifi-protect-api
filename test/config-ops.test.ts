@@ -1,16 +1,26 @@
-import { describe, expect, it } from 'vitest'
-import { cameraToggles, defaultFor, DEFAULTS, ensureConfig, MAX_STREAMS_RANGE, PACKAGE_LABEL, parseMaxStreams, QUALITY_OPTIONS, renderDeviceHeader, renderQualitySelect, renderToggle, setDeviceSetting, setGlobalSetting, shouldOfferPackageCamera } from '../homebridge-ui/public/config-ops.js'
+import type { DeviceOverride, IcloudTier } from '../homebridge-ui/public/config-ops.js'
+import { describe, expect, it, vi } from 'vitest'
+import { AUDIO_LABEL, cameraToggles, clearDeviceSetting, debounce, defaultFor, DEFAULTS, ensureConfig, HKSV_LABEL, isOverridden, MAX_STREAMS_RANGE, NEEDS_RESTART, PACKAGE_LABEL, parseIcloudTier, parseMaxStreams, QUALITY_OPTIONS, RECORDING_LIMITS, recordingCount, renderDeviceHeader, renderQualitySelect, renderToggle, SAVE_DEBOUNCE_MS, setDeviceSetting, setGlobalSetting, shouldOfferPackageCamera, TALKBACK_LABEL, TIER_LABELS, tierWarning } from '../homebridge-ui/public/config-ops.js'
 import { parseConfig, settingsFor } from '../src/config.js'
 
 // Minimal fake DOM — just enough to prove renderDeviceHeader never turns
 // console-supplied text into markup. The load-bearing assertion is the
 // `textContent` one: it holds only if the payload was assigned via textContent,
 // and fails against an `innerHTML`/template-literal implementation, which would
-// have parsed the string into child elements and left `_text` empty. The
-// `findByTag(..., 'IMG')` check is a cheap belt-and-braces restatement — this
-// FakeElement has no markup parser, so nothing here can synthesise an IMG.
-// No jsdom dependency needed for the one property under test.
-class FakeElement {
+// have parsed the string into child elements and left `_text` empty (see the
+// `innerHTML` setter below). No jsdom dependency needed for the one property
+// under test.
+//
+// An earlier version of these XSS-regression tests also asserted
+// `findByTag(..., 'IMG')` to be null/undefined. That assertion could never
+// fail: FakeElement's `innerHTML` setter stores the string and clears
+// `children` — it never parses markup into child elements — so no mutation
+// of the renderer under test could ever make `findByTag` find an IMG. It has
+// been removed everywhere it was copied (this file and
+// test/ui-render.test.ts); the `textContent`/`outerHTML` assertions beside
+// each removal are the real guard and are proven to fail under mutation (see
+// the fix-wave report).
+export class FakeElement {
   tagName: string
   children: (FakeElement | string)[] = []
   attributes: Record<string, string> = {}
@@ -20,8 +30,63 @@ class FakeElement {
   selected = false
   type = ''
   checked = false
+  /** Only the one CSS property ui-render.js touches. */
+  style: { display: string } = { display: '' }
+  /** Mirrors the real DOM's `dataset` — a property bag, never markup. */
+  dataset: Record<string, string> = {}
+  /**
+   * `-1`, matching what a real `div` reports when it carries no `tabindex`
+   * attribute — NOT `0`. Defaulting to `0` made "every pane is in the Tab
+   * order" pass against a renderer that never set it (a green mutation), which
+   * is the same class of defect as the `focus()` counter below.
+   */
+  tabIndex = -1
+  private listeners = new Map<string, ((event: Record<string, unknown>) => void)[]>()
   private _text = ''
   private _html?: string
+
+  addEventListener(type: string, handler: (event: Record<string, unknown>) => void) {
+    const forType = this.listeners.get(type) ?? []
+    forType.push(handler)
+    this.listeners.set(type, forType)
+  }
+
+  /** Fires a synthetic event at every listener registered for `type`. */
+  dispatch(type: string, event: Record<string, unknown> = {}) {
+    for (const handler of this.listeners.get(type) ?? [])
+      handler(event)
+  }
+
+  /**
+   * Attachment, modelled only as far as `focus()` needs it. `append` and
+   * `replaceChildren` set this; nothing else does, because nothing else in the
+   * code under test detaches a node.
+   */
+  parent: FakeElement | null = null
+  /** Set on the node `makeDoc()` hands back as the document root. */
+  isDocumentRoot = false
+
+  /**
+   * Real focus has no visual effect in this harness, but the call itself is
+   * load-bearing: U3 (selection moves focus to the detail heading) is proven
+   * by counting calls here, not by reading source.
+   *
+   * It counts ONLY when the node is reachable from the document root, because
+   * that is the one thing a real browser does differently: `focus()` on a
+   * detached node is a silent no-op. A counter that ignored attachment made
+   * `expect(el.focusCount).toBe(1)` pass for code that focused a node it had
+   * not inserted yet — which is exactly the defect this harness let through
+   * (renderDetail focused its heading before the caller mounted the pane).
+   * Do not simplify this back to an unconditional increment.
+   */
+  focusCount = 0
+  focus() {
+    let node = this.parent
+    while (node && !node.isDocumentRoot)
+      node = node.parent
+    if (this.isDocumentRoot || node)
+      this.focusCount++
+  }
 
   /**
    * Markup, and treated as markup: `outerHTML` emits it RAW and `textContent`
@@ -82,6 +147,21 @@ class FakeElement {
 
   append(...nodes: (FakeElement | string)[]) {
     this.children.push(...nodes)
+    for (const node of nodes) {
+      if (node instanceof FakeElement)
+        node.parent = this
+    }
+  }
+
+  replaceChildren(...nodes: (FakeElement | string)[]) {
+    for (const node of this.children) {
+      if (node instanceof FakeElement)
+        node.parent = null
+    }
+    this.children = []
+    this._text = ''
+    this._html = undefined
+    this.append(...nodes)
   }
 
   /**
@@ -115,24 +195,19 @@ class FakeElement {
   }
 }
 
-function makeDoc() {
-  return { createElement: (tag: string) => new FakeElement(tag) }
+// Exported so test/ui-render.test.ts reuses this harness rather than building
+// a second one — it is what makes an innerHTML regression there fail too.
+//
+// `root` stands in for the document: a test that wants `focus()` to count has
+// to attach the node to it first, exactly as the page has to insert an element
+// before focusing it.
+export function makeDoc() {
+  const root = new FakeElement('body')
+  root.isDocumentRoot = true
+  return { createElement: (tag: string) => new FakeElement(tag), root }
 }
 
 const fakeDocument = { createElement: (tag: string) => new FakeElement(tag) }
-
-function findByTag(nodes: (FakeElement | string)[], tagName: string): FakeElement | null {
-  for (const node of nodes) {
-    if (node instanceof FakeElement) {
-      if (node.tagName === tagName)
-        return node
-      const found = findByTag(node.children, tagName)
-      if (found)
-        return found
-    }
-  }
-  return null
-}
 
 describe('ensureConfig', () => {
   it('fills in the shape the UI expects', () => {
@@ -197,6 +272,58 @@ describe('setDeviceSetting', () => {
   })
 })
 
+describe('isOverridden / clearDeviceSetting', () => {
+  const base = ensureConfig({})
+
+  it('reports override state per key, per device', () => {
+    const config = { ...base, devices: { a: { audio: true } } }
+    expect(isOverridden(config, 'a', 'audio')).toBe(true)
+    // Same device, a key it never set — inherited, not overridden.
+    expect(isOverridden(config, 'a', 'quality')).toBe(false)
+    // A different device entirely, same key — no entry at all.
+    expect(isOverridden(config, 'b', 'audio')).toBe(false)
+  })
+
+  // An explicit `false` IS an override — the test above only ever asserted
+  // `true`, so a truthiness check in place of the `!== undefined` would have
+  // survived: a camera deliberately switched off would show "default" and
+  // offer no reset.
+  it('reports an explicit false as overridden, not as an absent key', () => {
+    const config = { ...base, devices: { a: { audio: false } } }
+    expect(isOverridden(config, 'a', 'audio')).toBe(true)
+    // And the absent key next to it still is not.
+    expect(isOverridden(config, 'a', 'talkback')).toBe(false)
+  })
+
+  it('clears one key and keeps the others', () => {
+    const config = { ...base, devices: { a: { audio: true, quality: 'high' } } }
+    const next = clearDeviceSetting(config, 'a', 'audio')
+    expect(next.devices.a).toEqual({ quality: 'high' })
+  })
+
+  it('removes the device entry when its last override is cleared', () => {
+    const config = { ...base, devices: { a: { audio: true } } }
+    expect(clearDeviceSetting(config, 'a', 'audio').devices.a).toBeUndefined()
+  })
+
+  it('is a no-op when the key was never overridden', () => {
+    const config = { ...base, devices: { a: { audio: true } } }
+    const next = clearDeviceSetting(config, 'a', 'quality')
+    expect(next).toBe(config)
+  })
+
+  it('is a no-op when the device has no overrides at all', () => {
+    const next = clearDeviceSetting(base, 'unknown', 'audio')
+    expect(next).toBe(base)
+  })
+
+  it('does not mutate the input config', () => {
+    const config = { ...base, devices: { a: { audio: true, quality: 'high' } } }
+    clearDeviceSetting(config, 'a', 'audio')
+    expect(config.devices.a).toEqual({ audio: true, quality: 'high' })
+  })
+})
+
 describe('the streaming settings the UI now writes', () => {
   const minimal = { platform: 'UniFiProtect', host: '10.0.0.1', apiKey: 'k' }
 
@@ -243,6 +370,8 @@ describe('the streaming settings the UI now writes', () => {
     // And a camera with no override resolves to audio off on both sides.
     expect(parsed.success && settingsFor(parsed.data, 'cam1').audio).toBe(false)
     expect(setDeviceSetting(ensureConfig({}), 'cam1', 'audio', false).devices.cam1).toBeUndefined()
+    // And the iCloud tier default is available from the UI.
+    expect(defaultFor(ensureConfig(minimal), 'icloudTier')).toBe('200gb')
   })
 })
 
@@ -318,8 +447,12 @@ describe('renderQualitySelect', () => {
     const options = select.children as FakeElement[]
     expect(options.map(o => o.value)).toEqual(QUALITY_OPTIONS.map(([value]) => value))
     expect(options.filter(o => o.selected).map(o => o.value)).toEqual(['medium'])
-    // The label is wired to the control, or clicking it does nothing.
-    expect(wrap.attributes.for).toBe('cam1-quality')
+    // The label is wired to the control, or clicking it does nothing. It is a
+    // CHILD of the wrapper now, not the wrapper itself: the wrapper became a
+    // flex row so the caller's badge sits on the same line as the select
+    // instead of being pushed below it.
+    const caption = (wrap.children as FakeElement[]).find(c => c.tagName === 'LABEL')
+    expect(caption?.attributes.for).toBe('cam1-quality')
     expect(select.id).toBe('cam1-quality')
     // Real measured resolutions, so "low" is an informed choice.
     expect(wrap.textContent).toContain('640 × 360')
@@ -336,9 +469,13 @@ describe('renderQualitySelect', () => {
 
     const { wrap, select } = renderQualitySelect(fakeDocument, { id: payload }, 'auto') as unknown as { wrap: FakeElement, select: FakeElement }
 
-    expect(wrap.attributes.for).toBe(`${payload}-quality`)
+    const caption = (wrap.children as FakeElement[]).find(c => c.tagName === 'LABEL')
+    expect(caption?.attributes.for).toBe(`${payload}-quality`)
+    // The id/for pair is a property assignment (`select.id =`, `setAttribute`),
+    // never markup — this equality check IS the guard: it holds only if the
+    // payload landed as a literal id string, and fails if it were ever
+    // interpolated into a template that parsed it.
     expect(select.id).toBe(`${payload}-quality`)
-    expect(findByTag([wrap], 'IMG')).toBeNull()
   })
 })
 
@@ -380,9 +517,17 @@ describe('package camera toggle', () => {
     // store an explicit `false` override instead of clearing the key.
     expect(defaultFor(ensureConfig(null), 'packageCamera')).toBe(false)
     expect(pkg.input.checked).toBe(false)
-    // Live, unlike the "arriving later" controls beside it.
-    expect(pkg.wrap.className).not.toBe('up-muted')
-    expect(rendered.find(control => control.key === 'hksv')?.wrap.className).toBe('up-muted')
+    // All toggles are now live — neither the package lens nor recording are
+    // "arriving later" anymore. Asserted on the classes `renderToggle` actually
+    // puts on the wrapper: `renderControls` REPLACES className with 'up-muted'
+    // for a comingLater toggle, so these survive only while the flag is unset.
+    // (The previous `.not.toBe('up-muted')` here passed against `wrap.className`
+    // that the renderer never wrote at all — it was testing the fake's default.)
+    for (const key of ['packageCamera', 'hksv']) {
+      const wrap = rendered.find(control => control.key === key)?.wrap
+      expect(wrap?.className.split(' '), key).toEqual(expect.arrayContaining(['form-check', 'form-switch']))
+    }
+    expect(cameraToggles(doorbell).every(t => t.comingLater === undefined)).toBe(true)
   })
 
   it('renders no package checkbox for a camera without the lens', () => {
@@ -413,9 +558,12 @@ describe('renderToggle (XSS regression)', () => {
 
     expect(input.id).toBe(`${payload}-packageCamera`)
     expect(wrap.attributes.for).toBe(`${payload}-packageCamera`)
+    // Load-bearing: textContent only returns the payload if it was assigned
+    // via `.append(text)`/`textContent`, and outerHTML only stays free of a
+    // raw `<img` if nothing here ever assigned `innerHTML`. Both fail under
+    // an innerHTML mutation (see the fix-wave report's mutation table).
     expect(wrap.textContent).toContain(payload)
     expect(wrap.outerHTML).not.toContain('<img')
-    expect(findByTag([wrap], 'IMG')).toBeNull()
   })
 })
 
@@ -433,21 +581,383 @@ describe('renderDeviceHeader (XSS regression)', () => {
     if (!nameEl)
       throw new Error('expected renderDeviceHeader to return a name element')
     expect(nameEl.tagName).toBe('STRONG')
+    // Load-bearing: fails against an innerHTML/template-literal implementation,
+    // which would have parsed the payload and left `_text` empty.
     expect(nameEl.textContent).toBe(payload)
-    expect(findByTag([nameEl], 'IMG')).toBeNull()
+  })
+})
+
+// U2: the toggle-to-section mapping used to live in index.html's untested
+// inline script (`TOGGLE_SECTION`). It now travels with the toggle itself,
+// where `cameraToggles` already has full test coverage.
+describe('cameraToggles sections', () => {
+  const doorbell = { id: 'cam1', type: 'camera', hasMic: true, hasSpeaker: true, hasPackageCamera: true }
+
+  it('files each toggle under the section index.html renders it in', () => {
+    const bySection = Object.fromEntries(cameraToggles(doorbell).map(t => [t.key, t.section]))
+    expect(bySection).toEqual({
+      audio: 'Live view',
+      hksv: 'Recording',
+      talkback: 'Live view',
+      packageCamera: 'Extra accessories',
+    })
+  })
+})
+
+describe('recording toggle', () => {
+  it('offers recording as a live control', () => {
+    const entry = cameraToggles({ hasSpeaker: false, hasMic: true, hasPackageCamera: false }).find(t => t.key === 'hksv')
+    expect(entry!.comingLater).toBeUndefined()
+    // The restart warning is carried by renderToggle's marker (driven off
+    // NEEDS_RESTART), not by the label text — see 'restart labels do not
+    // duplicate the marker' for the other half of that split.
+    expect(NEEDS_RESTART.has('hksv')).toBe(true)
+    expect(entry!.section).toBe('Recording')
   })
 })
 
 describe('talkback toggle', () => {
-  it('offers talkback on a speaker camera, enabled', () => {
+  it('offers talkback on a speaker camera, enabled and marked as needing a restart', () => {
     const toggles = cameraToggles({ hasSpeaker: true, hasMic: true, hasPackageCamera: false })
     const talkback = toggles.find(t => t.key === 'talkback')
     expect(talkback?.comingLater).toBeUndefined()
-    expect(talkback?.label).toContain('restart')
+    // The restart warning is now carried by renderToggle's marker (driven off
+    // NEEDS_RESTART), not by the label text — see 'restart labels do not
+    // duplicate the marker' below for the other half of that split.
+    expect(NEEDS_RESTART.has('talkback')).toBe(true)
   })
 
   it('offers no talkback without a speaker', () => {
     const toggles = cameraToggles({ hasSpeaker: false, hasMic: true, hasPackageCamera: false })
     expect(toggles.find(t => t.key === 'talkback')).toBeUndefined()
+  })
+})
+
+describe('iCloud tier recording limits', () => {
+  it('maps each tier to its camera count', () => {
+    expect(RECORDING_LIMITS['50gb']).toBe(1)
+    expect(RECORDING_LIMITS['200gb']).toBe(5)
+    expect(RECORDING_LIMITS['2tb']).toBe(Number.POSITIVE_INFINITY)
+  })
+
+  // Found by driving the real UI: the warning printed the raw config key back
+  // at a user who had chosen "50 GB" from a menu — "…supports 1 on the 50gb
+  // tier". A tier with no label would reintroduce that, so cover the whole set.
+  it('has a human label for every tier it knows a limit for', () => {
+    expect(Object.keys(TIER_LABELS).sort()).toEqual(Object.keys(RECORDING_LIMITS).sort())
+    for (const label of Object.values(TIER_LABELS))
+      expect(label).toMatch(/\d/)
+  })
+})
+
+// U6: a hand-edited config.json can carry any string. Without validation,
+// ensureConfig would merge it unchanged, the UI would write it straight back
+// on the next save, and `parseConfig` would then refuse to load it — the
+// plugin left dead by a value the settings page itself persisted.
+describe('icloudTier validation', () => {
+  it('rejects a tier outside the three the schema knows, falling back to the default', () => {
+    expect(parseIcloudTier('1tb')).toBe(DEFAULTS.icloudTier)
+    expect(parseIcloudTier(undefined)).toBe(DEFAULTS.icloudTier)
+  })
+
+  it('keeps a recognised tier as-is', () => {
+    for (const tier of Object.keys(RECORDING_LIMITS))
+      expect(parseIcloudTier(tier)).toBe(tier)
+  })
+
+  it('ensureConfig falls back rather than persisting an unrecognised tier from config.json', () => {
+    // Cast: a hand-edited config.json is exactly the untyped input this test
+    // guards against — `Partial<ConfigShape>` promises a legal tier, real
+    // config.json on disk does not.
+    const badConfig = { platform: 'UniFiProtect', host: '10.0.0.1', apiKey: 'k', defaults: { icloudTier: '1tb' } } as unknown as Parameters<typeof ensureConfig>[0]
+    const config = ensureConfig(badConfig)
+    expect(config.defaults.icloudTier).toBe(DEFAULTS.icloudTier)
+    // And the fallback itself is one parseConfig accepts, so the round-trip
+    // this test guards against actually terminates.
+    expect(parseConfig(config).success).toBe(true)
+  })
+})
+
+// Apple caps HKSV by camera COUNT, not storage. `recordingCount` takes the
+// discovered device list (not just `config.devices`) so a device with no
+// override entry — inheriting `defaults.hksv` — is still counted, and so
+// `hasPackageCamera` (a device-list-only fact) gates the package-lens
+// double-count instead of trusting a possibly-stale config.json flag.
+describe('recordingCount / tierWarning', () => {
+  const base = ensureConfig({})
+  const devices = (ids: string[]) => ids.map(id => ({ id, type: 'camera', hasPackageCamera: true }))
+  const withDevices = (deviceConfig: Record<string, DeviceOverride>, tier: IcloudTier = '200gb') =>
+    ({ ...base, defaults: { ...base.defaults, icloudTier: tier }, devices: deviceConfig })
+
+  // `attachPackageCamera` builds its CameraController with NO `recording` key,
+  // so the package accessory never advertises HKSV and cannot occupy one of
+  // Apple's camera slots. This test previously pinned the opposite — a count
+  // of 2 — which warned 200 GB users off a sixth camera they were entitled to.
+  it('does not count the package lens, which never records', () => {
+    const withLens = withDevices({ a: { hksv: true, packageCamera: true } })
+    const withoutLens = withDevices({ a: { hksv: true } })
+    expect(recordingCount(withLens, devices(['a']))).toBe(1)
+    // Enabling the lens moves nothing: asserted against the same config minus
+    // the flag, so a re-introduced double-count fails here rather than being
+    // absorbed by a hardcoded expectation.
+    expect(recordingCount(withLens, devices(['a']))).toBe(recordingCount(withoutLens, devices(['a'])))
+  })
+
+  // A light, sensor or chime is never an HKSV camera, even if it somehow
+  // carries an hksv override or inherits a true default from
+  // `defaults.hksv` — only `device.type === 'camera'` counts.
+  it('does not count a non-camera device, override or inherited default', () => {
+    const config = withDevices({ a: { hksv: true }, b: {} })
+    config.defaults.hksv = true
+    const mixed = [
+      { id: 'a', type: 'light', hasPackageCamera: false },
+      { id: 'b', type: 'camera', hasPackageCamera: false },
+    ]
+    expect(recordingCount(config, mixed)).toBe(1)
+
+    // Direction check: a lone non-camera with hksv on must count zero. Without
+    // this, a flipped `type === 'camera'` comparison above still passes the
+    // mixed-list assertion by coincidence (skip the camera, count the light).
+    const lightOnly = withDevices({ a: { hksv: true } })
+    expect(recordingCount(lightOnly, [{ id: 'a', type: 'light', hasPackageCamera: false }])).toBe(0)
+  })
+
+  it('does not count a device that is not recording, lens or no lens', () => {
+    const config = withDevices({ a: { hksv: false, packageCamera: true } })
+    expect(recordingCount(config, devices(['a']))).toBe(0)
+  })
+
+  it('counts a device with no override entry when defaults.hksv is on — the gap a literal config.devices scan misses', () => {
+    const config = withDevices({}, '200gb')
+    config.defaults.hksv = true
+    expect(recordingCount(config, devices(['a', 'b']))).toBe(2)
+  })
+
+  // The `??` in `settings?.hksv ?? defaultFor(...)` has to be `??` and not
+  // `||`: an explicit `false` override against a `true` default is the only
+  // input that tells the two apart, and `||` would fall through to the default
+  // and count a camera the user switched off.
+  it('lets an explicit false override a true default rather than falling through to it', () => {
+    const config = withDevices({ a: { hksv: false } })
+    config.defaults.hksv = true
+    expect(recordingCount(config, devices(['a', 'b']))).toBe(1)
+  })
+
+  it('does not warn at the limit', () => {
+    const config = withDevices({ a: { hksv: true }, b: { hksv: true }, c: { hksv: true }, d: { hksv: true }, e: { hksv: true } })
+    expect(tierWarning(config, devices(['a', 'b', 'c', 'd', 'e']))).toBeUndefined()
+  })
+
+  it('warns above the limit, naming the count and the limit', () => {
+    const config = withDevices({ a: { hksv: true }, b: { hksv: true }, c: { hksv: true }, d: { hksv: true }, e: { hksv: true }, f: { hksv: true } })
+    const message = tierWarning(config, devices(['a', 'b', 'c', 'd', 'e', 'f']))
+    expect(message).toContain('6')
+    expect(message).toContain('5')
+  })
+
+  it('never warns on the unlimited tier', () => {
+    const ids = Array.from({ length: 20 }, (_, i) => String(i))
+    const many = Object.fromEntries(ids.map(id => [id, { hksv: true }]))
+    expect(tierWarning(withDevices(many, '2tb'), devices(ids))).toBeUndefined()
+  })
+
+  // A hand-edited `icloudTier: "1tb"` has no RECORDING_LIMITS entry. Read raw,
+  // `limit` was `undefined`, `count <= undefined` is false for any count, and
+  // every user with a hand-edited tier saw "…supports undefined on the 1tb
+  // tier" permanently — including one recording camera on what should be a
+  // silent default. `parseIcloudTier` is what makes the banner honest.
+  it('judges an unrecognised tier by the default tier, never by undefined', () => {
+    const unknownTier = { a: { hksv: true } }
+    // Cast for the same reason ensureConfig's test does: config.json on disk
+    // can hold any string, the type cannot.
+    const config = withDevices(unknownTier, '1tb' as unknown as IcloudTier)
+    // One camera is inside the 200gb default's limit of 5, so: no warning.
+    expect(tierWarning(config, devices(['a']))).toBeUndefined()
+
+    const many = Object.fromEntries(['a', 'b', 'c', 'd', 'e', 'f'].map(id => [id, { hksv: true }]))
+    const over = withDevices(many, '1tb' as unknown as IcloudTier)
+    const message = tierWarning(over, devices(['a', 'b', 'c', 'd', 'e', 'f']))
+    // And when it does warn, it names the tier and limit actually in force —
+    // never the string 'undefined', and never the unrecognised tier. The tier
+    // is named the way the user picked it ("200 GB"), not by its config key —
+    // this assertion used to require the key, which pinned that defect in place.
+    expect(message).toContain(TIER_LABELS[DEFAULTS.icloudTier as keyof typeof TIER_LABELS])
+    expect(message).not.toContain('undefined')
+    expect(message).not.toContain('1tb')
+    expect(message).not.toContain('200gb')
+    expect(message).toContain('5')
+  })
+
+  it('is advisory only — the config it warns about is returned unchanged, never blocked or reverted', () => {
+    const config = withDevices({ a: { hksv: true, packageCamera: true }, b: { hksv: true }, c: { hksv: true }, d: { hksv: true }, e: { hksv: true }, f: { hksv: true } })
+    expect(tierWarning(config, devices(['a', 'b', 'c', 'd', 'e', 'f']))).toBeDefined()
+    expect(config.devices.a?.hksv).toBe(true)
+  })
+})
+
+describe('debounce', () => {
+  it('collapses a burst into one call', () => {
+    vi.useFakeTimers()
+    let calls = 0
+    const save = debounce(() => calls++, 1000)
+    save()
+    save()
+    save()
+    expect(calls).toBe(0)
+    vi.advanceTimersByTime(1000)
+    expect(calls).toBe(1)
+    vi.useRealTimers()
+  })
+
+  it('calls again after the window elapses', () => {
+    vi.useFakeTimers()
+    let calls = 0
+    const save = debounce(() => calls++, 1000)
+    save()
+    vi.advanceTimersByTime(1000)
+    save()
+    vi.advanceTimersByTime(1000)
+    expect(calls).toBe(2)
+    vi.useRealTimers()
+  })
+
+  // Isolates the collapsing behaviour from `clearTimeout` specifically: a
+  // mutant that drops the `clearTimeout(timer)` call still schedules a new
+  // timer per call, so without this a three-call burst would fire three
+  // times instead of once — exactly the regression the "collapses a burst"
+  // test above already catches, restated here so a review of this test alone
+  // proves the mechanism, not just the outcome.
+  it('resets the pending timer on every call rather than queuing one per call', () => {
+    vi.useFakeTimers()
+    let calls = 0
+    const save = debounce(() => calls++, 1000)
+    save()
+    vi.advanceTimersByTime(500)
+    save()
+    vi.advanceTimersByTime(500)
+    // Still short of 1000ms since the second call, because the first call's
+    // timer must have been cleared rather than left running.
+    expect(calls).toBe(0)
+    vi.advanceTimersByTime(500)
+    expect(calls).toBe(1)
+    vi.useRealTimers()
+  })
+})
+
+// Closing the settings modal inside the 1 s window used to discard the pending
+// write in silence — the UI had already shown the change and config.json never
+// received it. index.html calls `flush()` from visibilitychange/pagehide.
+describe('debounce flush', () => {
+  it('runs the pending call immediately, with the latest arguments', () => {
+    vi.useFakeTimers()
+    const seen: string[] = []
+    const save = debounce((value: string) => seen.push(value), 1000)
+    save('first')
+    save('second')
+    expect(seen).toEqual([])
+    save.flush()
+    expect(seen).toEqual(['second'])
+    vi.useRealTimers()
+  })
+
+  it('cancels the timer so a flushed call never fires twice', () => {
+    vi.useFakeTimers()
+    let calls = 0
+    const save = debounce(() => calls++, 1000)
+    save()
+    save.flush()
+    vi.advanceTimersByTime(5000)
+    expect(calls).toBe(1)
+    vi.useRealTimers()
+  })
+
+  // The unload handlers fire on every close, not just the ones with an edit
+  // pending — a flush with nothing to write must not write anything.
+  it('is a no-op when nothing is pending, before or after a completed call', () => {
+    vi.useFakeTimers()
+    let calls = 0
+    const save = debounce(() => calls++, 1000)
+    save.flush()
+    expect(calls).toBe(0)
+    save()
+    vi.advanceTimersByTime(1000)
+    expect(calls).toBe(1)
+    save.flush()
+    expect(calls).toBe(1)
+    vi.useRealTimers()
+  })
+
+  it('still debounces normally after a flush', () => {
+    vi.useFakeTimers()
+    let calls = 0
+    const save = debounce(() => calls++, 1000)
+    save()
+    save.flush()
+    save()
+    save()
+    expect(calls).toBe(1)
+    vi.advanceTimersByTime(1000)
+    expect(calls).toBe(2)
+    vi.useRealTimers()
+  })
+})
+
+describe('save debounce window', () => {
+  it('is one second, matching what a human click-burst needs collapsed', () => {
+    expect(SAVE_DEBOUNCE_MS).toBe(1000)
+  })
+})
+
+describe('settings that need a restart', () => {
+  it('names exactly the settings that need a restart', () => {
+    expect([...NEEDS_RESTART].sort()).toEqual(['audio', 'hksv', 'talkback'])
+  })
+})
+
+// Bootstrap 5 renders a checkbox as a switch only when the wrapper carries
+// `form-check form-switch` AND the input carries `form-check-input`; without
+// them it is the 13 px default checkbox the rebuild set out to replace. The
+// classes come from the Bootstrap Homebridge injects — this plugin ships no
+// CSS — so the class strings themselves are the whole mechanism.
+describe('renderToggle is a real switch', () => {
+  it('carries the Bootstrap switch classes on both the wrapper and the input', () => {
+    const { wrap, input } = renderToggle(makeDoc(), 'cam1-hksv', 'Some setting') as unknown as { wrap: FakeElement, input: FakeElement }
+    expect(wrap.className.split(' ')).toEqual(expect.arrayContaining(['form-check', 'form-switch']))
+    expect(input.className.split(' ')).toContain('form-check-input')
+  })
+})
+
+describe('renderToggle restart marker', () => {
+  // A generic label, deliberately free of the word "restart" itself, so this
+  // isolates the marker `renderToggle` renders from `needsRestart` — not text
+  // an unrelated label happens to already contain.
+  it('renders a marker for a restart-requiring setting', () => {
+    const { wrap } = renderToggle(makeDoc(), 'cam1-hksv', 'Some setting', true) as unknown as { wrap: FakeElement }
+    expect(wrap.textContent).toContain('restart')
+  })
+
+  it('renders no marker for a setting that takes effect immediately', () => {
+    const { wrap } = renderToggle(makeDoc(), 'cam1-expose', 'Some setting', false) as unknown as { wrap: FakeElement }
+    expect(wrap.textContent).not.toContain('restart')
+  })
+
+  it('renders no marker by default when the caller does not say', () => {
+    const { wrap } = renderToggle(makeDoc(), 'cam1-quality', 'Some setting') as unknown as { wrap: FakeElement }
+    expect(wrap.textContent).not.toContain('restart')
+  })
+})
+
+// index.html renders AUDIO_LABEL/TALKBACK_LABEL/HKSV_LABEL through exactly
+// this call (renderToggle(..., NEEDS_RESTART.has(key))) — rendering it here,
+// not just reading the label constants, is what proves the word only ever
+// shows up once on the actual control, not twice (once in the label text,
+// once in the marker).
+describe('restart labels do not duplicate the marker', () => {
+  it('says "restart" exactly once on the rendered audio, talkback and hksv controls', () => {
+    for (const label of [AUDIO_LABEL, TALKBACK_LABEL, HKSV_LABEL]) {
+      const { wrap } = renderToggle(makeDoc(), 'cam1-x', label, true) as unknown as { wrap: FakeElement }
+      const occurrences = wrap.textContent.toLowerCase().split('restart').length - 1
+      expect(occurrences, label).toBe(1)
+    }
   })
 })

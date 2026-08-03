@@ -175,19 +175,35 @@ const STDERR_LIMIT = 4000
 const TOKEN_LIMIT = 4096
 
 /**
+ * A trailing `-srtp_out_params` / `-srtp_in_params` whose VALUE has not arrived
+ * yet, with everything after it. Two tokens, not one, which is exactly why
+ * `\S*$` alone was not enough: a chunk ending `"-srtp_out_params "` looks
+ * complete (a flag with nothing to redact), and the next chunk arrives as a bare
+ * key with no flag in front of it to match on. Matching from the flag to the end
+ * of the text keeps flag and value together until both are in hand.
+ */
+const DANGLING_SRTP_FLAG = /-srtp_(?:in|out)_params\s*\S*$/i
+
+/**
  * Splits `text` into the part that is safe to redact now and the part that may
  * still be growing. A stream URL is one whitespace-delimited token, and a `data`
  * event can land anywhere inside it — including between `rtsps:` and the token —
  * so redaction must never run on a trailing fragment. `\S*$` matches exactly the
  * unterminated tail, and `search` returns where it starts.
  *
+ * An SRTP key is held back further still: `redactStreamUrls` can only redact a
+ * key it can SEE the flag for, so a boundary between the flag and its value
+ * would let the value through as an innocent-looking token. The earlier of the
+ * two boundaries wins.
+ *
  * A tail past `tokenLimit` is DROPPED, not returned: holding it until a
- * terminator that may never come is the unbounded buffer, and a whitespace-free
- * run that long is not diagnostics anyway. Dropping cannot leak; redacting a
- * fragment of it can.
+ * terminator that may never come is the unbounded buffer, and a run that long is
+ * not diagnostics anyway. Dropping cannot leak; redacting a fragment of it can.
  */
 export function splitOnLastToken(text: string, tokenLimit = TOKEN_LIMIT): { complete: string, pending: string } {
-  const boundary = text.search(/\S*$/)
+  const flag = text.search(DANGLING_SRTP_FLAG)
+  const tail = text.search(/\S*$/)
+  const boundary = flag === -1 ? tail : Math.min(flag, tail)
   const pending = text.slice(boundary)
   return { complete: text.slice(0, boundary), pending: pending.length > tokenLimit ? '' : pending }
 }
@@ -215,6 +231,14 @@ interface FfmpegProcessOptions {
    * spoke into the first one.
    */
   counted?: boolean
+  /**
+   * Consumes stdout. Recording reads fragmented MP4 from here.
+   *
+   * Deliberately NOT routed through the stderr machinery: that path redacts and
+   * retains text for diagnostics, and this is binary media — buffering it there
+   * would leak memory and log nothing useful. stdout is never logged.
+   */
+  onStdout?: (chunk: Buffer) => void
 }
 
 /** Spawns, tracks and kills a single ffmpeg process. */
@@ -258,6 +282,18 @@ export class FfmpegProcess {
       FfmpegProcess.active++
 
     child.stderr?.on('data', (chunk: Buffer) => this.absorb(chunk.toString()))
+
+    if (this.options.onStdout) {
+      child.stdout?.on('data', (chunk: Buffer) => this.options.onStdout!(chunk))
+      // Load-bearing despite looking empty: Node crashes the HOST process on an
+      // unhandled 'error' event, and a readable pipe raises one on EPIPE or
+      // ECONNRESET when the child dies mid-write. Homebridge going down because
+      // one camera's ffmpeg was killed is not an acceptable failure mode.
+      // Swallowed rather than logged for the same reason as stdin: the death is
+      // reported with better detail by the 'close'/'error' handlers below, and
+      // nothing from stdout may reach a log — it is binary media.
+      child.stdout?.on('error', () => {})
+    }
 
     if (this.options.stdin !== undefined) {
       // A child that has already died (or closed its own stdin) turns this

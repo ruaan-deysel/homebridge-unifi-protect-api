@@ -13,6 +13,43 @@
 //    ambient module is the supported way to type a real, resolvable file by
 //    path suffix.
 
+// ONE element shape for both UI modules. There used to be a second, narrower
+// `MinimalDomElement` inside the config-ops block; because TypeScript is
+// structural, a `renderToggle` result typed by it was assignable wherever a
+// ui-render element was expected, so the narrow type bought nothing and hid
+// the mismatch. Both modules now alias this one.
+interface UiElement {
+  tagName: string
+  id: string
+  value: string
+  type: string
+  checked: boolean
+  selected: boolean
+  textContent: string
+  className: string
+  style: { display: string }
+  attributes: Record<string, string>
+  dataset: Record<string, string>
+  tabIndex: number
+  setAttribute: (name: string, value: string) => void
+  addEventListener: (type: 'click' | 'keydown' | 'change', handler: (event: { key?: string }) => void) => void
+  focus: () => void
+  // `append` and `replaceChildren` are deliberately NOT declared, even though
+  // the UI modules call both. They take the element type in PARAMETER
+  // position, and this repo's eslint requires function properties over method
+  // shorthand (`ts/method-signature-style`), which means `strictFunctionTypes`
+  // checks them contravariantly: a fake element RICHER than this interface
+  // stops being assignable rather than starting to be. Declaring them made
+  // every `renderDetail(doc, …)` call in the tests a TS2345. Nothing reads
+  // either one THROUGH this type — the tests hold a concrete FakeElement — so
+  // declaring them bought no checking and cost 39 errors. Do not re-add them
+  // as arrow properties. Every other member below IS enforced: drop `focus`
+  // from FakeElement and `npm run lint` fails at all 39 call sites.
+}
+interface UiDocument {
+  createElement: (tag: string) => UiElement
+}
+
 declare module '*/homebridge-ui/server.js' {
   export interface HttpDependencies {
     fetchImpl?: (url: string, init?: { headers?: Record<string, string>, consoleCert?: string }) => Promise<Response>
@@ -59,10 +96,13 @@ declare module '*/homebridge-ui/server.js' {
 }
 
 declare module '*/homebridge-ui/public/config-ops.js' {
+  export type IcloudTier = '50gb' | '200gb' | '2tb'
+
   export interface Defaults {
     exposeNewDevices: boolean
     quality: string
     hksv: boolean
+    icloudTier: IcloudTier
   }
 
   export interface DeviceOverride {
@@ -80,7 +120,14 @@ declare module '*/homebridge-ui/public/config-ops.js' {
   }
 
   export const DEFAULTS: Defaults
+  export const RECORDING_LIMITS: Record<IcloudTier, number>
+  /**
+   * `Record<IcloudTier, string>`, so adding a tier without a label is a type
+   * error rather than a warning that prints the raw config key at the user.
+   */
+  export const TIER_LABELS: Record<IcloudTier, string>
   export function ensureConfig(raw?: Partial<ConfigShape> | null): ConfigShape
+  export function parseIcloudTier(raw: unknown): IcloudTier
   export function setDeviceSetting(
     config: ConfigShape,
     deviceId: string,
@@ -92,14 +139,8 @@ declare module '*/homebridge-ui/public/config-ops.js' {
   export function parseMaxStreams(raw: unknown): number | undefined
   export function setGlobalSetting(config: ConfigShape, key: string, value: unknown): ConfigShape
 
-  export interface MinimalDomElement {
-    tagName: string
-    textContent: string
-    className: string
-  }
-  export interface MinimalDocument {
-    createElement: (tag: string) => MinimalDomElement
-  }
+  export type MinimalDomElement = UiElement
+  export type MinimalDocument = UiDocument
   export function renderDeviceHeader(
     doc: MinimalDocument,
     device: { name?: string, type?: string },
@@ -107,6 +148,7 @@ declare module '*/homebridge-ui/public/config-ops.js' {
 
   export const AUDIO_LABEL: string
   export const TALKBACK_LABEL: string
+  export const HKSV_LABEL: string
   export const QUALITY_OPTIONS: [string, string][]
   export function renderQualitySelect(
     doc: MinimalDocument,
@@ -120,10 +162,74 @@ declare module '*/homebridge-ui/public/config-ops.js' {
     doc: MinimalDocument,
     id: string,
     label: string,
+    needsRestart?: boolean,
   ): { wrap: MinimalDomElement, input: MinimalDomElement }
 
+  export function debounce<T extends (...args: never[]) => void>(
+    fn: T,
+    ms: number,
+  ): ((...args: Parameters<T>) => void) & { flush: () => void }
+  export const SAVE_DEBOUNCE_MS: number
+  export const NEEDS_RESTART: ReadonlySet<'audio' | 'talkback' | 'hksv'>
+
+  export interface RecordingDevice {
+    id: string
+    type: string
+    hasPackageCamera?: boolean
+  }
+  export function recordingCount(config: ConfigShape, devices: RecordingDevice[]): number
+  export function tierWarning(config: ConfigShape, devices: RecordingDevice[]): string | undefined
+
   export function defaultFor(config: ConfigShape, key: string): unknown
+  export function isOverridden(config: ConfigShape, deviceId: string, key: string): boolean
+  export function clearDeviceSetting(config: ConfigShape, deviceId: string, key: string): ConfigShape
   export function cameraToggles(
     device: { type?: string, hasMic?: boolean, hasSpeaker?: boolean, hasPackageCamera?: boolean },
-  ): { key: string, label: string, comingLater?: boolean }[]
+  ): { key: string, label: string, comingLater?: boolean, section: 'Live view' | 'Recording' | 'Extra accessories' }[]
+}
+
+declare module '*/homebridge-ui/public/ui-render.js' {
+  export type MinimalDomElement = UiElement
+  export type MinimalDocument = UiDocument
+  export function renderTabs(
+    doc: MinimalDocument,
+    labels: string[],
+  ): {
+    tablist: MinimalDomElement
+    panes: MinimalDomElement[]
+    buttons: MinimalDomElement[]
+    select: (index: number, options?: { focus?: boolean }) => void
+  }
+
+  export interface ListedDevice {
+    id: string
+    name: string
+    type: string
+  }
+  export function renderDeviceList(
+    doc: MinimalDocument,
+    devices: ListedDevice[],
+    onSelect: (id: string) => void,
+  ): {
+    list: MinimalDomElement
+    filter: (term: string) => void
+    rows: () => MinimalDomElement[]
+  }
+
+  export function renderDetail(
+    doc: MinimalDocument,
+    device: { name: string },
+  ): {
+    pane: MinimalDomElement
+    heading: MinimalDomElement
+    bodies: Record<'General' | 'Live view' | 'Recording' | 'Extra accessories', MinimalDomElement>
+    mount: (container: MinimalDomElement) => void
+  }
+
+  export function renderBadge(
+    doc: MinimalDocument,
+    overridden: boolean,
+    onReset: () => void,
+    label?: string,
+  ): { badge: MinimalDomElement, reset: MinimalDomElement | undefined }
 }

@@ -1,10 +1,12 @@
-import type { API, CameraStreamingOptions, DynamicPlatformPlugin, HAP, Logging, PlatformAccessory, PlatformConfig } from 'homebridge'
+import type { API, CameraRecordingOptions, CameraStreamingOptions, DynamicPlatformPlugin, HAP, Logging, PlatformAccessory, PlatformConfig } from 'homebridge'
 import type { z } from 'zod'
 import type { CameraCallbacks } from './accessories/camera.js'
 import type { SensorChange } from './accessories/tracker.js'
 import type { ProtectPluginConfig } from './config.js'
 import type { FfmpegCapabilities, RunFfmpeg } from './protect/ffmpeg.js'
 import { applyChange, buildCameraServices, isUnderstood } from './accessories/camera.js'
+import { ADVERTISED_RECORDING_SIZE } from './accessories/quality.js'
+import { RecordingDelegate } from './accessories/recording.js'
 import { routeEvent } from './accessories/router.js'
 import { StreamingDelegate } from './accessories/streaming.js'
 import { EventTracker } from './accessories/tracker.js'
@@ -153,6 +155,88 @@ function packageVideoStreamingOptions(hap: HAP): CameraStreamingOptions['video']
   }
 }
 
+/**
+ * HomeKit's own default fragment length, in milliseconds, and the value this
+ * hardware was measured against. Doubles as the prebuffer length, which HAP
+ * requires to be at least 4000.
+ */
+const HKSV_FRAGMENT_MS = 4000
+
+/**
+ * What a camera with `hksv` enabled advertises to HomeKit Secure Video.
+ *
+ * Audio is AAC-LC and NOTHING else. HKSV permits only AAC-LC or AAC-ELD, so
+ * Opus — which live view prefers on this host, because its hardware ffmpeg
+ * build carries libopus and no libfdk_aac — is illegal here. The two paths
+ * differ on purpose; see `recordingArgs`, which encodes with ffmpeg's native
+ * `aac` at the 32 kHz advertised below.
+ *
+ * `overrideEventTriggerOptions` rather than `sensors: { motion: true }`:
+ * hap-nodejs derives the MOTION trigger from a CONTROLLER-owned MotionSensor,
+ * and `camera.ts` already builds this camera's subtyped motion sensors off the
+ * event pipeline — letting the controller add its own would show motion twice
+ * in Home.app. With an empty trigger set HomeKit has nothing to start a
+ * recording on, so the additive override supplies the trigger and no service.
+ *
+ * DOORBELL is added the same additive way, for a doorbell only. The alternative
+ * — a `DoorbellController`, whose only functional difference is that its
+ * `retrieveEventTriggerOptions()` adds this very bit — also constructs and OWNS
+ * a primary Doorbell service, which would land beside the subtyped `ring` one
+ * `camera.ts` already drives. Nothing in hap-nodejs 2.1.9 couples the bit to
+ * that service: `RecordingManagement` only ORs the set into the
+ * `SupportedCameraRecordingConfiguration` bitmask, and neither it nor the HDS
+ * recording path ever looks for a Doorbell. The press itself still reaches
+ * HomeKit through the `ring` service on the same accessory, exactly as before.
+ *
+ * ONLY 1280x720 is advertised, and that is deliberate. `recordingArgs` applies
+ * no scale filter — it transcodes whatever substream it opens — so an
+ * advertised resolution is only honest if `selectQuality` maps it to a
+ * substream of exactly that size. 1280x720 maps to `medium`, which the console
+ * serves at exactly 1280x720. 1920x1080 was advertised here until it was
+ * noticed that `selectQuality` maps it to `high` (2688x1512), so HomeKit would
+ * have negotiated 1080p and been handed something else entirely. Advertising a
+ * resolution the encoder does not deliver is how the package camera earned two
+ * rounds of "No Response" with nothing in the log.
+ *
+ * A scale filter would let the full ladder be advertised, but `scale_vaapi`
+ * fails on this host with `Cannot allocate memory`, so that is not a free fix.
+ *
+ * KNOWN GAP, for the hardware gate: a per-camera `quality` preference
+ * short-circuits `selectQuality`, so a user who forces `high` still gets
+ * 2688x1512 fragments against a negotiated 1280x720.
+ */
+function recordingOptions(hap: HAP, doorbell: boolean): CameraRecordingOptions {
+  return {
+    prebufferLength: HKSV_FRAGMENT_MS,
+    overrideEventTriggerOptions: doorbell
+      ? [hap.EventTriggerOption.MOTION, hap.EventTriggerOption.DOORBELL]
+      : [hap.EventTriggerOption.MOTION],
+    mediaContainerConfiguration: {
+      type: hap.MediaContainerType.FRAGMENTED_MP4,
+      fragmentLength: HKSV_FRAGMENT_MS,
+    },
+    video: {
+      type: hap.VideoCodecType.H264,
+      parameters: {
+        profiles: [hap.H264Profile.BASELINE, hap.H264Profile.MAIN, hap.H264Profile.HIGH],
+        levels: [hap.H264Level.LEVEL3_1, hap.H264Level.LEVEL3_2, hap.H264Level.LEVEL4_0],
+      },
+      resolutions: [
+        [...ADVERTISED_RECORDING_SIZE, 30],
+        [...ADVERTISED_RECORDING_SIZE, 15],
+      ],
+    },
+    audio: {
+      codecs: [{
+        type: hap.AudioRecordingCodecType.AAC_LC,
+        audioChannels: 1,
+        bitrateMode: hap.AudioBitrate.VARIABLE,
+        samplerate: hap.AudioRecordingSamplerate.KHZ_32,
+      }],
+    },
+  }
+}
+
 /** The package accessory's UUID seed. Never equal to the camera's own. */
 function packageSeed(deviceId: string): string {
   return `${deviceId}-package`
@@ -211,6 +295,15 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
    * Also the guard against a second `configureController` on a later discovery.
    */
   private readonly delegates = new Map<string, StreamingDelegate>()
+  /**
+   * Accessory UUID -> its HKSV recording delegate, for the cameras that enabled
+   * recording. A SEPARATE map from `delegates` only because the types differ —
+   * every place that reaches into `delegates` to stop or drop a live view must
+   * do the same here, and for a stronger reason: a recording delegate owns a
+   * CONTINUOUSLY running ffmpeg plus a restart timer that retries forever by
+   * design, so one left behind is a permanent transcode and a permanent timer.
+   */
+  private readonly recorders = new Map<string, RecordingDelegate>()
   private eventsStarted = false
   private busWired = false
   private inFlight?: Promise<void>
@@ -339,6 +432,11 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
           this.log.warn(`Could not stop a live view cleanly during shutdown: ${errorMessage(error)}`)
         }
       }
+      // Same reason, and a stronger one: a recording encoder runs continuously,
+      // and its restart timer retries forever. A snapshot of the keys, because
+      // disposeRecorder deletes from the map it would otherwise be iterating.
+      for (const uuid of [...this.recorders.keys()])
+        this.disposeRecorder(uuid)
       this.events?.stop()
       // Every active event holds a failsafe timer. Leaked, they keep the Node
       // process alive and Homebridge never finishes shutting down.
@@ -604,6 +702,11 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
       return
 
     const label = accessory.displayName
+    // The SAME predicate `camera.ts`'s `desiredSubtypes` uses to decide whether
+    // this device gets a `ring` Doorbell service at all — only a doorbell has a
+    // speaker on this hardware. Reused so the DOORBELL recording trigger is
+    // advertised exactly when a Doorbell service exists to fire it.
+    const isDoorbell = device.featureFlags?.hasSpeaker === true
     const delegate = new StreamingDelegate({
       deviceId: device.id,
       label,
@@ -621,7 +724,7 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
         const settings = settingsFor(this.config!, device.id)
         return { quality: settings.quality, audio: settings.audio, talkback: settings.talkback }
       },
-      hasSpeaker: device.featureFlags?.hasSpeaker === true,
+      hasSpeaker: isDoorbell,
     })
     // Claimed before the await below, so a discovery arriving mid-probe cannot
     // build a second controller for the same accessory.
@@ -646,6 +749,24 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
         this.log.warn(`Audio is enabled for "${label}" but no codec HomeKit accepts could be advertised, so live view will be video-only. The ffmpeg at ${this.caps.path} can encode neither libopus nor libfdk_aac.`)
       }
 
+      // Only where the user turned it on. A recording delegate is a
+      // continuously running ffmpeg per camera, so building one for a camera
+      // that did not ask for it is a permanent transcode nobody wanted.
+      const recorder = settingsFor(this.config!, device.id).hksv
+        ? new RecordingDelegate({
+            deviceId: device.id,
+            label,
+            log: this.log,
+            urls: this.urls!,
+            caps: this.caps,
+            // Both read on every encoder start, never snapshotted, so a setting
+            // changed in the UI takes effect on the next restart rather than
+            // needing a whole Homebridge restart.
+            audioActive: () => settingsFor(this.config!, device.id).audio,
+            quality: () => settingsFor(this.config!, device.id).quality,
+          })
+        : undefined
+
       accessory.configureController(new this.api.hap.CameraController({
         cameraStreamCount: delegate.maxStreams,
         delegate,
@@ -654,7 +775,18 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
           video: videoStreamingOptions(this.api.hap),
           audio,
         },
+        // Absent entirely when recording is off — an empty object here would
+        // still make hap-nodejs build the whole RecordingManagement. hap-nodejs
+        // creates the CameraOperatingMode service itself from this; never add
+        // it by hand.
+        ...(recorder ? { recording: { options: recordingOptions(this.api.hap, isDoorbell), delegate: recorder } } : {}),
       }))
+      // AFTER configureController, so a throw from it leaves nothing registered
+      // that the removal sweep would have to clean up.
+      if (recorder) {
+        this.recorders.set(accessory.UUID, recorder)
+        this.log.info(`HomeKit Secure Video is enabled for "${label}".`)
+      }
     }
     catch (error) {
       this.delegates.delete(accessory.UUID)
@@ -788,6 +920,44 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
     return uuid
   }
 
+  /**
+   * Stops and forgets an accessory's recording delegate, if it has one.
+   *
+   * `updateRecordingActive(false)` IS the disposal, with no new logic behind it:
+   * it clears the restart timer, stops the process, runs `teardown()` — which
+   * closes every open HDS stream and clears the prebuffer — and leaves
+   * `active = false`, so a `scheduleRestart` already in flight returns early.
+   *
+   * Guarded, for the same reason the live-view stop beside it is: one throwing
+   * must not abandon the rest of the shutdown or the unregistration.
+   *
+   * The entry is dropped LAST, and only once the encoder is really gone. A
+   * `kill()` that was not delivered is honoured everywhere else in this feature
+   * — `stopEncoder` keeps the process handle precisely so a later stop can retry
+   * — and deleting the map entry first defeated that: the delegate holding the
+   * only handle became unreachable, no later attempt could exist, and the ffmpeg
+   * outlived the accessory and the plugin. `encoding` is the runtime observable
+   * of exactly that state, so a delegate that still has a live process stays in
+   * the map for the next disposal (accessory removal, then shutdown) to retry.
+   */
+  private disposeRecorder(uuid: string): void {
+    const recorder = this.recorders.get(uuid)
+    if (!recorder)
+      return
+    try {
+      recorder.updateRecordingActive(false)
+    }
+    catch (error) {
+      // errorMessage, and the STRING — see prepareStreaming.
+      this.log.warn(`Could not stop the recording encoder of "${this.accessories.get(uuid)?.displayName ?? uuid}" cleanly: ${errorMessage(error)}`)
+    }
+    if (recorder.encoding) {
+      this.log.warn(`The recording encoder of "${this.accessories.get(uuid)?.displayName ?? uuid}" could not be stopped and may still be running; it will be retried on shutdown.`)
+      return
+    }
+    this.recorders.delete(uuid)
+  }
+
   private async reconcile(devices: DiscoveredDevice[]): Promise<void> {
     const config = this.config!
     const wanted = new Map<string, DiscoveredDevice>()
@@ -911,6 +1081,12 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
           this.log.warn(`Could not stop the live view of "${accessory.displayName}" while removing it: ${errorMessage(error)}`)
         }
       }
+      // Same, and it matters more: the restart policy retries indefinitely by
+      // design, so a recorder left behind is one live timer plus a retained
+      // delegate for the life of the process — and a HEALTHY encoder for a
+      // removed camera would never stop at all, because a long run zeroes the
+      // failure tally.
+      this.disposeRecorder(uuid)
       this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory])
       this.accessories.delete(uuid)
       this.pendingRemoval.delete(uuid)
@@ -986,8 +1162,10 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
     try {
       for (const change of changes) {
         const accessory = this.accessories.get(this.api.hap.uuid.generate(change.deviceId))
-        if (accessory)
+        if (accessory) {
           applyChange(this.api, accessory, change)
+          this.logSensorChange(accessory.displayName, change)
+        }
       }
     }
     catch (error) {
@@ -996,6 +1174,31 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
       // error's request context in this repo before.
       this.log.warn(`Could not apply a sensor change: ${errorMessage(error)}`)
     }
+  }
+
+  /**
+   * The success path, logged. Motion is the trigger for every HKSV recording,
+   * and it used to reach HomeKit in total silence — so when a walk past a
+   * camera produced no clip there was no way to tell from the log whether
+   * motion had fired at all or HomeKit had ignored it. Talkback shipped with
+   * exactly that hole and it cost a hardware-gate round.
+   *
+   * `subtype` is this plugin's own string ('motion', 'smart-person', 'ring',
+   * 'audio-alrmSmoke'…), never console-supplied text, so it is safe to log.
+   * The display name comes from the console and is attacker-controlled, but a
+   * log line is not markup and Homebridge escapes nothing — it is quoted for
+   * readability only.
+   *
+   * Motion START at info because that is the line a user watching a hardware
+   * test needs to see without turning on debug. Everything else — the clear,
+   * and every non-motion sensor — at debug, or five outdoor cameras would fill
+   * the log with a line per passing car.
+   */
+  private logSensorChange(label: string, change: SensorChange): void {
+    if (change.subtype === 'motion' && change.active)
+      this.log.info(`Motion detected on "${label}".`)
+    else
+      this.log.debug(`Sensor "${change.subtype}" on "${label}" is now ${change.active ? 'active' : 'clear'}.`)
   }
 
   /** Frames arrive unvalidated. Nothing in here may throw back into the socket. */
