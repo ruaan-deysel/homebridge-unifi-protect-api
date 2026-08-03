@@ -200,38 +200,66 @@ describe('uniFiProtectPlatform', () => {
     expect(api.registerPlatformAccessories).not.toHaveBeenCalled()
   })
 
-  // A device name is whatever the Protect console says it is, and anyone who can
-  // rename a camera picks it. Homebridge's logger writes to console.log with no
-  // escaping, so a newline forges log lines and an ESC drives the operator's
-  // terminal. Sanitised at `labelFor`, the one door those names come through, so
-  // every later use of the label — displayName, the delegates', every log line
-  // quoting either — is already clean.
-  it('strips control characters out of a console-supplied device name', async () => {
-    const forged = 'Cam\nera\u001B]0;pwned\u0007'
-    const { platform } = makePlatform(validConfig, [{ id: 'cam1', name: forged, modelKey: 'camera' }])
+  // A device name is whatever the Protect console says it is, and anyone who
+  // can rename a camera picks it — as are its `modelKey` and `id`, which the
+  // label fallback and several log lines interpolate raw. Homebridge's logger
+  // writes to console.log with no escaping, so a newline forges log lines and
+  // an ESC drives the operator's terminal. Sanitised at the LOGGER, so a line
+  // built anywhere — here, camera.ts's own label, a cached displayName — is
+  // clean without that site having to know about it.
+  it('strips control characters out of every console-supplied field that reaches a log line', async () => {
+    const forged = {
+      id: 'cam1\u2028\u001B[2Jid',
+      name: 'Cam\nera\u001B]0;pwned\u0007',
+      modelKey: 'camera',
+    }
+    const { platform } = makePlatform(validConfig, [])
+    platform.client.getCameras = vi.fn(async () => [forged]) as never
 
     await platform.discover()
 
-    const label = platform.accessories.get('uuid-cam1')!.displayName
     // Readable, and inert: the ESC that introduced the OSC sequence is gone, so
     // what is left is printable text no terminal will act on.
-    expect(label).toBe('Cam era ]0;pwned')
-    const added = log.info.mock.calls.flat().filter(line => typeof line === 'string' && line.includes('Added'))
-    expect(added).toHaveLength(1)
-    // eslint-disable-next-line no-control-regex -- control characters are the point.
-    expect(added[0]).not.toMatch(/[\u0000-\u001F\u007F-\u009F]/)
-    expect(added[0]).toContain('Cam era ]0;pwned')
+    const label = 'Cam era ]0;pwned'
+    expect(platform.accessories.get(`uuid-${forged.id}`)!.displayName).toBe(label)
+    // The exact strings handed to the logger.
+    const added = log.info.mock.calls.flat().filter(line => typeof line === 'string' && line.startsWith('Added'))
+    expect(added).toEqual([`Added camera "${label}".`])
+    // camera.ts builds its own label straight from `device.name` and never
+    // touches safeText — this line proves the wrapper covers it regardless.
+    const services = log.debug.mock.calls.flat().filter(line => typeof line === 'string' && line.includes('service to'))
+    // Trailing space, not a typo: camera.ts keeps the BEL that terminated the
+    // OSC sequence, and the wrapper turns it into a space mid-message.
+    expect(services).toEqual([`Added motion service to "${label} ".`])
+    const everything = [...log.info.mock.calls, ...log.debug.mock.calls, ...log.warn.mock.calls].flat()
+    for (const line of everything.filter(v => typeof v === 'string'))
+      // eslint-disable-next-line no-control-regex -- control characters are the point.
+      expect(line).not.toMatch(/[\u0000-\u001F\u007F-\u009F\u2028\u2029\u202A-\u202E\u2066-\u2069]/)
   })
 
-  // The name is the only part of a label that comes off the wire, so a device
-  // with no usable name must not lose its generated one to the sanitiser.
-  it('keeps ordinary names untouched and still falls back for an unusable one', async () => {
+  // With no usable name the label falls back to `Protect <modelKey> <id>`, and
+  // both of those come off the wire too. This one becomes displayName, which
+  // HomeKit renders — the log wrapper cannot reach that copy.
+  it('keeps ordinary names untouched and sanitises the generated fallback', async () => {
     expect(safeText('Front Door 2')).toBe('Front Door 2')
-    const { platform } = makePlatform(validConfig, [{ id: 'cam1', name: '\u001B\u001B', modelKey: 'camera' }])
+    const forged = { id: 'cam1\u001B]0;x', name: '\u001B\u001B', modelKey: 'camera\nreboot' }
+    const { platform } = makePlatform(validConfig, [])
+    platform.client.getCameras = vi.fn(async () => [forged]) as never
 
     await platform.discover()
 
-    expect(platform.accessories.get('uuid-cam1')!.displayName).toBe('Protect camera cam1')
+    expect(platform.accessories.get(`uuid-${forged.id}`)!.displayName).toBe('Protect camera reboot cam1 ]0;x')
+    // `Added ${device.modelKey}` interpolates the raw field; the wrapper is the
+    // only thing between it and console.log.
+    const added = log.info.mock.calls.flat().filter(line => typeof line === 'string' && line.startsWith('Added'))
+    expect(added).toEqual(['Added camera reboot "Protect camera reboot cam1 ]0;x".'])
+  })
+
+  // Bidi controls forge nothing, they REORDER the line, so an operator reads
+  // text nobody wrote; U+2028 splits a line in the Homebridge UI's browser log
+  // viewer even though a terminal ignores it.
+  it('strips bidi and line-separator characters, not only C0/C1 controls', async () => {
+    expect(safeText('Gate\u202Ereverse\u2066d\u2069\u2028name next')).toBe('Gate reverse d name next')
   })
 
   // Entries carry credential-bearing RTSPS URLs and the cache is process-wide,

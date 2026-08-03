@@ -18,6 +18,16 @@ export class StreamUrls {
   private readonly inFlight = new Map<string, Promise<string>>()
   /** Bumped by clear(), so a request started before it cannot repopulate the cache. */
   private generation = 0
+  /**
+   * Per-key counter, bumped by evict(). Same job as `generation` but for one
+   * camera, because evict() must not make every OTHER camera's in-flight fetch
+   * skip the cache — that is live view's path.
+   *
+   * ponytail: never pruned. One small integer per camera per quality, bounded
+   * by the console's device count, and dropping an entry is what would let a
+   * fetch that started before the evict look current again.
+   */
+  private readonly keyGenerations = new Map<string, number>()
 
   constructor(
     private readonly client: Pick<ProtectClient, 'getRtspsStream' | 'createRtspsStream'>,
@@ -50,6 +60,7 @@ export class StreamUrls {
 
   private async fetch(deviceId: string, quality: Quality | 'package', key: string): Promise<string> {
     const generation = this.generation
+    const keyGeneration = this.keyGenerations.get(key) ?? 0
     let url: string | undefined
     try {
       const existing = await this.client.getRtspsStream(deviceId)
@@ -68,9 +79,11 @@ export class StreamUrls {
     if (!url)
       throw new Error(`The console did not provide a ${quality} stream for camera ${deviceId}.`)
 
-    // A clear() during the request means the caller asked for these to be
-    // forgotten; a late answer must not put one straight back.
-    if (generation === this.generation)
+    // A clear() or an evict() during the request means the caller asked for
+    // these to be forgotten; a late answer must not put one straight back. The
+    // URL is still returned to whoever is waiting on it — they asked before the
+    // eviction — it just is not remembered.
+    if (generation === this.generation && (this.keyGenerations.get(key) ?? 0) === keyGeneration)
       this.cache.set(key, { url, at: performance.now() })
     return url
   }
@@ -82,20 +95,22 @@ export class StreamUrls {
    * per quality behind forever — a TTL miss does not drop the entry, it only
    * refetches it.
    *
-   * ponytail: no generation bump, so a fetch already in flight for this camera
-   * can still land one entry back. Deliberate — the generation is process-wide,
-   * and bumping it would make every OTHER camera's in-flight fetch skip the
-   * cache too, which is live view's path. Upgrade to per-key generations only
-   * if that one-entry race ever matters.
+   * A fetch already in flight for this camera is left running and left joinable
+   * — dropping it from `inFlight` would only make a concurrent `get` open a
+   * SECOND stream against the console — but its per-key generation is bumped,
+   * so when it answers it will not write the entry back.
+   *
+   * A package accessory shares its parent's device id, so removing one also
+   * drops the parent's entries. That costs a refetch on the next stream,
+   * nothing more.
    */
   evict(deviceId: string): void {
-    for (const key of [...this.cache.keys()]) {
-      if (key.startsWith(`${deviceId}:`))
-        this.cache.delete(key)
-    }
-    for (const key of [...this.inFlight.keys()]) {
-      if (key.startsWith(`${deviceId}:`))
-        this.inFlight.delete(key)
+    const prefix = `${deviceId}:`
+    for (const key of [...this.cache.keys(), ...this.inFlight.keys()]) {
+      if (!key.startsWith(prefix))
+        continue
+      this.cache.delete(key)
+      this.keyGenerations.set(key, (this.keyGenerations.get(key) ?? 0) + 1)
     }
   }
 

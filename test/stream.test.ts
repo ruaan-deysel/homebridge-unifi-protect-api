@@ -132,6 +132,85 @@ describe('streamUrls', () => {
     expect(client.getRtspsStream).toHaveBeenCalledTimes(2)
   })
 
+  // The removal path exists to stop credential-bearing URLs accumulating for
+  // cameras that are gone. A fetch already in flight when the accessory was
+  // removed would otherwise write one straight back, and nothing evicts it a
+  // second time.
+  it('does not let a request in flight over evict() repopulate the cache', async () => {
+    let release = (): void => {}
+    const parked = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const client = {
+      getRtspsStream: vi.fn(async () => {
+        await parked
+        return { high: URL_HIGH }
+      }),
+      createRtspsStream: vi.fn(async () => ({})),
+    }
+    const urls = new StreamUrls(client as never)
+    const inFlight = urls.get('cam1', 'high')
+    urls.evict('cam1')
+    release()
+    // Still answered: this caller asked before the eviction.
+    expect(await inFlight).toBe(URL_HIGH)
+
+    // ...but not remembered. A cache hit here would be the credential coming
+    // back for a camera that no longer exists.
+    await urls.get('cam1', 'high')
+    expect(client.getRtspsStream).toHaveBeenCalledTimes(2)
+  })
+
+  // The per-key generation must be per KEY: bumping the process-wide one would
+  // make every other camera's in-flight fetch skip the cache, and live view is
+  // the caller that fetch coalescing exists for.
+  it('evict() does not stop another camera in-flight request from caching', async () => {
+    let release = (): void => {}
+    const parked = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const client = {
+      getRtspsStream: vi.fn(async () => {
+        await parked
+        return { high: URL_HIGH }
+      }),
+      createRtspsStream: vi.fn(async () => ({})),
+    }
+    const urls = new StreamUrls(client as never)
+    const inFlight = urls.get('cam2', 'high')
+    urls.evict('cam1')
+    release()
+    expect(await inFlight).toBe(URL_HIGH)
+
+    expect(await urls.get('cam2', 'high')).toBe(URL_HIGH)
+    expect(client.getRtspsStream).toHaveBeenCalledTimes(1)
+  })
+
+  // Dropping the in-flight entry on evict() would leave a concurrent live-view
+  // get with nothing to join, and it would open a SECOND stream on the console
+  // for the same substream.
+  it('evict() leaves an in-flight request joinable', async () => {
+    let release = (): void => {}
+    const parked = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const client = {
+      getRtspsStream: vi.fn(async () => {
+        await parked
+        return { high: URL_HIGH }
+      }),
+      createRtspsStream: vi.fn(async () => ({})),
+    }
+    const urls = new StreamUrls(client as never)
+    const first = urls.get('cam1', 'high')
+    urls.evict('cam1')
+    const joined = urls.get('cam1', 'high')
+    release()
+    expect(await first).toBe(URL_HIGH)
+    expect(await joined).toBe(URL_HIGH)
+    expect(client.getRtspsStream).toHaveBeenCalledTimes(1)
+  })
+
   it('reports a client failure without re-throwing the error that carries the api key', async () => {
     const client = {
       getRtspsStream: vi.fn(async () => {

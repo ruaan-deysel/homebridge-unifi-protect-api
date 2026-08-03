@@ -89,30 +89,73 @@ const CONFIRM_MIN_MS = 60_000
 const LED_WRITE_GRACE_MS = 10_000
 
 /**
- * Strips every C0/C1 control character from console-supplied text.
+ * Strips the characters that let console-supplied text rewrite a log line.
  *
- * A device name is whatever the Protect console says it is, and anyone who can
- * rename a camera chooses it. Homebridge's logger writes to `console.log` with
- * no escaping, so a name containing a newline forges log lines and one
- * containing ESC drives the operator's terminal (colour, title, cursor moves).
- * Removing the controls is enough to neutralise BOTH: every ANSI/OSC sequence
- * needs an ESC or a C1 introducer, and BEL — the OSC terminator — is a control
- * too, so what is left is inert printable text. Ordinary names are untouched.
+ * A device name — and its `modelKey` and `id` — are whatever the Protect
+ * console says they are, and anyone who can rename a camera chooses them.
+ * Homebridge's logger writes to `console.log` with no escaping, so a name
+ * containing a newline forges log lines and one containing ESC drives the
+ * operator's terminal (colour, title, cursor moves).
  *
- * Applied HERE rather than at each log call because this is the one door those
- * names come through: `accessory.displayName`, the delegates' `label`, and
- * every line either of them appears in all derive from this return value.
+ * Removed, and why:
+ * - C0/C1 controls: every ANSI/OSC sequence needs an ESC or a C1 introducer,
+ *   and BEL — the OSC terminator — is a control too, so dropping them
+ *   neutralises the terminal driving and the newline forging in one go.
+ * - U+2028/U+2029: line separators, which split a line in the Homebridge UI's
+ *   browser-side log viewer even though a terminal ignores them.
+ * - Bidi controls (U+061C, U+200E/F, U+202A-202E, U+2066-2069): these do not
+ *   forge a line, they visually reorder one, so a name could make an entry
+ *   read as text nobody wrote.
+ *
+ * What is left renders as itself, in order, on one line. It is NOT
+ * unicode-normalised or homoglyph-checked — a Cyrillic "а" still looks like an
+ * "a". Ordinary names are untouched.
  */
 export function safeText(value: string): string {
   // eslint-disable-next-line no-control-regex -- control characters are the point.
-  return value.replace(/[\u0000-\u001F\u007F-\u009F]+/g, ' ').trim()
+  return value.replace(/[\u0000-\u001F\u007F-\u009F\u061C\u200E\u200F\u2028\u2029\u202A-\u202E\u2066-\u2069]+/g, ' ').trim()
+}
+
+/**
+ * The chokepoint. Wraps a Homebridge logger so every message this plugin logs
+ * is sanitised on the way out, whoever composed it.
+ *
+ * Applying `safeText` at each site that touches a device name was tried and
+ * leaked: the label fallback interpolated the raw `modelKey`/`id`, camera.ts
+ * builds its own label straight from `device.name`, and the removal sweep logs
+ * a cached `displayName` that predates any sanitising. There is no way to
+ * enumerate those sites and stay right as the code grows. All of them end at
+ * `log.*`, so that is where it goes — the platform wraps its logger once in the
+ * constructor and hands the wrapper to the client, the event bus and every
+ * delegate, so they are all covered without knowing about this.
+ *
+ * Params are sanitised too, but only when they are strings: Homebridge passes
+ * them to `util.format`, and inspecting an arbitrary object here is the same
+ * mistake as logging an error object, which has printed the API key out of
+ * this repo before.
+ */
+export function sanitizingLog(log: Logging): Logging {
+  const clean = (value: unknown): unknown => (typeof value === 'string' ? safeText(value) : value)
+  const wrapped = ((message: string, ...params: unknown[]) => log(safeText(message), ...params.map(clean))) as Logging
+  wrapped.prefix = log.prefix
+  wrapped.info = (message, ...params) => log.info(safeText(message), ...params.map(clean))
+  wrapped.success = (message, ...params) => log.success(safeText(message), ...params.map(clean))
+  wrapped.warn = (message, ...params) => log.warn(safeText(message), ...params.map(clean))
+  wrapped.error = (message, ...params) => log.error(safeText(message), ...params.map(clean))
+  wrapped.debug = (message, ...params) => log.debug(safeText(message), ...params.map(clean))
+  wrapped.log = (level, message, ...params) => log.log(level, safeText(message), ...params.map(clean))
+  return wrapped
 }
 
 function labelFor(device: DiscoveredDevice): string {
   // `typeof`, not `?.`: `validate` degrades to the raw payload, so `name` is
   // only probably a string, and a method call on a number would throw inside a
   // fire-and-forget discovery.
-  return (typeof device.name === 'string' ? safeText(device.name) : '') || `Protect ${device.modelKey} ${device.id}`
+  const named = typeof device.name === 'string' ? safeText(device.name) : ''
+  // The fallback interpolates console-supplied values too, and this label
+  // becomes `accessory.displayName` — which HomeKit renders, where the log
+  // wrapper cannot reach.
+  return named || safeText(`Protect ${device.modelKey} ${device.id}`)
 }
 
 /**
@@ -415,11 +458,19 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
     },
   }
 
+  /**
+   * Sanitised (see `sanitizingLog`), and the only logger anything in this
+   * plugin gets — the client, the event bus and every delegate are handed
+   * THIS, not the raw Homebridge one.
+   */
+  private readonly log: Logging
+
   constructor(
-    private readonly log: Logging,
+    log: Logging,
     rawConfig: PlatformConfig,
     private readonly api: API,
   ) {
+    this.log = sanitizingLog(log)
     const parsed = parseConfig(rawConfig)
     if (!parsed.success) {
       const detail = parsed.error.issues.map(i => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ')
