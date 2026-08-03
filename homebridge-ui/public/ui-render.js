@@ -42,11 +42,23 @@ export function renderTabs(doc, labels) {
     b.tabIndex = -1
     b.textContent = label
     b.addEventListener('click', () => select(i))
+    // Home/End alongside the arrows: the WAI-ARIA tabs pattern lists them as
+    // optional, but with four tabs they are the difference between one
+    // keystroke and three. Arrows wrap, so Home/End are not merely shortcuts
+    // for holding an arrow down — they are unambiguous.
     b.addEventListener('keydown', (event) => {
-      if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft')
+      const target = {
+        ArrowRight: (i + 1) % labels.length,
+        ArrowLeft: (i - 1 + labels.length) % labels.length,
+        Home: 0,
+        End: labels.length - 1,
+      }[event.key]
+      if (target === undefined)
         return
-      const step = event.key === 'ArrowRight' ? 1 : -1
-      select((i + step + labels.length) % labels.length)
+      // Only once we know the key is ours: an unhandled key must still reach
+      // the browser (Tab out of the tablist, for one).
+      event.preventDefault?.()
+      select(target)
     })
     tablist.append(b)
     return b

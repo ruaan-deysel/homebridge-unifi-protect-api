@@ -35,6 +35,41 @@ describe('renderTabs', () => {
     expect((tablist.children[0] as FakeElement).attributes['aria-selected']).toBe('true')
   })
 
+  // Found by driving the real UI: arrows worked, Home/End did nothing. The
+  // WAI-ARIA tabs pattern lists them as optional, but with four tabs they are
+  // the difference between one keystroke and three.
+  it('jumps to the first and last tab on Home and End', () => {
+    const { tablist, select } = renderTabs(doc, ['A', 'B', 'C', 'D']) as unknown as {
+      tablist: FakeElement
+      select: (index: number) => void
+    }
+    const tab = (i: number) => tablist.children[i] as FakeElement
+    const selected = () => (tablist.children as FakeElement[]).findIndex(b => b.attributes['aria-selected'] === 'true')
+
+    select(0)
+    tab(0).dispatch('keydown', { key: 'End' })
+    expect(selected()).toBe(3)
+    tab(3).dispatch('keydown', { key: 'Home' })
+    expect(selected()).toBe(0)
+  })
+
+  // The handler must not swallow keys it does not act on, or Tab could not
+  // move focus out of the tablist.
+  it('leaves an unrelated key alone, selection and default action both', () => {
+    const { tablist, select } = renderTabs(doc, ['A', 'B', 'C']) as unknown as {
+      tablist: FakeElement
+      select: (index: number) => void
+    }
+    select(1)
+    let prevented = false
+    const preventDefault = () => {
+      prevented = true
+    }
+    ;(tablist.children[1] as FakeElement).dispatch('keydown', { key: 'Tab', preventDefault })
+    expect((tablist.children[1] as FakeElement).attributes['aria-selected']).toBe('true')
+    expect(prevented).toBe(false)
+  })
+
   it('shows exactly one pane at a time', () => {
     const { panes, select } = renderTabs(doc, ['A', 'B']) as unknown as {
       panes: FakeElement[]

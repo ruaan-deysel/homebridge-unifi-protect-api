@@ -497,7 +497,13 @@
       homebridge.toast.error(text)
   }
 
-  document.getElementById('test').addEventListener('click', async () => {
+  const testEl = document.getElementById('test')
+
+  /**
+   * Extracted from the click handler so the whole thing — every early return
+   * included — can sit inside one re-entrancy guard below.
+   */
+  const runConnectionTest = async () => {
     statusEl.textContent = 'Checking the console\'s certificate…'
     // The key is only ever sent to the local server-side handler over the
     // homebridge IPC channel — never logged, never echoed back into the DOM.
@@ -544,6 +550,29 @@
     }
     catch (error) {
       report(error.message, false)
+    }
+  }
+
+  /**
+   * One check at a time. Reading an unreachable console's certificate takes
+   * until the TCP timeout — measured at ~18s against 10.255.255.1 — and the
+   * button stayed live for all of it, so repeated clicks fired CONCURRENT
+   * certificate reads whose completions raced to write the same `config`
+   * object and the same aria-live status line. Disabling for the duration is
+   * the whole fix; the error path itself was already correct and does time out.
+   *
+   * `finally`, so a throw anywhere in the body still gives the button back —
+   * a permanently dead Test Connection would be worse than the race.
+   */
+  testEl.addEventListener('click', async () => {
+    if (testEl.disabled)
+      return
+    testEl.disabled = true
+    try {
+      await runConnectionTest()
+    }
+    finally {
+      testEl.disabled = false
     }
   })
 </script>
