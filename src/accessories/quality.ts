@@ -25,10 +25,19 @@ export const SUBSTREAM_SIZE: Record<Quality, [number, number]> = {
  * The ONLY size the HKSV recording path advertises, and therefore the only one
  * it may deliver — `recordingArgs` applies no scale filter. Both the
  * advertisement in `recordingOptions` and the recording encoder's
- * no-configuration-yet fallback read this, so the promise and the delivery
- * cannot drift apart. They did once: the ladder was trimmed to 1280x720 while
- * the fallback still said 'high', and a camera whose encoder started before
- * HomeKit sent a configuration recorded 2688x1512.
+ * no-configuration-yet fallback read this, so those two cannot drift apart.
+ * They did once: the ladder was trimmed to 1280x720 while the fallback still
+ * said 'high', and a camera whose encoder started before HomeKit sent a
+ * configuration recorded 2688x1512.
+ *
+ * This does NOT make the advertisement true in every case, and claiming so
+ * would be worse than the original drift. A per-camera `quality` preference
+ * short-circuits `selectQuality` on both branches, so a user who pins `high`
+ * still records 2688x1512 against an advertised 1280x720. That is a deliberate
+ * trade — a pinned preference is an explicit instruction, and ignoring it would
+ * mean someone who pinned `low` to save bandwidth paid for the high substream
+ * every minute of every day — but it is a gap in the invariant, not an
+ * exception to it.
  */
 export const ADVERTISED_RECORDING_SIZE: [number, number] = SUBSTREAM_SIZE.medium
 

@@ -161,10 +161,17 @@ export interface RecordingDelegateOptions {
    */
   audioActive: () => boolean
   /**
-   * The live per-camera `quality` setting, same shape and for the same reason as
+   * The per-camera `quality` setting, same shape and for the same reason as
    * `audioActive`. Live view honours it; recording ignoring it would mean a user
    * who pinned `low` to save bandwidth still paid for the high substream every
    * minute of every day.
+   *
+   * READ ONCE PER ENCODER START, and in practice that means once. Nothing
+   * restarts a HEALTHY encoder — `updateRecordingActive` is called only by HAP
+   * and by `disposeRecorder` — and a healthy recording encoder is designed to
+   * run for weeks. So changing this in the settings UI does not reach a camera
+   * that is already recording until Homebridge itself restarts. Calling these
+   * "live" reads, as an earlier version of this comment did, was wrong.
    */
   quality?: () => QualityPreference
   spawn?: SpawnFn
