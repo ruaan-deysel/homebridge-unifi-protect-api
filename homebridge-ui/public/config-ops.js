@@ -284,13 +284,33 @@ export function renderToggle(doc, id, label, needsRestart = false) {
  * click made that banner appear for settings that take effect immediately.
  * Each control still writes on change — losing an edit to a stray navigation
  * would be worse — but the disk write collapses.
+ *
+ * `flush()` runs a pending call immediately and cancels the timer. Without it,
+ * closing the settings modal inside the window discarded the last write in
+ * silence: the UI had already shown the change, and config.json never got it.
+ * It is a no-op when nothing is pending, so an unload handler can call it
+ * unconditionally.
  */
 export function debounce(fn, ms) {
   let timer
-  return (...args) => {
+  let pending
+  const debounced = (...args) => {
     clearTimeout(timer)
-    timer = setTimeout(fn, ms, ...args)
+    pending = args
+    timer = setTimeout(() => {
+      pending = undefined
+      fn(...args)
+    }, ms)
   }
+  debounced.flush = () => {
+    if (!pending)
+      return
+    clearTimeout(timer)
+    const args = pending
+    pending = undefined
+    fn(...args)
+  }
+  return debounced
 }
 
 export const SAVE_DEBOUNCE_MS = 1000
@@ -334,7 +354,10 @@ export function recordingCount(config, devices) {
  * storage — footage never touches the quota.
  */
 export function tierWarning(config, devices) {
-  const tier = config.defaults?.icloudTier ?? DEFAULTS.icloudTier
+  // Through `parseIcloudTier`, not raw: a hand-edited `"1tb"` has no entry in
+  // RECORDING_LIMITS, so `limit` was `undefined`, `count <= limit` was never
+  // true, and the banner read "…supports undefined on the 1tb tier" forever.
+  const tier = parseIcloudTier(config.defaults?.icloudTier)
   const limit = RECORDING_LIMITS[tier]
   const count = recordingCount(config, devices)
   if (count <= limit)

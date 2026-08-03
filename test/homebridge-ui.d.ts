@@ -13,6 +13,34 @@
 //    ambient module is the supported way to type a real, resolvable file by
 //    path suffix.
 
+// ONE element shape for both UI modules. There used to be a second, narrower
+// `MinimalDomElement` inside the config-ops block; because TypeScript is
+// structural, a `renderToggle` result typed by it was assignable wherever a
+// ui-render element was expected, so the narrow type bought nothing and hid
+// the mismatch. Both modules now alias this one.
+interface UiElement {
+  tagName: string
+  id: string
+  value: string
+  type: string
+  checked: boolean
+  selected: boolean
+  textContent: string
+  className: string
+  style: { display: string }
+  attributes: Record<string, string>
+  dataset: Record<string, string>
+  tabIndex: number
+  setAttribute: (name: string, value: string) => void
+  append: (...nodes: (UiElement | string)[]) => void
+  replaceChildren: (...nodes: (UiElement | string)[]) => void
+  addEventListener: (type: 'click' | 'keydown' | 'change', handler: (event: { key?: string }) => void) => void
+  focus: () => void
+}
+interface UiDocument {
+  createElement: (tag: string) => UiElement
+}
+
 declare module '*/homebridge-ui/server.js' {
   export interface HttpDependencies {
     fetchImpl?: (url: string, init?: { headers?: Record<string, string>, consoleCert?: string }) => Promise<Response>
@@ -97,14 +125,8 @@ declare module '*/homebridge-ui/public/config-ops.js' {
   export function parseMaxStreams(raw: unknown): number | undefined
   export function setGlobalSetting(config: ConfigShape, key: string, value: unknown): ConfigShape
 
-  export interface MinimalDomElement {
-    tagName: string
-    textContent: string
-    className: string
-  }
-  export interface MinimalDocument {
-    createElement: (tag: string) => MinimalDomElement
-  }
+  export type MinimalDomElement = UiElement
+  export type MinimalDocument = UiDocument
   export function renderDeviceHeader(
     doc: MinimalDocument,
     device: { name?: string, type?: string },
@@ -129,7 +151,10 @@ declare module '*/homebridge-ui/public/config-ops.js' {
     needsRestart?: boolean,
   ): { wrap: MinimalDomElement, input: MinimalDomElement }
 
-  export function debounce<T extends (...args: never[]) => void>(fn: T, ms: number): (...args: Parameters<T>) => void
+  export function debounce<T extends (...args: never[]) => void>(
+    fn: T,
+    ms: number,
+  ): ((...args: Parameters<T>) => void) & { flush: () => void }
   export const SAVE_DEBOUNCE_MS: number
   export const NEEDS_RESTART: ReadonlySet<'audio' | 'talkback' | 'hksv'>
 
@@ -149,22 +174,8 @@ declare module '*/homebridge-ui/public/config-ops.js' {
 }
 
 declare module '*/homebridge-ui/public/ui-render.js' {
-  export interface MinimalDomElement {
-    tagName: string
-    id: string
-    textContent: string
-    className: string
-    style: { display: string }
-    attributes: Record<string, string>
-    dataset: Record<string, string>
-    tabIndex: number
-    setAttribute: (name: string, value: string) => void
-    addEventListener: (type: 'click' | 'keydown', handler: (event: { key?: string }) => void) => void
-    focus: () => void
-  }
-  export interface MinimalDocument {
-    createElement: (tag: string) => MinimalDomElement
-  }
+  export type MinimalDomElement = UiElement
+  export type MinimalDocument = UiDocument
   export function renderTabs(
     doc: MinimalDocument,
     labels: string[],
@@ -197,11 +208,13 @@ declare module '*/homebridge-ui/public/ui-render.js' {
     pane: MinimalDomElement
     heading: MinimalDomElement
     bodies: Record<'General' | 'Live view' | 'Recording' | 'Extra accessories', MinimalDomElement>
+    mount: (container: MinimalDomElement) => void
   }
 
   export function renderBadge(
     doc: MinimalDocument,
     overridden: boolean,
     onReset: () => void,
+    label?: string,
   ): { badge: MinimalDomElement, reset: MinimalDomElement | undefined }
 }

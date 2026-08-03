@@ -52,12 +52,35 @@ export class FakeElement {
   }
 
   /**
+   * Attachment, modelled only as far as `focus()` needs it. `append` and
+   * `replaceChildren` set this; nothing else does, because nothing else in the
+   * code under test detaches a node.
+   */
+  parent: FakeElement | null = null
+  /** Set on the node `makeDoc()` hands back as the document root. */
+  isDocumentRoot = false
+
+  /**
    * Real focus has no visual effect in this harness, but the call itself is
    * load-bearing: U3 (selection moves focus to the detail heading) is proven
    * by counting calls here, not by reading source.
+   *
+   * It counts ONLY when the node is reachable from the document root, because
+   * that is the one thing a real browser does differently: `focus()` on a
+   * detached node is a silent no-op. A counter that ignored attachment made
+   * `expect(el.focusCount).toBe(1)` pass for code that focused a node it had
+   * not inserted yet — which is exactly the defect this harness let through
+   * (renderDetail focused its heading before the caller mounted the pane).
+   * Do not simplify this back to an unconditional increment.
    */
   focusCount = 0
-  focus() { this.focusCount++ }
+  focus() {
+    let node = this.parent
+    while (node && !node.isDocumentRoot)
+      node = node.parent
+    if (this.isDocumentRoot || node)
+      this.focusCount++
+  }
 
   /**
    * Markup, and treated as markup: `outerHTML` emits it RAW and `textContent`
@@ -118,6 +141,21 @@ export class FakeElement {
 
   append(...nodes: (FakeElement | string)[]) {
     this.children.push(...nodes)
+    for (const node of nodes) {
+      if (node instanceof FakeElement)
+        node.parent = this
+    }
+  }
+
+  replaceChildren(...nodes: (FakeElement | string)[]) {
+    for (const node of this.children) {
+      if (node instanceof FakeElement)
+        node.parent = null
+    }
+    this.children = []
+    this._text = ''
+    this._html = undefined
+    this.append(...nodes)
   }
 
   /**
@@ -153,8 +191,14 @@ export class FakeElement {
 
 // Exported so test/ui-render.test.ts reuses this harness rather than building
 // a second one — it is what makes an innerHTML regression there fail too.
+//
+// `root` stands in for the document: a test that wants `focus()` to count has
+// to attach the node to it first, exactly as the page has to insert an element
+// before focusing it.
 export function makeDoc() {
-  return { createElement: (tag: string) => new FakeElement(tag) }
+  const root = new FakeElement('body')
+  root.isDocumentRoot = true
+  return { createElement: (tag: string) => new FakeElement(tag), root }
 }
 
 const fakeDocument = { createElement: (tag: string) => new FakeElement(tag) }
@@ -232,6 +276,17 @@ describe('isOverridden / clearDeviceSetting', () => {
     expect(isOverridden(config, 'a', 'quality')).toBe(false)
     // A different device entirely, same key — no entry at all.
     expect(isOverridden(config, 'b', 'audio')).toBe(false)
+  })
+
+  // An explicit `false` IS an override — the test above only ever asserted
+  // `true`, so a truthiness check in place of the `!== undefined` would have
+  // survived: a camera deliberately switched off would show "default" and
+  // offer no reset.
+  it('reports an explicit false as overridden, not as an absent key', () => {
+    const config = { ...base, devices: { a: { audio: false } } }
+    expect(isOverridden(config, 'a', 'audio')).toBe(true)
+    // And the absent key next to it still is not.
+    expect(isOverridden(config, 'a', 'talkback')).toBe(false)
   })
 
   it('clears one key and keeps the others', () => {
@@ -451,9 +506,17 @@ describe('package camera toggle', () => {
     // store an explicit `false` override instead of clearing the key.
     expect(defaultFor(ensureConfig(null), 'packageCamera')).toBe(false)
     expect(pkg.input.checked).toBe(false)
-    // All toggles are now live — neither the package lens nor recording are "arriving later" anymore.
-    expect(pkg.wrap.className).not.toBe('up-muted')
-    expect(rendered.find(control => control.key === 'hksv')?.wrap.className).not.toBe('up-muted')
+    // All toggles are now live — neither the package lens nor recording are
+    // "arriving later" anymore. Asserted on the classes `renderToggle` actually
+    // puts on the wrapper: `renderControls` REPLACES className with 'up-muted'
+    // for a comingLater toggle, so these survive only while the flag is unset.
+    // (The previous `.not.toBe('up-muted')` here passed against `wrap.className`
+    // that the renderer never wrote at all — it was testing the fake's default.)
+    for (const key of ['packageCamera', 'hksv']) {
+      const wrap = rendered.find(control => control.key === key)?.wrap
+      expect(wrap?.className.split(' '), key).toEqual(expect.arrayContaining(['form-check', 'form-switch']))
+    }
+    expect(cameraToggles(doorbell).every(t => t.comingLater === undefined)).toBe(true)
   })
 
   it('renders no package checkbox for a camera without the lens', () => {
@@ -631,6 +694,16 @@ describe('recordingCount / tierWarning', () => {
     expect(recordingCount(config, devices(['a', 'b']))).toBe(2)
   })
 
+  // The `??` in `settings?.hksv ?? defaultFor(...)` has to be `??` and not
+  // `||`: an explicit `false` override against a `true` default is the only
+  // input that tells the two apart, and `||` would fall through to the default
+  // and count a camera the user switched off.
+  it('lets an explicit false override a true default rather than falling through to it', () => {
+    const config = withDevices({ a: { hksv: false } })
+    config.defaults.hksv = true
+    expect(recordingCount(config, devices(['a', 'b']))).toBe(1)
+  })
+
   it('does not warn at the limit', () => {
     const config = withDevices({ a: { hksv: true }, b: { hksv: true }, c: { hksv: true }, d: { hksv: true }, e: { hksv: true } })
     expect(tierWarning(config, devices(['a', 'b', 'c', 'd', 'e']))).toBeUndefined()
@@ -647,6 +720,30 @@ describe('recordingCount / tierWarning', () => {
     const ids = Array.from({ length: 20 }, (_, i) => String(i))
     const many = Object.fromEntries(ids.map(id => [id, { hksv: true }]))
     expect(tierWarning(withDevices(many, '2tb'), devices(ids))).toBeUndefined()
+  })
+
+  // A hand-edited `icloudTier: "1tb"` has no RECORDING_LIMITS entry. Read raw,
+  // `limit` was `undefined`, `count <= undefined` is false for any count, and
+  // every user with a hand-edited tier saw "…supports undefined on the 1tb
+  // tier" permanently — including one recording camera on what should be a
+  // silent default. `parseIcloudTier` is what makes the banner honest.
+  it('judges an unrecognised tier by the default tier, never by undefined', () => {
+    const unknownTier = { a: { hksv: true } }
+    // Cast for the same reason ensureConfig's test does: config.json on disk
+    // can hold any string, the type cannot.
+    const config = withDevices(unknownTier, '1tb' as unknown as IcloudTier)
+    // One camera is inside the 200gb default's limit of 5, so: no warning.
+    expect(tierWarning(config, devices(['a']))).toBeUndefined()
+
+    const many = Object.fromEntries(['a', 'b', 'c', 'd', 'e', 'f'].map(id => [id, { hksv: true }]))
+    const over = withDevices(many, '1tb' as unknown as IcloudTier)
+    const message = tierWarning(over, devices(['a', 'b', 'c', 'd', 'e', 'f']))
+    // And when it does warn, it names the tier and limit actually in force —
+    // never the string 'undefined', and never the unrecognised tier.
+    expect(message).toContain(DEFAULTS.icloudTier)
+    expect(message).not.toContain('undefined')
+    expect(message).not.toContain('1tb')
+    expect(message).toContain('5')
   })
 
   it('is advisory only — the config it warns about is returned unchanged, never blocked or reverted', () => {
@@ -701,6 +798,64 @@ describe('debounce', () => {
     expect(calls).toBe(0)
     vi.advanceTimersByTime(500)
     expect(calls).toBe(1)
+    vi.useRealTimers()
+  })
+})
+
+// Closing the settings modal inside the 1 s window used to discard the pending
+// write in silence — the UI had already shown the change and config.json never
+// received it. index.html calls `flush()` from visibilitychange/pagehide.
+describe('debounce flush', () => {
+  it('runs the pending call immediately, with the latest arguments', () => {
+    vi.useFakeTimers()
+    const seen: string[] = []
+    const save = debounce((value: string) => seen.push(value), 1000)
+    save('first')
+    save('second')
+    expect(seen).toEqual([])
+    save.flush()
+    expect(seen).toEqual(['second'])
+    vi.useRealTimers()
+  })
+
+  it('cancels the timer so a flushed call never fires twice', () => {
+    vi.useFakeTimers()
+    let calls = 0
+    const save = debounce(() => calls++, 1000)
+    save()
+    save.flush()
+    vi.advanceTimersByTime(5000)
+    expect(calls).toBe(1)
+    vi.useRealTimers()
+  })
+
+  // The unload handlers fire on every close, not just the ones with an edit
+  // pending — a flush with nothing to write must not write anything.
+  it('is a no-op when nothing is pending, before or after a completed call', () => {
+    vi.useFakeTimers()
+    let calls = 0
+    const save = debounce(() => calls++, 1000)
+    save.flush()
+    expect(calls).toBe(0)
+    save()
+    vi.advanceTimersByTime(1000)
+    expect(calls).toBe(1)
+    save.flush()
+    expect(calls).toBe(1)
+    vi.useRealTimers()
+  })
+
+  it('still debounces normally after a flush', () => {
+    vi.useFakeTimers()
+    let calls = 0
+    const save = debounce(() => calls++, 1000)
+    save()
+    save.flush()
+    save()
+    save()
+    expect(calls).toBe(1)
+    vi.advanceTimersByTime(1000)
+    expect(calls).toBe(2)
     vi.useRealTimers()
   })
 })

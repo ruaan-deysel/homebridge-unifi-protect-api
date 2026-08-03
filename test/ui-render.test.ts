@@ -115,17 +115,30 @@ describe('renderTabs', () => {
 
   // U5: building the shell must not steal focus from wherever the host page
   // already had it — only a user actually driving the tabs should move focus.
+  // Attached AFTER construction, which is the order index.html uses: the count
+  // stays at zero because nothing focused, not because nothing could.
   it('does not focus a tab merely from being constructed', () => {
     const { tablist } = renderTabs(doc, ['A', 'B']) as unknown as { tablist: FakeElement }
+    doc.root.append(tablist)
     const buttons = tablist.children as FakeElement[]
     expect(buttons.every(b => b.focusCount === 0)).toBe(true)
   })
 
   it('still focuses the tab when selection is keyboard- or click-driven', () => {
     const { tablist } = renderTabs(doc, ['A', 'B']) as unknown as { tablist: FakeElement }
+    // In the document first: `focus()` on a detached node is a no-op, and the
+    // fake counts nothing for one either.
+    doc.root.append(tablist)
     const buttons = tablist.children as FakeElement[]
     buttons[1]!.dispatch('click')
     expect(buttons[1]!.focusCount).toBe(1)
+  })
+
+  // A pane of pure prose (Help) has nothing focusable inside it, so without a
+  // tabindex of its own there is no way to reach or scroll it from the keyboard.
+  it('puts every pane in the Tab order so a prose-only pane is reachable', () => {
+    const { panes } = renderTabs(doc, ['A', 'B', 'C']) as unknown as { panes: FakeElement[] }
+    expect(panes.map(p => p.tabIndex)).toEqual([0, 0, 0])
   })
 })
 
@@ -156,6 +169,23 @@ describe('renderDeviceList', () => {
     // 'IMG')` assertion here could never fail — FakeElement's `innerHTML`
     // setter never creates child elements — and has been removed.
     expect(list.textContent).toContain('<img src=x onerror=alert(1)>')
+  })
+
+  // Hiding the rows but keeping the heading left "CHIMES" floating over
+  // nothing — the filtered list read as if it still had results in that group.
+  it('hides a group heading whose rows are all filtered out, and brings it back', () => {
+    const { list, filter } = renderDeviceList(doc, DEVICES, () => {}) as unknown as {
+      list: FakeElement
+      filter: (term: string) => void
+    }
+    const headings = (list.children as FakeElement[]).filter(c => c.className.includes('list-group-item-secondary'))
+    const [cameras, chimes] = headings
+    filter('door')
+    // 'Doorbell' is a camera and 'Ding Dong' is not, so exactly one heading survives.
+    expect(cameras?.style.display).not.toBe('none')
+    expect(chimes?.style.display).toBe('none')
+    filter('')
+    expect(headings.map(h => h.style.display)).toEqual(['', ''])
   })
 
   it('reports the selected device id', () => {
@@ -192,16 +222,65 @@ describe('renderDetail', () => {
     expect(heading.textContent).toBe('<img src=x onerror=alert(1)>')
   })
 
-  // U3: two facts tested in isolation (heading is focusable; a spied
-  // `focus()` records a call) don't prove selection actually moves focus
-  // there — the wiring lived only in index.html's untested `showDetail`.
-  // `renderDetail` now focuses its own heading before returning, so the
-  // thing every caller (including selection) triggers IS this call, and this
-  // one test covers both facts genuinely.
-  it('makes the heading a programmatic focus target and focuses it, which is how selection reaches it', () => {
-    const { heading } = renderDetail(doc, DEVICES[0]!) as unknown as { heading: FakeElement }
+  // U3: `renderDetail` used to focus the heading before returning, while the
+  // pane was still detached — a silent no-op in every real browser, so
+  // selecting a device never moved focus at all. The fake counted it anyway.
+  // `mount` now inserts first and focuses second, and the fake only counts a
+  // focus on a node reachable from the document, so this assertion is the real
+  // ordering guarantee: swap the two lines in `mount` and it goes back to 0.
+  it('makes the heading a programmatic focus target and focuses it once mounted', () => {
+    const container = doc.createElement('div')
+    doc.root.append(container)
+    const { heading, mount } = renderDetail(doc, DEVICES[0]!) as unknown as {
+      heading: FakeElement
+      mount: (container: FakeElement) => void
+    }
     expect(heading.tabIndex).toBe(-1)
+    // Nothing focused yet — building the pane must not claim focus on its own.
+    expect(heading.focusCount).toBe(0)
+    mount(container)
     expect(heading.focusCount).toBe(1)
+  })
+
+  it('replaces whatever the detail pane held before', () => {
+    const container = doc.createElement('div')
+    doc.root.append(container)
+    container.textContent = 'Select a device from the list.'
+    const { pane, mount } = renderDetail(doc, DEVICES[1]!) as unknown as {
+      pane: FakeElement
+      mount: (container: FakeElement) => void
+    }
+    mount(container)
+    expect(container.children).toEqual([pane])
+    expect(container.textContent).toContain('Backyard')
+  })
+
+  // A label sitting above a body is only a heading visually; without the pair
+  // a screen reader reads "Recording" as a stray line and then the controls
+  // with no idea they belong to it.
+  it('ties each section body to its label with role=group and aria-labelledby', () => {
+    const { pane, bodies } = renderDetail(doc, DEVICES[0]!) as unknown as {
+      pane: FakeElement
+      bodies: Record<string, FakeElement>
+    }
+    const labelText = new Map(
+      (pane.children as FakeElement[]).filter(c => c.id).map(c => [c.id, c.textContent]),
+    )
+    for (const [name, body] of Object.entries(bodies)) {
+      expect(body.attributes.role).toBe('group')
+      // The id actually resolves to the label carrying this section's name —
+      // a dangling aria-labelledby announces nothing.
+      expect(labelText.get(body.attributes['aria-labelledby']!)).toBe(name)
+    }
+  })
+
+  // Two panes in one document must not share label ids, or aria-labelledby
+  // points at whichever one happens to be first.
+  it('gives two panes disjoint section label ids', () => {
+    const first = renderDetail(doc, DEVICES[0]!) as unknown as { bodies: Record<string, FakeElement> }
+    const second = renderDetail(doc, DEVICES[1]!) as unknown as { bodies: Record<string, FakeElement> }
+    const ids = (b: Record<string, FakeElement>) => Object.values(b).map(x => x.attributes['aria-labelledby'])
+    expect(new Set([...ids(first.bodies), ...ids(second.bodies)]).size).toBe(8)
   })
 })
 
@@ -217,6 +296,18 @@ describe('renderBadge', () => {
     expect(badge.textContent).toBe('overridden')
     expect(reset).toBeDefined()
     expect(reset?.tagName).toBe('BUTTON')
+  })
+
+  // Every reset button on a detail pane renders the same word. Without a
+  // per-setting accessible name a screen reader user hears "reset" four times
+  // over and cannot tell which setting any of them belongs to.
+  it('names the setting on the reset control, so four resets are not four bare "reset"s', () => {
+    const { reset } = renderBadge(doc, true, () => {}, 'HomeKit Secure Video') as unknown as { reset: FakeElement }
+    expect(reset.attributes['aria-label']).toContain('HomeKit Secure Video')
+    // The visible text stays short; the accessible name is the long one.
+    expect(reset.textContent).toBe('reset')
+    const other = renderBadge(doc, true, () => {}, 'Live view quality') as unknown as { reset: FakeElement }
+    expect(other.reset.attributes['aria-label']).not.toBe(reset.attributes['aria-label'])
   })
 
   it('the reset control calls back when clicked', () => {

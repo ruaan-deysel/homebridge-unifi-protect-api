@@ -157,7 +157,24 @@
   // updates the in-memory config the UI runtime holds, and losing an edit to
   // a stray navigation before the debounce fires would be worse than an extra
   // write.
-  const debouncedSavePluginConfig = debounce(() => { homebridge.savePluginConfig() }, SAVE_DEBOUNCE_MS)
+  //
+  // The promise is NOT discarded: a rejected write used to become an unhandled
+  // rejection inside the iframe while the page went on showing the new value,
+  // so the UI agreed with the user and config.json never changed.
+  const debouncedSavePluginConfig = debounce(() => {
+    homebridge.savePluginConfig().catch((error) => {
+      homebridge.toast.error(`Could not save config.json: ${error.message}`)
+    })
+  }, SAVE_DEBOUNCE_MS)
+
+  // The debounce window is a second wide, and closing the settings modal inside
+  // it dropped the pending write silently. `flush()` is a no-op when nothing is
+  // pending, so both handlers can fire unconditionally.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden')
+      debouncedSavePluginConfig.flush()
+  })
+  globalThis.addEventListener('pagehide', () => debouncedSavePluginConfig.flush())
 
   // All discovered devices, kept around so the tier warning can count
   // recording accessories host-wide, not just the one currently shown.
@@ -176,7 +193,15 @@
   }
 
   const save = async () => {
-    await homebridge.updatePluginConfig([config])
+    // A failed write must not be followed by a UI that refreshes as though it
+    // succeeded — report it and leave everything showing what is on disk.
+    try {
+      await homebridge.updatePluginConfig([config])
+    }
+    catch (error) {
+      homebridge.toast.error(`Could not save config.json: ${error.message}`)
+      return
+    }
     debouncedSavePluginConfig()
     // Any device's recording setting can push the tier count over the edge,
     // not just the one being edited — recompute whenever config changes.
@@ -249,20 +274,21 @@
   }
 
   /**
-   * Renders one device's settings into the detail pane. `renderDetail` moves
-   * focus to its heading itself — the list stays where it is, but the content
-   * the user asked for just replaced what used to be there, so focus has to
-   * follow it.
+   * Renders one device's settings into the detail pane. `mount` inserts the
+   * pane and THEN moves focus to its heading — the list stays where it is, but
+   * the content the user asked for just replaced what used to be there, so
+   * focus has to follow it. That order is the whole point: focusing before
+   * insertion is a no-op.
    */
   function showDetail(device) {
-    const { pane, bodies } = renderDetail(document, device)
+    const { bodies, mount } = renderDetail(document, device)
     tierWarningEl = null
 
     // Appends a badge (default/overridden) plus, when overridden, a reset
     // button to `wrap` — and keeps it live across changes by tearing down
     // and rebuilding it rather than mutating in place, since `renderBadge`
     // owns both the label and whether a reset button exists at all.
-    const attachBadge = (wrap, key, applyValue) => {
+    const attachBadge = (wrap, key, applyValue, label) => {
       let current
       const refresh = () => {
         current?.badge.remove()
@@ -272,7 +298,7 @@
           applyValue(defaultFor(config, key))
           await save()
           refresh()
-        })
+        }, label)
         wrap.append(current.badge)
         if (current.reset)
           wrap.append(current.reset)
@@ -311,7 +337,7 @@
         // ever showed the resolved value. `refreshBadge` re-reads
         // `isOverridden` after every change, so the badge and the checkbox
         // never disagree.
-        const refreshBadge = attachBadge(wrap, key, value => { input.checked = Boolean(value) })
+        const refreshBadge = attachBadge(wrap, key, value => { input.checked = Boolean(value) }, label)
         input.addEventListener('change', async () => {
           config = setDeviceSetting(config, device.id, key, input.checked)
           await save()
@@ -330,8 +356,8 @@
       // Live and enabled, like audio, talkback and hksv below: these
       // genuinely work now, so a disabled control would be the dishonest
       // one. No toggle currently carries `comingLater`.
-      const { wrap, select } = renderQualitySelect(document, device, settingOf(device.id, 'quality', config.defaults.quality))
-      const refreshQualityBadge = attachBadge(wrap, 'quality', value => { select.value = value })
+      const { wrap, select } = renderQualitySelect(document, device, settingOf(device.id, 'quality', defaultFor(config, 'quality')))
+      const refreshQualityBadge = attachBadge(wrap, 'quality', value => { select.value = value }, 'Live view quality')
       select.addEventListener('change', async () => {
         config = setDeviceSetting(config, device.id, 'quality', select.value)
         await save()
@@ -355,11 +381,16 @@
         toggle(bodies[section ?? 'Live view'], key, label, comingLater)
     }
 
-    deviceDetailEl.replaceChildren(pane)
+    mount(deviceDetailEl)
   }
 
   function render(devices) {
     allDevices = devices
+    // A rediscovery rebuilds the list, so the pane beside it can be showing a
+    // device that is no longer in it — and `tierWarningEl` would still be the
+    // detached banner from that pane. Both go back to the empty state.
+    deviceDetailEl.textContent = 'Select a device from the list.'
+    tierWarningEl = null
     const { list, filter } = renderDeviceList(document, devices, (id) => {
       const device = devices.find(d => d.id === id)
       if (device)

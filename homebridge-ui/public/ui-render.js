@@ -26,6 +26,10 @@ export function renderTabs(doc, labels) {
     pane.setAttribute('role', 'tabpanel')
     pane.id = `tabpanel-${i}`
     pane.setAttribute('aria-labelledby', `tab-${i}`)
+    // A tabpanel has to be in the Tab order itself, or a pane whose content is
+    // not focusable (the Help pane is all prose) can never be reached — arrow
+    // keys move between tabs, and Tab from the strip has to land somewhere.
+    pane.tabIndex = 0
     return pane
   })
   const buttons = labels.map((label, i) => {
@@ -84,6 +88,7 @@ export function renderDeviceList(doc, devices, onSelect) {
   const list = doc.createElement('div')
   list.className = 'list-group'
   const rowEls = []
+  const groups = []
   for (const type of Object.keys(GROUP_LABELS)) {
     const group = devices.filter(d => d.type === type)
     if (group.length === 0)
@@ -92,6 +97,8 @@ export function renderDeviceList(doc, devices, onSelect) {
     heading.className = 'list-group-item list-group-item-secondary py-1 small text-uppercase'
     heading.textContent = GROUP_LABELS[type]
     list.append(heading)
+    const groupRows = []
+    groups.push({ heading, rows: groupRows })
     for (const device of group) {
       const row = doc.createElement('button')
       row.type = 'button'
@@ -106,12 +113,17 @@ export function renderDeviceList(doc, devices, onSelect) {
       })
       list.append(row)
       rowEls.push(row)
+      groupRows.push(row)
     }
   }
   const filter = (term) => {
     const needle = term.trim().toLowerCase()
     for (const row of rowEls)
       row.style.display = row.textContent.toLowerCase().includes(needle) ? '' : 'none'
+    // A heading over nothing is worse than no heading: filtering to one camera
+    // otherwise still shows SENSORS and CHIMES with empty space under them.
+    for (const group of groups)
+      group.heading.style.display = group.rows.some(row => row.style.display !== 'none') ? '' : 'none'
   }
   return { list, filter, rows: () => rowEls }
 }
@@ -121,8 +133,14 @@ export function renderDeviceList(doc, devices, onSelect) {
  * Making that visible is the point — the flat UI showed only the resulting
  * value, so there was no way to tell, and no way to get back to the default.
  * `onReset` is only wired when overridden; there is nothing to reset otherwise.
+ *
+ * `label` names the setting on the reset button's `aria-label`. Every reset
+ * button on the pane otherwise reads as a bare "reset", so a screen reader
+ * user tabbing the pane hears the same word four times with no way to tell
+ * which setting each one belongs to. `label` is a label WE own, but it is set
+ * as a property, never markup, like every other string here.
  */
-export function renderBadge(doc, overridden, onReset) {
+export function renderBadge(doc, overridden, onReset, label = '') {
   const badge = doc.createElement('span')
   badge.className = overridden ? 'badge text-bg-warning ms-2' : 'badge text-bg-secondary ms-2'
   badge.textContent = overridden ? 'overridden' : 'default'
@@ -132,21 +150,35 @@ export function renderBadge(doc, overridden, onReset) {
   reset.type = 'button'
   reset.className = 'btn btn-link btn-sm p-0 ms-2'
   reset.textContent = 'reset'
+  reset.setAttribute('aria-label', label ? `Reset ${label} to the default` : 'Reset to the default')
   reset.addEventListener('click', () => onReset())
   return { badge, reset }
 }
 
 const SECTIONS = ['General', 'Live view', 'Recording', 'Extra accessories']
 
+// Section labels need ids for `aria-labelledby`, and the ids have to be unique
+// across every pane ever built in this document — a counter is the only source
+// of that which does not involve `device.id` (console-supplied) or collide when
+// the same device is selected twice.
+let sectionSeq = 0
+
 /**
  * One device's settings, grouped so related controls read as related.
  * `device.name` lands as textContent on the heading — attacker-controlled,
- * never markup. `heading.tabIndex = -1` makes it a programmatic focus target,
- * and `renderDetail` focuses it itself before returning: the caller (index.html's
- * `showDetail`) never has to remember to, which is what made "selection moves
- * focus to the heading" untestable before — the call lived only in untested
- * inline script. Now the two facts (focusable, focused) are the same call and
- * one test proves both.
+ * never markup. `heading.tabIndex = -1` makes it a programmatic focus target.
+ *
+ * Focus is NOT moved here. `focus()` on a node that is not in the document is
+ * a silent no-op in every browser, and this pane is built detached — the
+ * caller inserts it afterwards. Focusing here therefore did nothing at all,
+ * while a test counting `focus()` calls on a fake happily said it worked. So
+ * `mount(container)` owns both halves: it inserts the pane and THEN focuses,
+ * which is the only order in which the focus actually happens. Callers use
+ * `mount`, not their own `replaceChildren`.
+ *
+ * Each section's body is tied to its label with `role="group"` +
+ * `aria-labelledby`, so a screen reader announces "Recording" when it reaches
+ * the recording controls instead of reading the label as a stray line of text.
  */
 export function renderDetail(doc, device) {
   const pane = doc.createElement('div')
@@ -156,13 +188,20 @@ export function renderDetail(doc, device) {
   pane.append(heading)
   const bodies = {}
   for (const name of SECTIONS) {
+    const labelId = `detail-section-${sectionSeq++}`
     const label = doc.createElement('div')
     label.className = 'text-body-secondary text-uppercase small border-bottom mt-3 mb-2'
+    label.id = labelId
     label.textContent = name
     const body = doc.createElement('div')
+    body.setAttribute('role', 'group')
+    body.setAttribute('aria-labelledby', labelId)
     pane.append(label, body)
     bodies[name] = body
   }
-  heading.focus()
-  return { pane, heading, bodies }
+  const mount = (container) => {
+    container.replaceChildren(pane)
+    heading.focus()
+  }
+  return { pane, heading, bodies, mount }
 }
