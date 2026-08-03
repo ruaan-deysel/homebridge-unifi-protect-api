@@ -187,9 +187,22 @@ const HKSV_FRAGMENT_MS = 4000
  * recording path ever looks for a Doorbell. The press itself still reaches
  * HomeKit through the `ring` service on the same accessory, exactly as before.
  *
- * The resolutions are the two HAP requires. `selectQuality` maps 1920x1080 to
- * the high substream and 1280x720 to medium, so both are promises the encoder
- * keeps.
+ * ONLY 1280x720 is advertised, and that is deliberate. `recordingArgs` applies
+ * no scale filter — it transcodes whatever substream it opens — so an
+ * advertised resolution is only honest if `selectQuality` maps it to a
+ * substream of exactly that size. 1280x720 maps to `medium`, which the console
+ * serves at exactly 1280x720. 1920x1080 was advertised here until it was
+ * noticed that `selectQuality` maps it to `high` (2688x1512), so HomeKit would
+ * have negotiated 1080p and been handed something else entirely. Advertising a
+ * resolution the encoder does not deliver is how the package camera earned two
+ * rounds of "No Response" with nothing in the log.
+ *
+ * A scale filter would let the full ladder be advertised, but `scale_vaapi`
+ * fails on this host with `Cannot allocate memory`, so that is not a free fix.
+ *
+ * KNOWN GAP, for the hardware gate: a per-camera `quality` preference
+ * short-circuits `selectQuality`, so a user who forces `high` still gets
+ * 2688x1512 fragments against a negotiated 1280x720.
  */
 function recordingOptions(hap: HAP, doorbell: boolean): CameraRecordingOptions {
   return {
@@ -208,8 +221,6 @@ function recordingOptions(hap: HAP, doorbell: boolean): CameraRecordingOptions {
         levels: [hap.H264Level.LEVEL3_1, hap.H264Level.LEVEL3_2, hap.H264Level.LEVEL4_0],
       },
       resolutions: [
-        [1920, 1080, 30],
-        [1920, 1080, 15],
         [1280, 720, 30],
         [1280, 720, 15],
       ],

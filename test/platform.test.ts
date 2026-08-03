@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { NEEDS_RESTART } from '../homebridge-ui/public/config-ops.js'
+import { selectQuality, SUBSTREAM_SIZE } from '../src/accessories/quality.js'
 import { RecordingDelegate, RESTART_DELAY_MS, SLOW_RESTART_DELAY_MS } from '../src/accessories/recording.js'
 import { UniFiProtectPlatform } from '../src/platform.js'
 import { fingerprintOf } from '../src/protect/cert.js'
@@ -1949,6 +1950,26 @@ describe('uniFiProtectPlatform', () => {
     // And a speakerless camera gains none at all.
     const driveway = accessories.find(a => a.UUID === `uuid-${DRIVEWAY}`)!
     expect(driveway.services.filter(s => s.type === S.Doorbell)).toHaveLength(0)
+  })
+
+  // `recordingArgs` applies no scale filter, so every advertised recording
+  // resolution is a promise that the substream `selectQuality` picks for it is
+  // exactly that size. Advertising one that is not is how the package camera
+  // earned two rounds of "No Response" with nothing in the log — and 1920x1080
+  // was advertised here while mapping to `high` (2688x1512) until a whole-branch
+  // review caught it.
+  //
+  // Asserted as the INVARIANT rather than as the literal list: a future change
+  // that adds a rung has to satisfy the mapping, not just update a copy of it.
+  it('only advertises recording resolutions its substream delivers unscaled', async () => {
+    const { accessories } = await withCameras(cameras, { config: hksvOn(DOORBELL) })
+    const resolutions = recordingOf(doorbellOf(accessories))!.options.video.resolutions
+
+    expect(resolutions.length).toBeGreaterThan(0)
+    for (const [width, height] of resolutions) {
+      const substream = SUBSTREAM_SIZE[selectQuality(width!, height!)]
+      expect([width, height]).toEqual(substream)
+    }
   })
 
   // HAP builds CameraOperatingMode from the `recording` option alone. Adding one
