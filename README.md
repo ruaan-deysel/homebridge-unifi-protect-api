@@ -1,205 +1,70 @@
-# homebridge-unifi-protect-api
+# Homebridge UniFi Protect
 
-A [Homebridge](https://homebridge.io) plugin for [UniFi Protect](https://ui.com/camera-security),
-built on Ubiquiti's **official UniFi Protect Integration API**. Authentication is a single
-API key — this plugin never asks for, requests, or stores a UniFi username or password.
+[![npm](https://img.shields.io/npm/v/homebridge-unifi-protect-api/latest?label=latest)](https://www.npmjs.com/package/homebridge-unifi-protect-api)
+[![GitHub release](https://img.shields.io/github/release/ruaan-deysel/homebridge-unifi-protect-api.svg)](https://github.com/ruaan-deysel/homebridge-unifi-protect-api/releases)
+[![npm](https://img.shields.io/npm/dt/homebridge-unifi-protect-api)](https://www.npmjs.com/package/homebridge-unifi-protect-api)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-## Status
+Bring UniFi Protect cameras into Apple Home using Ubiquiti's official Integration API.
 
-Unreleased, on top of the 0.1.0 foundation release. It discovers your Protect devices,
-validates connectivity over REST and both WebSocket channels, reconciles the Homebridge
-accessory cache, and exposes:
+## What it does
 
-- **Live view and snapshots** for every camera. Snapshots come straight from the console as
-  JPEG; live view transcodes Protect's HEVC to the H.264 HomeKit requires, with optional
-  per-camera audio (off by default) and, on cameras with a speaker, optional two-way
-  talkback (also off by default).
-- **Sensors** driven by the live event stream: motion, smart detection (person, vehicle,
-  animal, package), smoke and carbon monoxide, and a Doorbell service on cameras with a
-  speaker.
-- **A status-LED switch** on cameras that have one.
-
-Talkback is a separate setting from audio: turning it on does not start sending the
-camera's own microphone to HomeKit, and it has no effect on the audio setting either way.
-Like the audio setting, **enabling talkback takes effect after a restart** — the same one
-Homebridge already prompts for when settings are saved.
-
-Still to come: light accessories. See `CHANGELOG.md`.
+- Live video and snapshots
+- HomeKit Secure Video with pre-motion recording
+- Motion, smart detection, smoke, carbon monoxide, and doorbell sensors
+- Camera status LED control
+- Package-camera live view and snapshots
+- Optional camera audio and two-way talkback
 
 ## Requirements
 
-- UniFi Protect **7.1.87** — the only firmware this release has been tested against, on a
-  UniFi console with the Integration API enabled. Ubiquiti introduced the Integration API in
-  Protect 6.1, so earlier 6.x/7.x builds may well work, but nothing below 7.1.87 has been
-  verified.
-- Homebridge v2
+- Homebridge 2
 - Node.js 22 or 24
+- UniFi Protect with the Integration API enabled
+- ffmpeg
 
-## Setup
+Tested with UniFi Protect 7.1.87. Hardware video encoding is recommended for multiple cameras.
 
-1. In UniFi Site Manager, go to **Integrations** and create an API key for your console.
-2. In the Homebridge UI, add this plugin and open its settings.
-3. Paste the console address (IP or hostname) and the API key.
-4. Click **Test Connection** to confirm the plugin can reach your console and enumerate
-   devices before saving.
+## Installation
 
-## Hardware transcoding
+1. Search for **Homebridge UniFi Protect** in the Homebridge UI and install it.
+2. Create an API key under **Integrations** in UniFi Site Manager.
+3. Enter the console address and API key in the plugin settings.
+4. Select **Test Connection**, save, and restart Homebridge (or the plugin's child bridge).
 
-Every Protect camera streams HEVC; HomeKit accepts only H.264. Every live view is therefore
-a transcode, and on this hardware the difference between doing it on the GPU and doing it on
-the CPU is not marginal. Measured on the reference host (i7-8700K, UHD 630) on 2026-08-01,
-**20 seconds of 2688×1512 costs 1.79 s of CPU via VAAPI and 49.1 s via libx264 — about 27×**.
-That is why the plugin defaults to six concurrent live views on hardware and only two on
-software: three software streams would saturate a 12-thread host on their own.
+## Configuration
 
-At startup the plugin probes ffmpeg, prefers Intel Quick Sync (QSV) then VAAPI, and
-**trial-encodes each one** rather than trusting `-encoders` to list it. A candidate that
-cannot initialise is skipped and the next is tried; software is the last resort, not the
-second. The log line says which one it ended up on:
+Use **Defaults** for shared settings and **Devices** for camera-specific options. The device list
+appears after a successful connection test.
 
-```
-Using ffmpeg at /usr/bin/ffmpeg with hardware encoding (h264_vaapi).
-```
-
-Seeing `h264_vaapi` rather than `h264_qsv` on an Intel host is normal and not a fault: on
-the reference console (UHD 630, i915) `/usr/bin/ffmpeg` lists both, QSV fails with
-`Device creation failed: -1313558101`, and VAAPI encodes cleanly. Run Homebridge with
-`DEBUG` logging to see which candidates were rejected and why.
-
-A `warn` naming `libx264` instead means hardware acceleration is not reaching the process.
-The usual causes, in order:
-
-1. **The render device is not in the container.** Homebridge in Docker sees no GPU unless you
-   pass one in. Add `--device=/dev/dri` to `docker run`, or under Compose:
-
-   ```yaml
-   services:
-     homebridge:
-       devices:
-         - /dev/dri:/dev/dri
-   ```
-
-   Restart the container, then check `ls -l /dev/dri` inside it shows a `renderD128`.
-
-2. **The user cannot open it.** `/dev/dri/renderD128` is normally owned by the `render` (or
-   on older systems `video`) group. Either run the container with `group_add:` for that
-   group's numeric GID from the host, or confirm the Homebridge user is in it.
-
-3. **The driver is not installed.** On Debian/Ubuntu hosts and images:
-
-   ```sh
-   sudo apt install intel-media-va-driver-non-free vainfo   # Gen 8+ Intel, includes UHD 630
-   vainfo                                                    # must list VAEntrypointEncSlice for H264
-   ```
-
-   `intel-media-va-driver-non-free` is the one that carries the H.264 encode entrypoint; the
-   plain `intel-media-va-driver` package does not. On AMD use `mesa-va-drivers`.
-
-4. **The ffmpeg being used is the wrong one.** The Homebridge image ships more than one
-   build, and they do not have the same capabilities: `/usr/bin/ffmpeg` has QSV and VAAPI but
-   no `libfdk_aac`, while the bundled static build is the other way round. The plugin prefers
-   a hardware-capable binary automatically, but you can pin one with the **ffmpeg path**
-   setting in the plugin's settings screen.
-
-Software encoding is a supported configuration, not a broken one — it is simply expensive.
-If you are staying on it, lower **Maximum concurrent live views** in the plugin settings and
-pin the per-camera quality to `medium` or `low` rather than `auto`.
-
-## Known limitations
-
-Compared with plugins that use UniFi's private, undocumented API, the official Integration
-API currently has these gaps:
-
-- No recording-mode switch — `recordingSettings` is absent from the Integration API.
-- No privacy mode or privacy zone control.
-- No event thumbnail download.
+The plugin remembers the console certificate after the first connection. If it changes later,
+the plugin refuses to connect until you deliberately trust the new certificate.
 
 ## HomeKit Secure Video
 
-HomeKit Secure Video (HKSV) is **off by default and enabled per camera**, because of an
-iCloud plan constraint that has nothing to do with this plugin. Apple's camera limits are:
-the 50 GB plan supports **one** camera, the 200 GB plan supports up to **five**, and the
-2 TB plan and above support an **unlimited** number. HKSV footage does *not* count against
-your iCloud storage quota — the limit is on camera count, not gigabytes. Enabling HKSV for
-more cameras than your plan supports will cause Apple to silently stop recording some of
-them, so per-camera opt-in is deliberate. Set your plan on the **Defaults** tab and the
-settings UI warns before you exceed it.
+HKSV is disabled by default and enabled per camera. It requires a supported iCloud+ plan
+and an Apple home hub (HomePod or Apple TV). Hardware video encoding is recommended when
+recording several cameras.
 
-The package lens is a separate HomeKit accessory but **does not record** — it is offered for
-live view and snapshots only — so enabling it does not use one of your plan's cameras. A
-doorbell with a package lens still counts as one.
+## Troubleshooting
 
-### What it costs
+- **Connection or certificate error:** confirm the console address and API key. Trust a changed
+  certificate only when you can explain why it changed.
+- **Camera not responding:** confirm ffmpeg is installed and restart Homebridge (or the plugin's child bridge).
+- **High CPU usage:** enable hardware video encoding or reduce concurrent live views.
+- **Missing HKSV clips:** confirm HKSV is enabled for that camera, your Apple home hub is
+  configured, and your iCloud+ plan supports it.
+- **Blank device list:** select **Test Connection** first.
 
-Each camera with recording enabled runs one continuous ffmpeg, whether or not anything ever
-moves — that is what fills the prebuffer so a clip starts *before* the motion rather than
-after it. Measured on this hardware with VAAPI H.264 and ffmpeg's native AAC encoder, that
-is **7–9% of one core per camera** on the medium substream, which is what recording uses —
-about half a core across five. (The 15% figure quoted during design was measured against
-the 2688×1512 high substream; recording advertises and delivers 1280×720, so it costs
-less.)
+## Known limitations
 
-**The per-camera quality setting does not apply to recording.** It governs live view only.
-Recording advertises 1280×720 to HomeKit and applies no scale filter, so it always opens
-the medium substream — pinning a camera to `high` or `low` changes what you see when you
-open the camera, not what is recorded. Advertising the high substream per camera instead is
-not an option: 2688×1512 needs H.264 Level 5.1, and HomeKit's recording profile stops at
-Level 4.0, so it would be a promise the negotiation cannot carry.
+The official Integration API does not currently provide recording-mode control, privacy zones,
+or event thumbnails. Protect light accessories are not yet supported.
 
-The continuous encode is a consequence of this plugin being API-key only. Plugins that
-prebuffer from UniFi's private livestream WebSocket avoid it, but that channel requires a
-username/password UniFi OS login, which this plugin deliberately does not implement.
+## Support
 
-Recording does **not** consume a live-view stream slot — the `maxStreams` cap protects
-interactive viewing, and a recording process is not an interactive viewer — but the two do
-share the GPU.
+[Report a problem or request a feature](https://github.com/ruaan-deysel/homebridge-unifi-protect-api/issues).
 
-### Two limitations worth knowing before you test
+## License
 
-**A doorbell press will not start a recording; motion will.** The press is correctly
-advertised as a trigger, but hap-nodejs documents that HomeKit HomeHubs never enable
-Doorbell triggers as of iOS 15-16, and considers it unsupported on Apple's side. The
-advertisement costs nothing and will work if Apple enables it. Until then, if you press the
-button and no clip appears, that is expected rather than a fault.
-
-**Recording audio follows the plugin setting, not the Home app toggle.** The
-`RecordingAudioActive` characteristic is never read — hap-nodejs does not push it to a
-recording delegate. hap-nodejs defaults it to off, so a camera with audio enabled records
-clips *with* sound while the Home app reports recording audio as off, and changing it there
-does nothing. Change it in the plugin settings.
-
-## Bridging
-
-All accessories are **bridged**. This plugin runs as a child bridge named for it, and every
-discovered device is published under that one HomeKit pairing rather than as separate
-standalone accessories.
-
-## Security note: certificate pinning
-
-Local UniFi consoles present a self-signed certificate for an IP address (or a
-non-publicly-resolvable hostname), which no public certificate authority can validate. This
-plugin therefore **pins your console's own certificate**: on the first connection it reads
-the certificate, stores it in `config.json` as `consoleCert`, and logs its SHA-256
-fingerprint so you can compare it with the one your console shows. Every later connection —
-REST and both WebSocket subscriptions — is verified against that certificate and nothing
-else. Verification is never disabled, and never process-wide.
-
-Only the hostname check is skipped, because the certificate is issued for the console's own
-hostname while you connect to it by IP. Certificate identity is still enforced, which is
-what stops anything else on your network from impersonating the console and collecting your
-API key.
-
-If the certificate ever changes, the plugin **refuses to connect** and logs both
-fingerprints rather than trusting the new one. That is expected after the console is
-reinstalled, reset, or has its certificate regenerated — in which case re-trust it
-deliberately with **Trust this certificate** in the plugin settings, or by deleting the
-`consoleCert` line from the `UniFiProtect` block in `config.json` and restarting Homebridge.
-If you cannot explain the change, treat it as an interception attempt and do not re-trust
-it. `consoleCert` is your own hardware's identity: it is written by the plugin, and should
-not be copied between installs or committed anywhere.
-
-## Manual hardware check
-
-`npm run live-check` runs a smoke test against a real console (not part of `npm test`).
-Copy `.env.example` to `.env`, fill in `PROTECT_HOST` and `PROTECT_API_KEY`, then run it.
-Useful after a Protect firmware update to see what changed before your users do.
+[Apache 2.0](LICENSE)

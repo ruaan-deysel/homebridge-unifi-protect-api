@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-08-03
+
 ### Changed
 - TypeScript is pinned to the 6.x line (`^6.0.3`), matching what Homebridge 2.2.1 itself
   builds against. npm's `latest` tag is now TypeScript 7, whose native compiler is too new
