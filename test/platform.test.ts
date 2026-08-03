@@ -1,5 +1,7 @@
+import type { CameraRecordingOptions } from 'homebridge'
 import type { StreamingDelegate } from '../src/accessories/streaming.js'
 import type { ProtectPluginConfig } from '../src/config.js'
+import type { SpawnFn } from '../src/protect/ffmpeg.js'
 import { Buffer } from 'node:buffer'
 import { EventEmitter } from 'node:events'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -7,6 +9,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { NEEDS_RESTART } from '../homebridge-ui/public/config-ops.js'
+import { RecordingDelegate, RESTART_DELAY_MS, SLOW_RESTART_DELAY_MS } from '../src/accessories/recording.js'
 import { UniFiProtectPlatform } from '../src/platform.js'
 import { fingerprintOf } from '../src/protect/cert.js'
 import { ProtectAuthError, ProtectUnavailableError } from '../src/protect/errors.js'
@@ -1793,6 +1796,308 @@ describe('uniFiProtectPlatform', () => {
         expect(typeof arg).toBe('string')
       expect(call.join(' ')).not.toContain('sk-live-DO-NOT-LOG')
     }
+  })
+
+  // -------------------------------------------------------------------------
+  // HomeKit Secure Video: the recording delegate on the accessory.
+  // -------------------------------------------------------------------------
+
+  const hksvOn = (...ids: string[]) => ({
+    ...validConfig,
+    devices: Object.fromEntries(ids.map(id => [id, { hksv: true }])),
+  })
+  const recordingOf = (accessory: FakePlatformAccessory) =>
+    controllerOf(accessory).options.recording as { options: CameraRecordingOptions, delegate: RecordingDelegate } | undefined
+  const recorderOf = (accessory: FakePlatformAccessory) => recordingOf(accessory)?.delegate
+
+  /** Reaches the two injection points the delegate keeps for exactly this. */
+  const innards = (recorder: RecordingDelegate) =>
+    recorder as unknown as { options: { spawn?: SpawnFn, urls: { get: (id: string, quality: string) => Promise<string> } } }
+
+  /**
+   * A stand-in ffmpeg. `kill` records that a signal was actually delivered and
+   * emits the `close` the real child emits after one — a spy on the stop path
+   * alone stays green even when nothing is killed.
+   */
+  function fakeChild() {
+    const child = new EventEmitter() as EventEmitter & { stdout: EventEmitter, stderr: EventEmitter, kill: () => boolean, killed: boolean }
+    child.stdout = new EventEmitter()
+    child.stderr = new EventEmitter()
+    child.killed = false
+    child.kill = () => {
+      child.killed = true
+      child.emit('close', 0)
+      return true
+    }
+    return child
+  }
+
+  /**
+   * Drives the mounted delegate the way HomeKit does, with a stand-in child, so
+   * a teardown assertion can check what actually happened to the encoder.
+   * Records the argv of every spawn — the substream and the audio decision are
+   * only visible there.
+   */
+  async function startRecorder(recorder: RecordingDelegate) {
+    const spawns: { args: string[], child: ReturnType<typeof fakeChild> }[] = []
+    innards(recorder).options.spawn = ((_path: string, args: string[]) => {
+      const child = fakeChild()
+      spawns.push({ args, child })
+      return child
+    }) as never
+    recorder.updateRecordingActive(true)
+    await vi.waitFor(() => expect(recorder.encoding).toBe(true))
+    return spawns
+  }
+
+  it('offers recording only for the cameras that enabled it', async () => {
+    const { accessories } = await withCameras(cameras, { config: hksvOn(DOORBELL) })
+    const doorbell = doorbellOf(accessories)
+
+    expect(recordingOf(doorbell)).toBeDefined()
+    expect(recorderOf(doorbell)).toBeInstanceOf(RecordingDelegate)
+
+    const others = accessories.filter(a => a.UUID !== `uuid-${DOORBELL}`)
+    expect(others).toHaveLength(4)
+    for (const accessory of others) {
+      // No options AND no delegate: a recording delegate is a continuously
+      // running ffmpeg, so one built for a camera nobody asked to record is a
+      // permanent transcode.
+      expect(recordingOf(accessory), accessory.displayName).toBeUndefined()
+      // And HAP therefore builds none of the HKSV services for it.
+      expect(accessory.services.some(s => s.type === S.CameraRecordingManagement), accessory.displayName).toBe(false)
+    }
+  })
+
+  it('advertises a four second prebuffer and fragmented mp4', async () => {
+    const { accessories } = await withCameras(cameras, { config: hksvOn(DOORBELL) })
+    const options = recordingOf(doorbellOf(accessories))!.options
+
+    expect(options.prebufferLength).toBe(4000)
+    const container = options.mediaContainerConfiguration as { type: number, fragmentLength: number }
+    expect(container.type).toBe(hap.MediaContainerType.FRAGMENTED_MP4)
+    expect(container.fragmentLength).toBe(4000)
+  })
+
+  // HKSV permits AAC-LC and AAC-ELD only. Live view prefers Opus on this host
+  // (its ffmpeg has libopus and no libfdk_aac) and the paths differ on purpose:
+  // advertising Opus here promises HomeKit a recording it will refuse.
+  it('advertises AAC-LC for recording and never Opus', async () => {
+    const { accessories } = await withCameras(cameras, { config: hksvOn(DOORBELL) })
+    const audio = recordingOf(doorbellOf(accessories))!.options.audio
+    const codecs = Array.isArray(audio.codecs) ? audio.codecs : [audio.codecs]
+
+    expect(codecs).toHaveLength(1)
+    expect(codecs[0]!.type).toBe(hap.AudioRecordingCodecType.AAC_LC)
+    // 3 is Opus in AudioStreamingCodecType — the value a copy of the live-view
+    // advertisement would carry. Compared as a number, because the recording
+    // enum has no Opus member for the compiler to reject it by.
+    expect(codecs.every(c => (c.type as number) !== 3)).toBe(true)
+    // What `recordingArgs` actually encodes: -ar 32000, -ac 1.
+    expect(codecs[0]!.samplerate).toBe(hap.AudioRecordingSamplerate.KHZ_32)
+    expect(codecs[0]!.audioChannels).toBe(1)
+  })
+
+  // Without a trigger HomeKit has nothing to start a recording on, and
+  // hap-nodejs derives MOTION from a CONTROLLER-owned sensor — which camera.ts
+  // already builds itself, off the event pipeline.
+  it('declares the motion trigger without letting the controller build a second motion sensor', async () => {
+    const { accessories } = await withCameras(cameras, { config: hksvOn(DOORBELL) })
+    const doorbell = doorbellOf(accessories)
+
+    expect(recordingOf(doorbell)!.options.overrideEventTriggerOptions).toEqual([hap.EventTriggerOption.MOTION])
+    expect(controllerOf(doorbell).options.sensors).toBeUndefined()
+  })
+
+  // HAP builds CameraOperatingMode from the `recording` option alone. Adding one
+  // by hand puts a second, unmanaged copy on the accessory.
+  it('leaves the HKSV services to hap-nodejs, exactly one of each', async () => {
+    const { accessories } = await withCameras(cameras, { config: hksvOn(DOORBELL) })
+    const doorbell = doorbellOf(accessories)
+    const count = (type: object) => doorbell.services.filter(s => s.type === type).length
+
+    expect(count(S.CameraOperatingMode)).toBe(1)
+    expect(count(S.CameraRecordingManagement)).toBe(1)
+    expect(count(S.DataStreamTransportManagement)).toBe(1)
+  })
+
+  it('does not build a second recording delegate on a later discovery', async () => {
+    const { platform, accessories } = await withCameras(cameras, { config: hksvOn(DOORBELL) })
+    const doorbell = doorbellOf(accessories)
+    const recorder = recorderOf(doorbell)
+
+    await platform.discover()
+
+    expect(doorbell.controllers).toHaveLength(1)
+    expect(recorderOf(doorbell)).toBe(recorder)
+  })
+
+  // The substream and the audio decision are only visible in the argv. Both are
+  // read at every encoder start, never snapshotted at construction: a user who
+  // pins `low` to save bandwidth must not go on paying for the high substream
+  // every minute of every day because the delegate copied the setting once.
+  it('encodes on the substream and with the audio the resolved settings ask for, re-read on every start', async () => {
+    const config = { ...validConfig, devices: { [DOORBELL]: { hksv: true, audio: true, quality: 'low' } } }
+    const { platform, accessories } = await withCameras(cameras, { config })
+    const recorder = recorderOf(doorbellOf(accessories))!
+
+    const spawns = await startRecorder(recorder)
+
+    expect(spawns).toHaveLength(1)
+    const first = spawns[0]!.args
+    expect(first[first.indexOf('-i') + 1]).toContain(`${DOORBELL}-low`)
+    expect(first).toContain('-c:a')
+    expect(first).not.toContain('-an')
+    // A recording START is logged, not only the failures.
+    expect(log.info.mock.calls.flat().join(' ')).toContain('Recording prebuffer started')
+    // Recording must not eat a live-view slot: that cap protects interactive
+    // viewing, and a recorder is not an interactive viewer.
+    expect(FfmpegProcess.activeCount).toBe(0)
+
+    // What saving the settings page does: rewrite the config block in place.
+    const live = (platform as unknown as { config: ProtectPluginConfig }).config
+    live.devices[DOORBELL] = { hksv: true, audio: false, quality: 'high' }
+    recorder.updateRecordingActive(false)
+    recorder.updateRecordingActive(true)
+    await vi.waitFor(() => expect(spawns).toHaveLength(2))
+
+    const second = spawns[1]!.args
+    expect(second[second.indexOf('-i') + 1]).toContain(`${DOORBELL}-high`)
+    expect(second).toContain('-an')
+    expect(second).not.toContain('-c:a')
+
+    recorder.updateRecordingActive(false)
+  })
+
+  it('stops the recording encoder on shutdown too', async () => {
+    const { api, accessories } = await withCameras(cameras, { config: hksvOn(DOORBELL) })
+    const recorder = recorderOf(doorbellOf(accessories))!
+    const spawns = await startRecorder(recorder)
+
+    api.emit('shutdown')
+
+    expect(spawns[0]!.child.killed).toBe(true)
+    expect(recorder.encoding).toBe(false)
+  })
+
+  /** The console stops reporting the doorbell; everything else stays. */
+  const withoutDoorbell = () => makeClient(cameras.filter(c => c.id !== DOORBELL))
+
+  it('stops the recording encoder when the accessory is removed', async () => {
+    const { platform, accessories } = await withCameras(cameras, { config: hksvOn(DOORBELL) })
+    const recorder = recorderOf(doorbellOf(accessories))!
+    const spawns = await startRecorder(recorder)
+
+    platform.confirmRemovalAfterMs = 0
+    platform.client = withoutDoorbell() as never
+    // One pass to notice it missing, one to confirm.
+    await platform.discover()
+    await platform.discover()
+
+    expect(platform.accessories.has(`uuid-${DOORBELL}`)).toBe(false)
+    expect(spawns[0]!.child.killed).toBe(true)
+    expect(recorder.encoding).toBe(false)
+  })
+
+  // The restart policy retries FOREVER by design, so a delegate left behind is a
+  // live timer plus a retained delegate for the life of the process — spawning
+  // ffmpeg against a camera HomeKit no longer knows about.
+  it('clears a pending encoder restart when the accessory is removed', async () => {
+    const { platform, accessories } = await withCameras(cameras, { config: hksvOn(DOORBELL) })
+    const recorder = recorderOf(doorbellOf(accessories))!
+    const spawns = await startRecorder(recorder)
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      // An unexpected exit. The restart policy now has a timer pending.
+      spawns[0]!.child.emit('close', 1)
+      expect(recorder.encoding).toBe(false)
+
+      platform.confirmRemovalAfterMs = 0
+      platform.client = withoutDoorbell() as never
+      await platform.discover()
+      await platform.discover()
+      expect(platform.accessories.has(`uuid-${DOORBELL}`)).toBe(false)
+
+      // Well past both cadences.
+      await vi.advanceTimersByTimeAsync(SLOW_RESTART_DELAY_MS + RESTART_DELAY_MS)
+
+      expect(spawns).toHaveLength(1)
+      expect(recorder.encoding).toBe(false)
+    }
+    finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // updateRecordingActive(false) then (true): stopEncoder clears the handle, so
+  // the old process's late `close` used to land while the new start was still
+  // awaiting its stream URL — logging a stop the user never caused and bumping
+  // the failure tally for a process they deliberately stopped, which nudges a
+  // healthy camera towards the ten-minute cadence on its next real fault.
+  it('ignores the exit of a process that was already replaced', async () => {
+    const { accessories } = await withCameras(cameras, { config: hksvOn(DOORBELL) })
+    const recorder = recorderOf(doorbellOf(accessories))!
+    const spawns = await startRecorder(recorder)
+    // A kill with no SYNCHRONOUS close — the real child's arrives later, which
+    // is the entire point of this test.
+    spawns[0]!.child.kill = () => {
+      spawns[0]!.child.killed = true
+      return true
+    }
+
+    // Park the second start inside its stream-url fetch: that await is the
+    // window the stale exit lands in.
+    let parked = false
+    let release: (url: string) => void = () => {}
+    innards(recorder).options.urls = {
+      get: async () => new Promise<string>((resolve) => {
+        parked = true
+        release = resolve
+      }),
+    }
+    recorder.updateRecordingActive(false)
+    recorder.updateRecordingActive(true)
+    await vi.waitFor(() => expect(parked).toBe(true))
+
+    log.info.mockClear()
+    spawns[0]!.child.emit('close', 0)
+    release('rtsps://10.0.0.1:7441/second?token=SECRET')
+    await vi.waitFor(() => expect(spawns).toHaveLength(2))
+
+    // The stale exit is not the running encoder's, so it reports nothing and
+    // blames nothing. The live encoder is untouched.
+    expect(log.info.mock.calls.flat().join(' ')).not.toContain('stopped after')
+    expect(recorder.encoding).toBe(true)
+    expect(spawns[1]!.child.killed).toBe(false)
+
+    recorder.updateRecordingActive(false)
+  })
+
+  // A kill that was not delivered leaves an orphan ffmpeg producing bytes the
+  // splitter now drops, and `onExit` never fires for it — nothing else in the
+  // process would ever say so.
+  it('reports a failed kill after the recording stream turns unreadable, exactly once', async () => {
+    const { accessories } = await withCameras(cameras, { config: hksvOn(DOORBELL) })
+    const recorder = recorderOf(doorbellOf(accessories))!
+    const spawns = await startRecorder(recorder)
+    const child = spawns[0]!.child
+    child.kill = () => false
+
+    const corrupt = Buffer.alloc(8)
+    corrupt.writeUInt32BE(0xFFFFFFFF, 0)
+    corrupt.write('mdat', 4, 'latin1')
+    child.stdout.emit('data', corrupt)
+    // Whole, well-formed media after it — dropped, because the framing is gone.
+    child.stdout.emit('data', corrupt)
+
+    const warnings = log.warn.mock.calls.flat().join('\n').split('\n')
+    expect(warnings.filter(w => w.includes('It may still be running'))).toHaveLength(1)
+    // Held, not cleared: `this.proc` still points at the orphan, so the next
+    // start refuses to spawn a second encoder against the same camera.
+    expect(recorder.encoding).toBe(true)
+
+    recorder.updateRecordingActive(false)
   })
 })
 

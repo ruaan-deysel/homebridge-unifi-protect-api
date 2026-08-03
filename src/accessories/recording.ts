@@ -308,26 +308,34 @@ export class RecordingDelegate implements CameraRecordingDelegate {
             // be a one-off, and stopEncoder() here would take HKSV down for
             // this camera until HomeKit next toggled Active.
             //
-            // CEILING (rides with the mounting task): the boolean is ignored
-            // here, the one place in this file where a failed kill is not
-            // honoured — and the splitter is wedged either way, because it
-            // concatenated the chunk before throwing and the throw consumes
-            // nothing, so `pending` grows with every further chunk. A `broken`
-            // flag in Fmp4Splitter that drops subsequent chunks closes both.
-            proc.stop()
+            // The boolean is HONOURED, like everywhere else in this file: a kill
+            // that was not delivered leaves an orphan ffmpeg producing bytes the
+            // splitter now drops, and since `onExit` never fires for it nothing
+            // else would ever say so. The handle is deliberately NOT cleared —
+            // `this.proc` still points at it, so the next start refuses to spawn
+            // a second encoder against the same camera.
+            //
+            // Warned at most once per process: `Fmp4Splitter` latches `broken`
+            // and drops every later chunk, so this catch cannot run again.
+            if (!proc.stop())
+              this.options.log.warn(`Could not stop the unreadable recording encoder for "${this.options.label}". It may still be running.`)
           }
         },
         onExit: () => {
-          // A newer process means this exit belongs to one already replaced.
+          // STRICT identity, deliberately. Anything else — a NEWER process, or
+          // `undefined` because stopEncoder already cleared the field — means
+          // this exit is not the running encoder's. Letting a stale one through
+          // logs a stop the user never caused and bumps `failures` for a process
+          // they deliberately stopped, nudging a healthy camera towards the slow
+          // cadence on its next real fault.
           //
-          // CEILING (rides with the mounting task): the `undefined` case lets a
-          // STALE process through — updateRecordingActive(false) then (true)
-          // clears the field, so the old process's late `close` passes here and
-          // logs a spurious stop and one phantom failure. Gating strictly on
-          // `this.proc === proc` closes it, but that also drops the exit of a
-          // process stopEncoder killed, which is the exit this restart path
-          // reads; the two want untangling together, not in a fix wave.
-          if (this.proc !== undefined && this.proc !== proc)
+          // It also drops the exit of a process `stopEncoder` successfully
+          // killed, which is correct: that path is only reached from
+          // `updateRecordingActive(false)`, which has already run `teardown()`
+          // and set `active = false`, so `scheduleRestart` would return early
+          // anyway. A kill that FAILED leaves `this.proc` pointing at it, so its
+          // eventual exit still lands here and still clears the handle.
+          if (this.proc !== proc)
             return
           this.proc = undefined
           this.teardown()

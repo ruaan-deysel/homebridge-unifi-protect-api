@@ -29,10 +29,25 @@ export class Fmp4Splitter {
   private pending: Buffer<ArrayBufferLike> = Buffer.alloc(0)
   private init: Buffer[] = []
   private fragment: Buffer[] = []
+  /**
+   * Latched by the length guard below. A corrupt box length is not recoverable:
+   * the cursor cannot advance past it, so without this every LATER chunk would
+   * be concatenated onto `pending` and re-throw against the same bad prefix —
+   * `pending` growing without limit and the caller warning once per chunk. The
+   * throw itself consumes nothing, which is why dropping has to happen here.
+   */
+  private broken = false
 
   constructor(private readonly emit: (kind: Fmp4Piece, data: Buffer) => void) {}
 
+  /** True once a corrupt box length was seen. Every further chunk is dropped. */
+  get wedged(): boolean {
+    return this.broken
+  }
+
   push(chunk: Buffer): void {
+    if (this.broken)
+      return
     this.pending = this.pending.length === 0 ? chunk : Buffer.concat([this.pending, chunk])
     for (;;) {
       if (this.pending.length < MIN_BOX)
@@ -46,8 +61,13 @@ export class Fmp4Splitter {
       // end of file" — and are rejected here rather than implemented: neither
       // can occur in a 4 s fragmented-MP4 stream from this encoder, and both
       // would be dead code nobody could exercise.
-      if (length < MIN_BOX || length > MAX_BOX)
+      if (length < MIN_BOX || length > MAX_BOX) {
+        this.broken = true
+        // Released with the flag: nothing will ever read past this prefix again,
+        // and up to MAX_BOX of it may be held.
+        this.pending = Buffer.alloc(0)
         throw new Error(`refusing a box length of ${length} (64-bit and to-end-of-file box sizes are not supported)`)
+      }
       if (this.pending.length < length)
         return
       const type = this.pending.toString('latin1', 4, 8)

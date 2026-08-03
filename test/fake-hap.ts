@@ -16,6 +16,9 @@ export const S = {
   Switch: { name: 'Switch' },
   Microphone: { name: 'Microphone' },
   CameraRTPStreamManagement: { name: 'CameraRTPStreamManagement' },
+  CameraRecordingManagement: { name: 'CameraRecordingManagement' },
+  CameraOperatingMode: { name: 'CameraOperatingMode' },
+  DataStreamTransportManagement: { name: 'DataStreamTransportManagement' },
 }
 
 export const C = {
@@ -95,6 +98,16 @@ export class FakeCameraController {
     // HAP adds a Microphone service only when audio is actually advertised.
     if ((this.options.streamingOptions as { audio?: unknown } | undefined)?.audio)
       services.push(new FakeService(S.Microphone, 'Microphone'))
+    // HAP builds the whole RecordingManagement — CameraOperatingMode included —
+    // from the `recording` option alone. Modelled so a test can catch anyone
+    // adding CameraOperatingMode by hand beside it.
+    if (this.options.recording) {
+      services.push(
+        new FakeService(S.CameraRecordingManagement, 'Recording Management'),
+        new FakeService(S.CameraOperatingMode, 'Operating Mode'),
+        new FakeService(S.DataStreamTransportManagement, 'Data Stream Transport Management'),
+      )
+    }
     return services
   }
 }
@@ -155,4 +168,12 @@ export const hap = {
   SRTPCryptoSuites: { AES_CM_128_HMAC_SHA1_80: 0, AES_CM_256_HMAC_SHA1_80: 1, NONE: 2 },
   H264Profile: { BASELINE: 0, MAIN: 1, HIGH: 2 },
   H264Level: { LEVEL3_1: 0, LEVEL3_2: 1, LEVEL4_0: 2 },
+  // HKSV. Every value is the real hap-nodejs one — these go on the wire, so a
+  // made-up number would let a test agree with a wrong advertisement.
+  VideoCodecType: { H264: 0 },
+  MediaContainerType: { FRAGMENTED_MP4: 0 },
+  EventTriggerOption: { MOTION: 1, DOORBELL: 2 },
+  AudioRecordingCodecType: { AAC_LC: 0, AAC_ELD: 1 },
+  AudioRecordingSamplerate: { KHZ_8: 0, KHZ_16: 1, KHZ_24: 2, KHZ_32: 3, KHZ_44_1: 4, KHZ_48: 5 },
+  AudioBitrate: { VARIABLE: 0, CONSTANT: 1 },
 }

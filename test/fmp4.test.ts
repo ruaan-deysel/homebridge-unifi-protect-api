@@ -80,6 +80,42 @@ describe('fmp4Splitter', () => {
     expect(out).toEqual(['fragment'])
   })
 
+  /**
+   * The throw consumes nothing, so without a latch every later chunk is
+   * concatenated onto the same corrupt prefix and throws again — `pending`
+   * growing without limit while the caller warns once per chunk. Asserted on
+   * the second push, which is the one that used to re-throw.
+   */
+  it('drops every chunk after a corrupt box length instead of re-throwing on each one', () => {
+    const bad = Buffer.alloc(8)
+    bad.writeUInt32BE(0xFFFFFFFF, 0)
+    bad.write('mdat', 4, 'latin1')
+    const out: string[] = []
+    const split = new Fmp4Splitter(kind => out.push(kind))
+
+    expect(() => split.push(bad)).toThrow(/box length/i)
+    expect(split.wedged).toBe(true)
+
+    // Perfectly well-formed media, and still dropped: the framing is lost.
+    expect(() => split.push(Buffer.concat([box('ftyp'), box('moov')]))).not.toThrow()
+    expect(() => split.push(Buffer.concat([box('moof'), box('mdat')]))).not.toThrow()
+    expect(out).toEqual([])
+  })
+
+  it('holds nothing after a corrupt box length, so a wedged splitter cannot grow', () => {
+    const bad = Buffer.alloc(8)
+    bad.writeUInt32BE(0xFFFFFFFF, 0)
+    bad.write('mdat', 4, 'latin1')
+    const split = new Fmp4Splitter(() => {})
+
+    expect(() => split.push(bad)).toThrow(/box length/i)
+
+    // The buffer the guard refused to accumulate towards is released.
+    expect((split as unknown as { pending: Buffer }).pending).toHaveLength(0)
+    split.push(Buffer.alloc(1024))
+    expect((split as unknown as { pending: Buffer }).pending).toHaveLength(0)
+  })
+
   it('emits the fragment payload as the concatenation of the moof and mdat boxes, not just their headers', () => {
     const moof = box('moof', Buffer.from('MOOF-PAYLOAD'))
     const mdat = box('mdat', Buffer.from('MDAT-PAYLOAD'))
