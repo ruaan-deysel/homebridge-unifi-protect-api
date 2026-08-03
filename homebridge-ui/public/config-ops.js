@@ -282,23 +282,35 @@ export function cameraToggles(device) {
  * Homebridge injects and themes — this plugin ships no CSS of its own, so
  * dropping these classes silently reverts the control to a tiny checkbox.
  * Callers that restyle the wrapper must APPEND to `className`, never replace it.
+ *
+ * The wrapper is a `div`, and the text sits in its own `form-check-label` —
+ * Bootstrap's documented switch markup. It used to be the `<label>` itself
+ * with the text appended straight into it, which meant everything the caller
+ * appended afterwards (the restart marker, the default/overridden badge, the
+ * reset BUTTON) landed inside the label: a button nested in a label is
+ * invalid HTML, and the checkbox's accessible name read "Live view audio
+ * restart required overridden reset". `caption` is returned so callers can
+ * assert on the accessible name; badges and buttons go on `wrap`, beside it.
  */
 export function renderToggle(doc, id, label, needsRestart = false) {
-  const wrap = doc.createElement('label')
+  const wrap = doc.createElement('div')
   wrap.className = 'form-check form-switch'
-  wrap.setAttribute('for', id)
   const input = doc.createElement('input')
   input.className = 'form-check-input'
   input.type = 'checkbox'
   input.id = id
-  wrap.append(input, ` ${label}`)
+  const caption = doc.createElement('label')
+  caption.className = 'form-check-label'
+  caption.setAttribute('for', id)
+  caption.textContent = label
+  wrap.append(input, caption)
   if (needsRestart) {
     const marker = doc.createElement('span')
     marker.className = 'badge text-bg-warning ms-2'
     marker.textContent = 'restart required'
     wrap.append(marker)
   }
-  return { wrap, input }
+  return { wrap, input, caption }
 }
 
 /**

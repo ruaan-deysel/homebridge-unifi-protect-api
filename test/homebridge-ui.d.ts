@@ -163,7 +163,7 @@ declare module '*/homebridge-ui/public/config-ops.js' {
     id: string,
     label: string,
     needsRestart?: boolean,
-  ): { wrap: MinimalDomElement, input: MinimalDomElement }
+  ): { wrap: MinimalDomElement, input: MinimalDomElement, caption: MinimalDomElement }
 
   export function debounce<T extends (...args: never[]) => void>(
     fn: T,
@@ -186,6 +186,23 @@ declare module '*/homebridge-ui/public/config-ops.js' {
   export function cameraToggles(
     device: { type?: string, hasMic?: boolean, hasSpeaker?: boolean, hasPackageCamera?: boolean },
   ): { key: string, label: string, comingLater?: boolean, section: 'Live view' | 'Recording' | 'Extra accessories' }[]
+}
+
+// index.html's behaviour, extracted so eslint and the tests can both reach it.
+// Everything it touches arrives as an argument — there is no global lookup in
+// the module — which is what makes `startUi(fakeDoc, fakeHomebridge)` a real
+// end-to-end drive of the settings page.
+declare module '*/homebridge-ui/public/app.js' {
+  export interface UiPageDocument extends UiDocument {
+    getElementById: (id: string) => UiElement
+    addEventListener: (type: string, handler: () => void) => void
+    visibilityState: string
+  }
+  export function startUi(
+    doc: UiPageDocument,
+    homebridge: unknown,
+    win?: { addEventListener: (type: string, handler: () => void) => void },
+  ): Promise<void>
 }
 
 declare module '*/homebridge-ui/public/ui-render.js' {
