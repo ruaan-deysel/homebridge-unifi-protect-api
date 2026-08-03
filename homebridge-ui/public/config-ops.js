@@ -223,8 +223,9 @@ export function shouldOfferPackageCamera(device) {
  * renders exactly this list and nothing else, so the package toggle's
  * appearance is decided in tested code rather than in an untestable inline
  * branch. `comingLater` renders the control inert: the setting exists in the
- * schema but nothing reads it yet — which is now hksv alone. Audio, talkback
- * and the package lens are all live; do not add the flag back to them.
+ * schema but nothing reads it yet — which no toggle currently sets. Audio,
+ * talkback, the package lens and hksv are all live; do not add the flag back
+ * to them.
  *
  * `section` names the detail-pane section (see `renderDetail`'s `SECTIONS`
  * in ui-render.js) index.html files the toggle under. It lives here, next

@@ -124,6 +124,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for a camera the console reports a package lens on, and its label states plainly that the
   console serves that lens at 2 fps — enabling it adds a second HomeKit accessory for one
   physical device, so nobody should be surprised by either consequence after the fact.
+- HomeKit Secure Video recording, off by default per camera. A camera with recording
+  enabled runs one continuous ffmpeg — RTSPS in, fragmented MP4 out — feeding a 16-fragment
+  in-memory prebuffer, so a clip starts *before* the motion that triggered it rather than
+  after. Measured on the real console at roughly 15% of one core per camera (VAAPI H.264
+  plus ffmpeg's native AAC encoder), or about 0.75 cores across five cameras.
+- Recording never consumes a live-view stream slot. The `maxStreams` cap exists to protect
+  interactive viewing, and a recording process is not an interactive viewer — but the two
+  do share the GPU.
+- Recording uses H.264 with AAC-LC. HomeKit Secure Video does not permit Opus, which live
+  view prefers on this host, so the two pipelines deliberately differ.
+- A doorbell press is advertised as a recording trigger alongside motion. **Apple's
+  HomeHubs are not currently known to act on it:** hap-nodejs documents that HomeHubs never
+  enable Doorbell triggers as of iOS 15-16 and believes the gap is on Apple's side. The
+  advertisement is correct and costs nothing, so it will work if and when Apple enables it —
+  but today, motion is what starts a clip.
+- The settings UI is rebuilt on Homebridge's own injected Bootstrap 5 theme, replacing the
+  hand-rolled CSS. It now has four tabs — Connection, Defaults, Devices, Help — with a
+  searchable device list beside a detail pane, real toggle switches instead of 13 px
+  checkboxes, and settings grouped rather than laid out as one flat grid. Because global
+  and per-device settings now live in different places, it is never ambiguous which one is
+  being edited. Dark mode comes from Homebridge's theme rather than hardcoded colours.
+- Every per-device setting shows whether it is inherited or overridden, and an overridden
+  one can be reset to the inherited value.
+- Saves are debounced by one second, so flipping several toggles in a row writes
+  `config.json` once instead of once per click. Settings that genuinely require a restart
+  say so explicitly, rather than every change surfacing Homebridge's restart banner.
+- A new iCloud tier setting (50 GB / 200 GB / 2 TB+, defaulting to 200 GB) drives an
+  advisory warning when more cameras have recording enabled than the tier allows — five on
+  200 GB, one on 50 GB. It names the tier and both counts, and never blocks the setting:
+  the plugin cannot see your subscription, and refusing a setting on a guess would be worse
+  than a warning you can ignore.
 
 ### Fixed
 - The video size and frame rate a controller negotiates are now validated before they
@@ -211,6 +242,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A changed certificate fails closed: the plugin refuses to connect, and the log and the
   settings UI both show the trusted and presented fingerprints plus how to re-trust it
   deliberately. Nothing is ever re-trusted silently.
+
+### Known limitations
+- Recording audio follows the plugin's own audio setting, not the Home app's "recording
+  audio" toggle. The `RecordingAudioActive` characteristic is never read: hap-nodejs does
+  not push its value to a recording delegate, and reading it needs the `CameraController`
+  instance the plugin currently discards. Two consequences — hap-nodejs defaults that
+  characteristic to off, so a camera with audio enabled records clips *with* sound while
+  the Home app reports recording audio as off; and changing it in the Home app does
+  nothing. Change it in the plugin settings instead.
+- A doorbell press does not start a recording in practice, despite being advertised as a
+  trigger. See above: hap-nodejs documents this as an Apple-side gap.
+- The prebuffer runs a continuous ffmpeg per recording camera because the Integration API
+  exposes no push channel for video. Plugins built on UniFi's private livestream WebSocket
+  avoid that cost, but that channel requires a username/password UniFi OS login, which this
+  plugin deliberately does not implement — it is API-key only. The continuous-ffmpeg model
+  is a direct and accepted consequence of that choice.
 
 ## [0.1.0] - 2026-07-31
 
