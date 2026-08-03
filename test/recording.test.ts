@@ -757,8 +757,11 @@ describe('recordingDelegate encoder', () => {
   it('returns to the fast retry after a run that lasted AND produced media', async () => {
     const h = await onSlowCadence()
 
-    // The half that makes it a healthy run rather than merely a long one.
+    // The half that makes it a healthy run rather than merely a long one — and
+    // it must be a FRAGMENT. This used to emit only `init`, which passed while
+    // the source counted any piece as media, and therefore hid the defect below.
     h.proc.stdout.emit('data', init('recovered'))
+    h.proc.stdout.emit('data', fragment('real-media'))
     await vi.advanceTimersByTimeAsync(HEALTHY_RUN_MS)
     const healthy = h.spawn.mock.calls.length
     h.proc.emit('close', 1)
@@ -789,6 +792,32 @@ describe('recordingDelegate encoder', () => {
     await flush()
     expect(h.spawn.mock.calls.length).toBe(silent + 1)
     expect(h.delegate.encoding).toBe(true)
+  })
+
+  // The gap between the two tests above, and the one the "produced media" half
+  // was actually failing to check: ffmpeg writes `ftyp+moov` the moment the
+  // muxer opens, BEFORE encoding a single frame. An encoder that connects,
+  // emits that header and then produces nothing recordable is not a healthy
+  // run — but it used to count as one, so a camera in that state respawned
+  // every 10 s forever instead of backing off. An init segment is the encoder
+  // saying hello, not the encoder working.
+  it('does not count an init segment alone as media', async () => {
+    const h = await onSlowCadence()
+
+    // A header and nothing else, for a full healthy run.
+    h.proc.stdout.emit('data', init('header-only'))
+    await vi.advanceTimersByTimeAsync(HEALTHY_RUN_MS)
+    const before = h.spawn.mock.calls.length
+    h.proc.emit('close', 1)
+    await vi.advanceTimersByTimeAsync(RESTART_DELAY_MS)
+    await flush()
+
+    // Still slow: nothing at the fast interval...
+    expect(h.spawn.mock.calls.length).toBe(before)
+    // ...and it does land at the slow one.
+    await vi.advanceTimersByTimeAsync(SLOW_RESTART_DELAY_MS - RESTART_DELAY_MS)
+    await flush()
+    expect(h.spawn.mock.calls.length).toBe(before + 1)
   })
 
   it('warns about the slow cadence once, not on every further failure', async () => {

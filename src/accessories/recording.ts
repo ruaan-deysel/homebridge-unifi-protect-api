@@ -346,7 +346,15 @@ export class RecordingDelegate implements CameraRecordingDelegate {
       // the next one exits without producing.
       let produced = false
       const splitter = new Fmp4Splitter((kind, data) => {
-        produced = true
+        // A FRAGMENT, not merely an init segment. ffmpeg writes `ftyp+moov` as
+        // soon as the muxer opens, before a single frame has been encoded, so
+        // counting any piece meant an encoder that connected, emitted a header
+        // and then produced nothing recordable still qualified as a healthy run
+        // — and stayed on the 10 s retry cadence forever instead of backing off
+        // to 10 minutes. An init segment is the encoder saying hello, not the
+        // encoder working.
+        if (kind === 'fragment')
+          produced = true
         this.onPiece(kind, data)
       })
       const startedAt = Date.now()
