@@ -32,10 +32,19 @@ interface UiElement {
   dataset: Record<string, string>
   tabIndex: number
   setAttribute: (name: string, value: string) => void
-  append: (...nodes: (UiElement | string)[]) => void
-  replaceChildren: (...nodes: (UiElement | string)[]) => void
   addEventListener: (type: 'click' | 'keydown' | 'change', handler: (event: { key?: string }) => void) => void
   focus: () => void
+  // `append` and `replaceChildren` are deliberately NOT declared, even though
+  // the UI modules call both. They take the element type in PARAMETER
+  // position, and this repo's eslint requires function properties over method
+  // shorthand (`ts/method-signature-style`), which means `strictFunctionTypes`
+  // checks them contravariantly: a fake element RICHER than this interface
+  // stops being assignable rather than starting to be. Declaring them made
+  // every `renderDetail(doc, …)` call in the tests a TS2345. Nothing reads
+  // either one THROUGH this type — the tests hold a concrete FakeElement — so
+  // declaring them bought no checking and cost 39 errors. Do not re-add them
+  // as arrow properties. Every other member below IS enforced: drop `focus`
+  // from FakeElement and `npm run lint` fails at all 39 call sites.
 }
 interface UiDocument {
   createElement: (tag: string) => UiElement
