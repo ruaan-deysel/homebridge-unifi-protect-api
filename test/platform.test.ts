@@ -689,6 +689,38 @@ describe('uniFiProtectPlatform', () => {
     expect(detected(DOORBELL, 'motion')).toBe(false)
   })
 
+  // Motion is what triggers every HKSV recording, and it used to reach HomeKit
+  // in complete silence: a walk past a camera that produced no clip left no way
+  // to tell whether motion had fired or HomeKit had ignored it. Asserted on the
+  // real logger's calls, never on source text.
+  it('logs the motion that triggers a recording, naming the camera', async () => {
+    const { bus } = await withCameras()
+    const [start] = frames('motion')
+    log.info.mockClear()
+
+    bus.emit('protectEvent', start)
+
+    const info = log.info.mock.calls.flat().join(' ')
+    expect(info).toContain('Motion detected')
+    // Named, so a multi-camera log says WHICH camera saw something.
+    expect(info).toContain(camera('Doorbell').name as string)
+  })
+
+  // Five outdoor cameras would otherwise put a line in the log for every
+  // passing car. The clear is diagnostic, not an event worth announcing.
+  it('keeps the motion clear off the info log', async () => {
+    const { bus } = await withCameras()
+    const [start, end] = frames('motion')
+    bus.emit('protectEvent', start)
+    log.info.mockClear()
+    log.debug.mockClear()
+
+    bus.emit('protectEvent', end)
+
+    expect(log.info).not.toHaveBeenCalled()
+    expect(log.debug.mock.calls.flat().join(' ')).toContain('is now clear')
+  })
+
   it('drives the per-type sensor on the right camera from the captured smart-detect frames', async () => {
     const { bus, detected } = await withCameras()
 

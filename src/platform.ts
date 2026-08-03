@@ -1161,8 +1161,10 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
     try {
       for (const change of changes) {
         const accessory = this.accessories.get(this.api.hap.uuid.generate(change.deviceId))
-        if (accessory)
+        if (accessory) {
           applyChange(this.api, accessory, change)
+          this.logSensorChange(accessory.displayName, change)
+        }
       }
     }
     catch (error) {
@@ -1171,6 +1173,31 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
       // error's request context in this repo before.
       this.log.warn(`Could not apply a sensor change: ${errorMessage(error)}`)
     }
+  }
+
+  /**
+   * The success path, logged. Motion is the trigger for every HKSV recording,
+   * and it used to reach HomeKit in total silence — so when a walk past a
+   * camera produced no clip there was no way to tell from the log whether
+   * motion had fired at all or HomeKit had ignored it. Talkback shipped with
+   * exactly that hole and it cost a hardware-gate round.
+   *
+   * `subtype` is this plugin's own string ('motion', 'smart-person', 'ring',
+   * 'audio-alrmSmoke'…), never console-supplied text, so it is safe to log.
+   * The display name comes from the console and is attacker-controlled, but a
+   * log line is not markup and Homebridge escapes nothing — it is quoted for
+   * readability only.
+   *
+   * Motion START at info because that is the line a user watching a hardware
+   * test needs to see without turning on debug. Everything else — the clear,
+   * and every non-motion sensor — at debug, or five outdoor cameras would fill
+   * the log with a line per passing car.
+   */
+  private logSensorChange(label: string, change: SensorChange): void {
+    if (change.subtype === 'motion' && change.active)
+      this.log.info(`Motion detected on "${label}".`)
+    else
+      this.log.debug(`Sensor "${change.subtype}" on "${label}" is now ${change.active ? 'active' : 'clear'}.`)
   }
 
   /** Frames arrive unvalidated. Nothing in here may throw back into the socket. */
