@@ -671,7 +671,7 @@ describe('icloudTier validation', () => {
 // double-count instead of trusting a possibly-stale config.json flag.
 describe('recordingCount / tierWarning', () => {
   const base = ensureConfig({})
-  const devices = (ids: string[]) => ids.map(id => ({ id, hasPackageCamera: true }))
+  const devices = (ids: string[]) => ids.map(id => ({ id, type: 'camera', hasPackageCamera: true }))
   const withDevices = (deviceConfig: Record<string, DeviceOverride>, tier: IcloudTier = '200gb') =>
     ({ ...base, defaults: { ...base.defaults, icloudTier: tier }, devices: deviceConfig })
 
@@ -687,6 +687,25 @@ describe('recordingCount / tierWarning', () => {
     // the flag, so a re-introduced double-count fails here rather than being
     // absorbed by a hardcoded expectation.
     expect(recordingCount(withLens, devices(['a']))).toBe(recordingCount(withoutLens, devices(['a'])))
+  })
+
+  // A light, sensor or chime is never an HKSV camera, even if it somehow
+  // carries an hksv override or inherits a true default from
+  // `defaults.hksv` — only `device.type === 'camera'` counts.
+  it('does not count a non-camera device, override or inherited default', () => {
+    const config = withDevices({ a: { hksv: true }, b: {} })
+    config.defaults.hksv = true
+    const mixed = [
+      { id: 'a', type: 'light', hasPackageCamera: false },
+      { id: 'b', type: 'camera', hasPackageCamera: false },
+    ]
+    expect(recordingCount(config, mixed)).toBe(1)
+
+    // Direction check: a lone non-camera with hksv on must count zero. Without
+    // this, a flipped `type === 'camera'` comparison above still passes the
+    // mixed-list assertion by coincidence (skip the camera, count the light).
+    const lightOnly = withDevices({ a: { hksv: true } })
+    expect(recordingCount(lightOnly, [{ id: 'a', type: 'light', hasPackageCamera: false }])).toBe(0)
   })
 
   it('does not count a device that is not recording, lens or no lens', () => {

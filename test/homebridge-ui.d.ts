@@ -169,6 +169,7 @@ declare module '*/homebridge-ui/public/config-ops.js' {
 
   export interface RecordingDevice {
     id: string
+    type: string
     hasPackageCamera?: boolean
   }
   export function recordingCount(config: ConfigShape, devices: RecordingDevice[]): number

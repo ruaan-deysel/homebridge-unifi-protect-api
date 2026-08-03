@@ -340,6 +340,8 @@ export const NEEDS_RESTART = new Set(['audio', 'talkback', 'hksv'])
 export function recordingCount(config, devices) {
   let count = 0
   for (const device of devices) {
+    if (device.type !== 'camera')
+      continue
     const settings = config.devices?.[device.id]
     if (settings?.hksv ?? defaultFor(config, 'hksv'))
       count++
