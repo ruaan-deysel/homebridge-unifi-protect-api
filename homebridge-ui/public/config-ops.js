@@ -254,11 +254,19 @@ export function cameraToggles(device) {
  * `needsRestart` renders an actual marker element (never baked into `label`
  * text), so the signal survives even for a control whose label does not
  * mention "restart" — pass `NEEDS_RESTART.has(key)`, not a guess.
+ *
+ * `form-check form-switch` + `form-check-input` are what turn Bootstrap's
+ * 13 px default checkbox into an actual switch. They come from the Bootstrap
+ * Homebridge injects and themes — this plugin ships no CSS of its own, so
+ * dropping these classes silently reverts the control to a tiny checkbox.
+ * Callers that restyle the wrapper must APPEND to `className`, never replace it.
  */
 export function renderToggle(doc, id, label, needsRestart = false) {
   const wrap = doc.createElement('label')
+  wrap.className = 'form-check form-switch'
   wrap.setAttribute('for', id)
   const input = doc.createElement('input')
+  input.className = 'form-check-input'
   input.type = 'checkbox'
   input.id = id
   wrap.append(input, ` ${label}`)
@@ -299,26 +307,22 @@ export const SAVE_DEBOUNCE_MS = 1000
 export const NEEDS_RESTART = new Set(['audio', 'talkback', 'hksv'])
 
 /**
- * Accessories that would record, not cameras — the package lens is a SEPARATE
- * HomeKit accessory, so a doorbell with both recording and the package camera
- * on consumes two of the tier's slots.
+ * Accessories that would record. The package lens is a separate HomeKit
+ * accessory but `attachPackageCamera` builds its `CameraController` with NO
+ * `recording` key, so it never advertises HKSV and can never occupy one of
+ * Apple's camera slots — enabling the lens must not move this count.
  *
  * Takes the discovered device list, not just `config.devices`: a device with
  * no override entry still inherits `defaults.hksv`, and counting only the
  * entries that happen to exist in config.json would miss every camera
- * relying on the default (e.g. a user who flips `defaults.hksv` on). The
- * device list is also the only place `hasPackageCamera` lives — config.json
- * can carry a stale `packageCamera: true` left over from a lens that is no
- * longer there, and that would not create a second accessory.
+ * relying on the default (e.g. a user who flips `defaults.hksv` on).
  */
 export function recordingCount(config, devices) {
   let count = 0
   for (const device of devices) {
     const settings = config.devices?.[device.id]
-    if (!(settings?.hksv ?? defaultFor(config, 'hksv')))
-      continue
-    const packageCamera = (settings?.packageCamera ?? false) && device.hasPackageCamera
-    count += packageCamera ? 2 : 1
+    if (settings?.hksv ?? defaultFor(config, 'hksv'))
+      count++
   }
   return count
 }

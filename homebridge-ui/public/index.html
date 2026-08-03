@@ -30,6 +30,30 @@
       <span class="text-body-secondary small">Blank searches /usr/bin, /usr/local/bin, then PATH.</span>
     </div>
   </div>
+
+  <div class="card card-body mb-2">
+    <div><strong>Recording</strong> <span class="text-body-secondary small">applies to the whole host</span></div>
+    <div class="d-flex align-items-center gap-2 mb-2">
+      <label for="icloudTier">iCloud+ plan</label>
+      <!--
+        Apple caps HomeKit Secure Video by camera COUNT, not storage, so each
+        option names the count — that is the number the warning is about.
+        Every `value` must be a key of RECORDING_LIMITS in config-ops.js;
+        anything else falls back to the default via `parseIcloudTier`.
+      -->
+      <select class="form-control" id="icloudTier" style="max-width: 20rem">
+        <option value="50gb">50 GB — 1 camera</option>
+        <option value="200gb">200 GB — up to 5 cameras</option>
+        <option value="2tb">2 TB or more — unlimited cameras</option>
+      </select>
+      <span class="text-body-secondary small">Only drives the advisory warning; the plugin cannot see your subscription.</span>
+    </div>
+  </div>
+
+  <div class="card card-body mb-2">
+    <div><strong>Per-camera defaults</strong> <span class="text-body-secondary small">what every device inherits until it is overridden on the Devices tab</span></div>
+    <div id="defaults-controls"></div>
+  </div>
 </div>
 
 <div id="devices-pane">
@@ -46,15 +70,58 @@
 
 <div id="help-pane">
   <p>UniFi Protect (API) talks to your console over its official Integration API using an API key — no username or password is stored.</p>
-  <p><strong>Connection</strong> — point the plugin at your console and verify its certificate before the API key is ever sent.</p>
-  <p><strong>Defaults</strong> — settings that apply host-wide, such as the concurrent live view cap and the ffmpeg binary to use.</p>
-  <p><strong>Devices</strong> — per-camera overrides, discovered after a successful connection test.</p>
+
+  <h6>Connection</h6>
+  <dl>
+    <dt>Console</dt>
+    <dd>The IP address or hostname of your UniFi console. <strong>Restart required.</strong></dd>
+    <dt>API Key</dt>
+    <dd>Created in UniFi Site Manager under Integrations. It is sent only after the console's certificate matches the one this install trusts, and never appears in the log. <strong>Restart required.</strong></dd>
+    <dt>Test Connection</dt>
+    <dd>Checks the certificate, then the key, then lists your devices. The first successful test pins the certificate; if it ever changes, the connection is refused before the key is sent and you are asked to confirm the new one.</dd>
+  </dl>
+
+  <h6>Defaults</h6>
+  <dl>
+    <dt>Maximum concurrent live views</dt>
+    <dd>A cap for the whole host, not per camera. Blank picks from the encoder found — 6 with hardware, 2 with software. A request past the cap is refused with a logged reason instead of overloading the machine. <strong>Restart required.</strong></dd>
+    <dt>ffmpeg path</dt>
+    <dd>Blank searches /usr/bin, /usr/local/bin, then PATH. <strong>Restart required.</strong></dd>
+    <dt>iCloud+ plan</dt>
+    <dd>Drives the recording warning only. Apple caps HomeKit Secure Video by camera <em>count</em>: 1 on 50 GB, 5 on 200 GB, unlimited on 2 TB and above. Footage does not count against your iCloud storage quota.</dd>
+    <dt>Per-camera defaults</dt>
+    <dd>What every device inherits. Changing one moves every camera that has not overridden it on the Devices tab; a camera showing <em>overridden</em> keeps its own value until you press reset.</dd>
+  </dl>
+
+  <h6>Devices</h6>
+  <dl>
+    <dt>Expose in HomeKit</dt>
+    <dd>Whether this device is bridged at all. Takes effect on the next discovery.</dd>
+    <dt>Live view quality</dt>
+    <dd><em>Auto</em> follows the resolution HomeKit asks for: 640×360 and below uses the low substream, 1280×720 medium, larger high. Pinning a substream overrides that.</dd>
+    <dt>Live view audio</dt>
+    <dd>HomeKit is told which audio codecs a camera offers once, when the accessory is set up. Turning audio <em>on</em> therefore only reaches HomeKit after a restart; turning it off applies to the next live view. <strong>Restart required.</strong></dd>
+    <dt>Two-way audio</dt>
+    <dd>Talk back through a camera with a speaker. Fixed at accessory setup for the same reason as audio. <strong>Restart required.</strong></dd>
+    <dt>HomeKit Secure Video</dt>
+    <dd>Off by default and enabled per camera. A recording camera runs one continuous ffmpeg whether or not anything moves — that is what lets a clip start <em>before</em> the motion — costing roughly 15% of one core each on hardware encoding. <strong>Restart required.</strong></dd>
+    <dt>Package camera</dt>
+    <dd>Offered only for cameras whose payload reports the downward lens. It appears as a second accessory at 2 fps, does not record, and therefore does not use one of your iCloud plan's camera slots. Takes effect on the next discovery.</dd>
+  </dl>
+
+  <h6>Hardware transcoding</h6>
+  <p>Every Protect camera streams HEVC and HomeKit accepts only H.264, so every live view is a transcode. At startup the plugin probes ffmpeg, prefers Intel Quick Sync then VAAPI, and trial-encodes each one rather than trusting <code>-encoders</code> to list it; software is the last resort. The encoder it settled on is logged at startup.</p>
+  <p>The difference is not marginal: measured on an i7-8700K with UHD 630, 20 seconds of 2688×1512 costs 1.79 s of CPU via VAAPI and 49.1 s via libx264 — about 27×. That is why the live-view cap defaults to 6 on hardware and 2 on software.</p>
+  <p>Seeing <code>h264_vaapi</code> rather than <code>h264_qsv</code> on an Intel host is normal, not a fault. A warning naming <code>libx264</code> means hardware acceleration is not reaching the process — most often the render device is not passed into the Docker container (<code>--device=/dev/dri</code>), or the Homebridge user is not in the <code>render</code> group. Run Homebridge with DEBUG logging to see which candidates were rejected and why.</p>
+
+  <h6>Recording and live views share the GPU</h6>
+  <p>A recording camera does <strong>not</strong> consume one of the concurrent live-view slots — that cap exists to protect interactive viewing, and a recording process is not an interactive viewer. The two do however share the same encoder. Several cameras recording continuously reduce the headroom available to live views, so on a host near its limit, lower the live-view cap rather than assuming the two budgets are independent.</p>
 </div>
 
 <div id="tab-root"></div>
 
 <script type="module">
-  import { cameraToggles, clearDeviceSetting, debounce, defaultFor, ensureConfig, isOverridden, NEEDS_RESTART, parseMaxStreams, renderQualitySelect, renderToggle, SAVE_DEBOUNCE_MS, setDeviceSetting, setGlobalSetting, tierWarning } from './config-ops.js'
+  import { cameraToggles, clearDeviceSetting, debounce, defaultFor, ensureConfig, HKSV_LABEL, isOverridden, NEEDS_RESTART, parseIcloudTier, parseMaxStreams, renderQualitySelect, renderToggle, SAVE_DEBOUNCE_MS, setDeviceSetting, setGlobalSetting, tierWarning } from './config-ops.js'
   import { renderBadge, renderDetail, renderDeviceList, renderTabs } from './ui-render.js'
 
   // Build the tab shell, then move each pane's static markup into the empty
@@ -141,6 +208,46 @@
     await save()
   })
 
+  // The per-camera defaults every device inherits from. Without these the
+  // default/overridden badges pointed at values only a hand-edited config.json
+  // could change. Written into `config.defaults`, which is what `defaultFor`
+  // reads, so flipping one here moves every device that has not overridden it.
+  const setDefault = async (key, value) => {
+    config = { ...config, defaults: { ...config.defaults, [key]: value } }
+    await save()
+  }
+
+  const icloudTierEl = document.getElementById('icloudTier')
+  // Through parseIcloudTier so a hand-edited tier the schema does not know
+  // shows the default the config was actually normalised to, not a blank box.
+  icloudTierEl.value = parseIcloudTier(config.defaults.icloudTier)
+  // `save()` recomputes the tier warning, so changing the plan re-judges the
+  // count immediately rather than at the next toggle.
+  icloudTierEl.addEventListener('change', () => setDefault('icloudTier', icloudTierEl.value))
+
+  const defaultsControlsEl = document.getElementById('defaults-controls')
+
+  // Built with the same helpers the per-device controls use, so the switches,
+  // the restart marker and the quality options cannot drift between the two
+  // tabs. No badge: a default is what a badge would be measured against.
+  const defaultToggle = (key, defaultsKey, label) => {
+    const { wrap, input } = renderToggle(document, `defaults-${defaultsKey}`, label, NEEDS_RESTART.has(key))
+    input.checked = Boolean(config.defaults[defaultsKey])
+    input.addEventListener('change', () => setDefault(defaultsKey, input.checked))
+    defaultsControlsEl.append(wrap)
+  }
+
+  defaultToggle('expose', 'exposeNewDevices', 'Expose new devices in HomeKit')
+  defaultToggle('hksv', 'hksv', HKSV_LABEL)
+
+  {
+    // `renderQualitySelect` keys its id off `device.id`; a literal stands in
+    // for the device here, since this select is the host-wide default.
+    const { wrap, select } = renderQualitySelect(document, { id: 'defaults' }, config.defaults.quality)
+    select.addEventListener('change', () => setDefault('quality', select.value))
+    defaultsControlsEl.append(wrap)
+  }
+
   /**
    * Renders one device's settings into the detail pane. `renderDetail` moves
    * focus to its heading itself — the list stays where it is, but the content
@@ -193,7 +300,10 @@
         // either: there is nothing a reset button could meaningfully do to
         // a disabled control.
         input.disabled = true
-        wrap.className = 'text-body-secondary small'
+        // Appended, never replaced: `renderToggle`'s own `form-check
+        // form-switch` is what makes this a switch rather than a 13 px
+        // checkbox, and overwriting className would silently undo it.
+        wrap.className += ' text-body-secondary small'
         wrap.append(' — arriving in a later release')
       }
       else {
@@ -299,6 +409,19 @@
   if (config.consoleCert)
     renderTrust([{ text: 'This console\'s certificate is trusted and pinned. Press Test Connection to verify it still matches.' }])
 
+  /**
+   * Transient outcomes go to Homebridge's own toast, which is what a user
+   * watching the page notices. The `aria-live` status line stays and carries
+   * the SAME text: a toast disappears on a timer and is not something a screen
+   * reader user can go back to, so removing the region would be a regression.
+   * `error.message` is server-supplied text and lands as an argument, never
+   * as markup.
+   */
+  const report = (text, ok) => {
+    statusEl.textContent = text
+    ;(ok ? homebridge.toast.success : homebridge.toast.error)(text)
+  }
+
   document.getElementById('test').addEventListener('click', async () => {
     statusEl.textContent = 'Checking the console\'s certificate…'
     // The key is only ever sent to the local server-side handler over the
@@ -312,12 +435,12 @@
       cert = await homebridge.request('/console-cert', { host: config.host, consoleCert: config.consoleCert })
     }
     catch (error) {
-      statusEl.textContent = error.message
+      report(error.message, false)
       return
     }
 
     if (cert.matches === false) {
-      statusEl.textContent = 'Refused to connect — the console\'s certificate changed. The API key was not sent.'
+      report('Refused to connect — the console\'s certificate changed. The API key was not sent.', false)
       renderTrust([
         { text: `The certificate presented by ${config.host} does not match the one this plugin trusts, so the connection was refused before the API key was sent.` },
         { text: `Trusted: ${cert.trustedFingerprint}`, fingerprint: true },
@@ -339,13 +462,13 @@
     const credentials = { host: config.host, apiKey: config.apiKey, consoleCert: config.consoleCert }
     try {
       const info = await homebridge.request('/test-connection', credentials)
-      statusEl.textContent = `Connected — ${info.nvrName}, Protect ${info.version}`
+      report(`Connected — ${info.nvrName}, Protect ${info.version}`, true)
       await save()
       const { devices } = await homebridge.request('/discover', credentials)
       render(devices)
     }
     catch (error) {
-      statusEl.textContent = error.message
+      report(error.message, false)
     }
   })
 </script>

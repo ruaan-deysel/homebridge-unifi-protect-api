@@ -150,6 +150,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Saves are debounced by one second, so flipping several toggles in a row writes
   `config.json` once instead of once per click. Settings that genuinely require a restart
   say so explicitly, rather than every change surfacing Homebridge's restart banner.
+- The Defaults tab now carries the per-camera defaults every device inherits — whether new
+  devices are exposed, the live view quality and whether recording is on — alongside the
+  host-wide settings. The default/overridden badge on each device now points at values the
+  UI itself can change, rather than ones only a hand-edited `config.json` could reach.
+- The Help tab documents what each setting does, which ones need a restart, how hardware
+  transcoding is chosen and what to check when it falls back to software, and that
+  recording does not use a live-view slot but does share the GPU with one.
 - A new iCloud tier setting (50 GB / 200 GB / 2 TB+, defaulting to 200 GB) drives an
   advisory warning when more cameras have recording enabled than the tier allows — five on
   200 GB, one on 50 GB. It names the tier and both counts, and never blocks the setting:

@@ -606,14 +606,23 @@ describe('recordingCount / tierWarning', () => {
   const withDevices = (deviceConfig: Record<string, DeviceOverride>, tier: IcloudTier = '200gb') =>
     ({ ...base, defaults: { ...base.defaults, icloudTier: tier }, devices: deviceConfig })
 
-  it('counts the package accessory as its own recording camera', () => {
-    const config = withDevices({ a: { hksv: true, packageCamera: true } })
-    expect(recordingCount(config, devices(['a']))).toBe(2)
+  // `attachPackageCamera` builds its CameraController with NO `recording` key,
+  // so the package accessory never advertises HKSV and cannot occupy one of
+  // Apple's camera slots. This test previously pinned the opposite — a count
+  // of 2 — which warned 200 GB users off a sixth camera they were entitled to.
+  it('does not count the package lens, which never records', () => {
+    const withLens = withDevices({ a: { hksv: true, packageCamera: true } })
+    const withoutLens = withDevices({ a: { hksv: true } })
+    expect(recordingCount(withLens, devices(['a']))).toBe(1)
+    // Enabling the lens moves nothing: asserted against the same config minus
+    // the flag, so a re-introduced double-count fails here rather than being
+    // absorbed by a hardcoded expectation.
+    expect(recordingCount(withLens, devices(['a']))).toBe(recordingCount(withoutLens, devices(['a'])))
   })
 
-  it('does not count a package-camera override for a device without the lens', () => {
-    const config = withDevices({ a: { hksv: true, packageCamera: true } })
-    expect(recordingCount(config, [{ id: 'a', hasPackageCamera: false }])).toBe(1)
+  it('does not count a device that is not recording, lens or no lens', () => {
+    const config = withDevices({ a: { hksv: false, packageCamera: true } })
+    expect(recordingCount(config, devices(['a']))).toBe(0)
   })
 
   it('counts a device with no override entry when defaults.hksv is on — the gap a literal config.devices scan misses', () => {
@@ -628,8 +637,8 @@ describe('recordingCount / tierWarning', () => {
   })
 
   it('warns above the limit, naming the count and the limit', () => {
-    const config = withDevices({ a: { hksv: true, packageCamera: true }, b: { hksv: true }, c: { hksv: true }, d: { hksv: true }, e: { hksv: true } })
-    const message = tierWarning(config, devices(['a', 'b', 'c', 'd', 'e']))
+    const config = withDevices({ a: { hksv: true }, b: { hksv: true }, c: { hksv: true }, d: { hksv: true }, e: { hksv: true }, f: { hksv: true } })
+    const message = tierWarning(config, devices(['a', 'b', 'c', 'd', 'e', 'f']))
     expect(message).toContain('6')
     expect(message).toContain('5')
   })
@@ -641,8 +650,8 @@ describe('recordingCount / tierWarning', () => {
   })
 
   it('is advisory only — the config it warns about is returned unchanged, never blocked or reverted', () => {
-    const config = withDevices({ a: { hksv: true, packageCamera: true }, b: { hksv: true }, c: { hksv: true }, d: { hksv: true }, e: { hksv: true } })
-    expect(tierWarning(config, devices(['a', 'b', 'c', 'd', 'e']))).toBeDefined()
+    const config = withDevices({ a: { hksv: true, packageCamera: true }, b: { hksv: true }, c: { hksv: true }, d: { hksv: true }, e: { hksv: true }, f: { hksv: true } })
+    expect(tierWarning(config, devices(['a', 'b', 'c', 'd', 'e', 'f']))).toBeDefined()
     expect(config.devices.a?.hksv).toBe(true)
   })
 })
@@ -705,6 +714,19 @@ describe('save debounce window', () => {
 describe('settings that need a restart', () => {
   it('names exactly the settings that need a restart', () => {
     expect([...NEEDS_RESTART].sort()).toEqual(['audio', 'hksv', 'talkback'])
+  })
+})
+
+// Bootstrap 5 renders a checkbox as a switch only when the wrapper carries
+// `form-check form-switch` AND the input carries `form-check-input`; without
+// them it is the 13 px default checkbox the rebuild set out to replace. The
+// classes come from the Bootstrap Homebridge injects — this plugin ships no
+// CSS — so the class strings themselves are the whole mechanism.
+describe('renderToggle is a real switch', () => {
+  it('carries the Bootstrap switch classes on both the wrapper and the input', () => {
+    const { wrap, input } = renderToggle(makeDoc(), 'cam1-hksv', 'Some setting') as unknown as { wrap: FakeElement, input: FakeElement }
+    expect(wrap.className.split(' ')).toEqual(expect.arrayContaining(['form-check', 'form-switch']))
+    expect(input.className.split(' ')).toContain('form-check-input')
   })
 })
 

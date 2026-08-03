@@ -125,8 +125,9 @@ more cameras than your plan supports will cause Apple to silently stop recording
 them, so per-camera opt-in is deliberate. Set your plan on the **Defaults** tab and the
 settings UI warns before you exceed it.
 
-Note that a **package camera counts as its own accessory**, so a doorbell with a package
-lens uses two of your plan's cameras.
+The package lens is a separate HomeKit accessory but **does not record** — it is offered for
+live view and snapshots only — so enabling it does not use one of your plan's cameras. A
+doorbell with a package lens still counts as one.
 
 ### What it costs
 
