@@ -127,8 +127,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - HomeKit Secure Video recording, off by default per camera. A camera with recording
   enabled runs one continuous ffmpeg — RTSPS in, fragmented MP4 out — feeding a 16-fragment
   in-memory prebuffer, so a clip starts *before* the motion that triggered it rather than
-  after. Measured on the real console at roughly 15% of one core per camera (VAAPI H.264
-  plus ffmpeg's native AAC encoder), or about 0.75 cores across five cameras.
+  after. Measured on the real console at 7–9% of one core per camera (VAAPI H.264 plus
+  ffmpeg's native AAC encoder) on the 1280×720 medium substream that recording uses —
+  about half a core across five cameras.
+- A clip opens with only as much pre-roll as HomeKit negotiated. The prebuffer *holds*
+  16 fragments as headroom, because a fragment runs long when a keyframe arrives late,
+  but sending all of them meant handing over ~64 seconds of video at the head of a clip
+  whose advertised `prebufferLength` promised 4. Verified on real hardware: the
+  controller took the oversized pre-roll and closed the stream in the same second,
+  before a single live fragment. With the negotiated amount it records normally.
+- Recording advertises exactly one resolution, 1280×720, and both the advertisement and
+  the encoder's fallback read the same constant. They had drifted: the advertised ladder
+  was trimmed to 720p while the encoder still fell back to the 2688×1512 high substream
+  whenever HomeKit had not sent a configuration before the encoder started, so a camera
+  recorded four times the pixels it had promised. There is no scale filter in the
+  recording path, so an advertised size is only honest if a substream serves it exactly.
+- Motion is logged when it fires, naming the camera. It is what triggers every recording
+  and it previously reached HomeKit in silence, so a walk past a camera that produced no
+  clip left nothing in the log to say whether motion had fired or HomeKit had ignored it.
+  The clear, and every non-motion sensor, stay on the debug channel.
 - Recording never consumes a live-view stream slot. The `maxStreams` cap exists to protect
   interactive viewing, and a recording process is not an interactive viewer — but the two
   do share the GPU.

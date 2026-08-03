@@ -134,7 +134,10 @@ doorbell with a package lens still counts as one.
 Each camera with recording enabled runs one continuous ffmpeg, whether or not anything ever
 moves — that is what fills the prebuffer so a clip starts *before* the motion rather than
 after it. Measured on this hardware with VAAPI H.264 and ffmpeg's native AAC encoder, that
-is roughly **15% of one core per camera**, or about 0.75 cores across five.
+is **7–9% of one core per camera** on the medium substream, which is what recording uses —
+about half a core across five. (The 15% figure quoted during design was measured against
+the 2688×1512 high substream; recording advertises and delivers 1280×720, so it costs
+less.)
 
 The continuous encode is a consequence of this plugin being API-key only. Plugins that
 prebuffer from UniFi's private livestream WebSocket avoid it, but that channel requires a
