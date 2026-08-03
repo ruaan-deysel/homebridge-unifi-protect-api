@@ -130,6 +130,13 @@ export function recordingArgs(caps: FfmpegCapabilities, o: RecordingArgsOptions)
 interface StreamState {
   closed: boolean
   queue: Buffer[]
+  /**
+   * The queue depth at which this clip is abandoned: its own pre-roll plus a
+   * full ring of live backlog. Per-stream rather than a constant, because the
+   * pre-roll is negotiated and a clip that opened with 15 buffered fragments
+   * has not fallen behind when it holds 16.
+   */
+  limit: number
   /** Resolves the generator's park when a fragment arrives or the stream closes. */
   wake?: () => void
 }
@@ -488,7 +495,14 @@ export class RecordingDelegate implements CameraRecordingDelegate {
       // the oldest queued fragment would hand HomeKit a clip with a silent
       // hole in the middle, which decodes as corruption; a short clip that
       // ends cleanly is a clip.
-      if (state.queue.length >= PREBUFFER_FRAGMENTS) {
+      // Measured from where THIS clip started, not from zero. The pre-roll is
+      // queued deliberately and is not the consumer being slow, so an absolute
+      // bound made the two constants collide: a controller negotiating a long
+      // `prebufferLength` opened the queue at or near PREBUFFER_FRAGMENTS, and
+      // the first live fragment then tripped this guard and ended the clip with
+      // a "HomeKit is behind" warning naming a consumer that had not fallen
+      // behind at all.
+      if (state.queue.length >= state.limit) {
         this.options.log.warn(`Ending the recording for "${this.options.label}": HomeKit is more than ${PREBUFFER_FRAGMENTS} fragments behind.`)
         state.closed = true
       }
@@ -537,7 +551,8 @@ export class RecordingDelegate implements CameraRecordingDelegate {
     // clip whose `prebufferLength` promised 4 s. Observed on real hardware: the
     // controller took the 16 prebuffered fragments and closed the stream in the
     // same second, before a single live fragment.
-    const state: StreamState = { closed: false, queue: snapshot.fragments.slice(-this.prebufferFragments()) }
+    const queue = snapshot.fragments.slice(-this.prebufferFragments())
+    const state: StreamState = { closed: false, queue, limit: queue.length + PREBUFFER_FRAGMENTS }
     this.streams.set(streamId, state)
     this.options.log.info(`Recording started for "${this.options.label}" (${state.queue.length} of ${snapshot.fragments.length} prebuffered fragments).`)
     return this.streamPackets(streamId, state, snapshot.init)

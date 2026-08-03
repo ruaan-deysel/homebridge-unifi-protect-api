@@ -626,6 +626,28 @@ describe('recordingDelegate encoder', () => {
     h.close(1)
   })
 
+  // The pre-roll and the backlog bound used to be measured against the same
+  // constant, so a long negotiated prebufferLength opened the queue at the
+  // limit and the FIRST live fragment ended the clip with a "HomeKit is
+  // behind" warning about a consumer that had not fallen behind at all.
+  it('does not mistake a large negotiated pre-roll for a slow consumer', async () => {
+    const h = await harnessStarted()
+    h.delegate.updateRecordingConfiguration(configuration(4000))
+    // 64s of pre-roll over 4s fragments = the whole ring.
+    ;(h.delegate as unknown as { config: { prebufferLength: number } }).config.prebufferLength = 64_000
+    h.proc.stdout.emit('data', init('one'))
+    for (let i = 0; i < PREBUFFER_FRAGMENTS; i++)
+      h.proc.stdout.emit('data', fragment(`old${i}`))
+
+    const gen = h.delegate.handleRecordingStreamRequest(1)
+    // A live fragment on top of a full pre-roll is NOT a backlog.
+    h.proc.stdout.emit('data', fragment('live'))
+    h.close(1)
+    await drain(gen)
+
+    expect(h.log.warn.mock.calls.flat().join(' ')).not.toContain('fragments behind')
+  })
+
   it('logs a clean exit, which ffmpeg itself never reports', async () => {
     const h = await harnessStarted()
     h.proc.emit('close', 0)
