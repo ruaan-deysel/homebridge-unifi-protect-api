@@ -551,6 +551,47 @@ describe('recordingDelegate encoder', () => {
     expect(h.log.warn.mock.calls.flat().join(' ')).toContain('fragments behind')
   })
 
+  // Found on real hardware: the clip opened with all 16 buffered fragments —
+  // ~64s of pre-roll against a negotiated prebufferLength of 4000ms — and the
+  // controller closed the stream in the same second, before a single live
+  // fragment. The ring HOLDS 16 as headroom; only what HomeKit asked for may
+  // be sent.
+  it('opens a clip with only the negotiated prebuffer, not the whole ring', async () => {
+    const h = await harnessStarted()
+    // 4000ms of prebuffer at a 4000ms fragment length = exactly one fragment.
+    h.delegate.updateRecordingConfiguration(configuration(4000))
+    h.proc.stdout.emit('data', init('one'))
+    for (let i = 0; i < PREBUFFER_FRAGMENTS; i++)
+      h.proc.stdout.emit('data', fragment(`old${i}`))
+
+    const gen = h.delegate.handleRecordingStreamRequest(1)
+    h.proc.stdout.emit('data', fragment('live'))
+    h.close(1)
+    const packets = await drain(gen)
+
+    // init + the single newest prebuffered fragment + the live one.
+    const bodies = packets.map(p => p.data.toString('latin1'))
+    expect(bodies.some(b => b.includes(`old${PREBUFFER_FRAGMENTS - 1}`))).toBe(true)
+    expect(bodies.some(b => b.includes('old0'))).toBe(false)
+    expect(h.log.info.mock.calls.flat().join(' ')).toContain(`1 of ${PREBUFFER_FRAGMENTS} prebuffered`)
+  })
+
+  // A longer negotiated prebuffer must actually get more pre-roll, or the
+  // "only what was negotiated" rule would just be a hardcoded 1.
+  it('sends more pre-roll when HomeKit negotiates a longer prebuffer', async () => {
+    const h = await harnessStarted()
+    // 12000ms wanted at a 4000ms fragment length = three fragments.
+    h.delegate.updateRecordingConfiguration(configuration(4000))
+    ;(h.delegate as unknown as { config: { prebufferLength: number } }).config.prebufferLength = 12_000
+    h.proc.stdout.emit('data', init('one'))
+    for (let i = 0; i < PREBUFFER_FRAGMENTS; i++)
+      h.proc.stdout.emit('data', fragment(`old${i}`))
+
+    h.delegate.handleRecordingStreamRequest(1)
+    expect(h.log.info.mock.calls.flat().join(' ')).toContain(`3 of ${PREBUFFER_FRAGMENTS} prebuffered`)
+    h.close(1)
+  })
+
   it('logs a clean exit, which ffmpeg itself never reports', async () => {
     const h = await harnessStarted()
     h.proc.emit('close', 0)

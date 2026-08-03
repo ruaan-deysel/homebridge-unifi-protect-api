@@ -525,10 +525,32 @@ export class RecordingDelegate implements CameraRecordingDelegate {
         yield { data: EMPTY_PACKET, isLast: true }
       })()
     }
-    const state: StreamState = { closed: false, queue: [...snapshot.fragments] }
+    // Only as much pre-roll as HomeKit negotiated. The ring HOLDS 16 fragments
+    // as headroom — a fragment can run long when a keyframe arrives late — but
+    // sending all of them means handing over ~64 s of video at the head of a
+    // clip whose `prebufferLength` promised 4 s. Observed on real hardware: the
+    // controller took the 16 prebuffered fragments and closed the stream in the
+    // same second, before a single live fragment.
+    const state: StreamState = { closed: false, queue: snapshot.fragments.slice(-this.prebufferFragments()) }
     this.streams.set(streamId, state)
-    this.options.log.info(`Recording started for "${this.options.label}" (${state.queue.length} prebuffered fragments).`)
+    this.options.log.info(`Recording started for "${this.options.label}" (${state.queue.length} of ${snapshot.fragments.length} prebuffered fragments).`)
     return this.streamPackets(streamId, state, snapshot.init)
+  }
+
+  /**
+   * How many prebuffered fragments a clip may open with, from what HomeKit
+   * negotiated rather than from what the ring happens to be holding.
+   *
+   * `prebufferLength` is a promise made in `recordingOptions` — 4000 ms — and
+   * a clip that opens with sixteen 4 s fragments breaks it by a factor of
+   * sixteen. At least one, always: a clip with no pre-roll at all would start
+   * at the moment of motion, which is the entire thing the prebuffer exists to
+   * prevent.
+   */
+  private prebufferFragments(): number {
+    const wanted = this.config?.prebufferLength ?? DEFAULT_FRAGMENT_MS
+    const fragmentMs = this.config?.mediaContainerConfiguration.fragmentLength ?? DEFAULT_FRAGMENT_MS
+    return Math.max(1, Math.ceil(wanted / fragmentMs))
   }
 
   /**
