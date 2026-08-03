@@ -1,4 +1,5 @@
 import type { CameraRecordingConfiguration, RecordingPacket } from 'homebridge'
+import type { Quality } from '../src/accessories/quality.js'
 import type { FfmpegCapabilities, SpawnFn } from '../src/protect/ffmpeg.js'
 import { Buffer } from 'node:buffer'
 import { EventEmitter } from 'node:events'
@@ -110,10 +111,13 @@ function fakeSpawn() {
 
 const flush = () => new Promise(resolve => setImmediate(resolve))
 
-function harness(options: { audio?: boolean, url?: () => Promise<string> } = {}) {
+function harness(options: { audio?: boolean, url?: (deviceId: string, quality: Quality) => Promise<string> } = {}) {
   const log = { info: vi.fn(), warn: vi.fn(), debug: vi.fn() }
   const { proc, spawn } = fakeSpawn()
-  const get = vi.fn(options.url ?? (async () => URL))
+  // Declared WITH its parameters: inferred from a zero-arg implementation,
+  // `get.mock.calls[0]` types as an empty tuple and reading [1] needs a cast
+  // that hides the very argument these tests exist to check.
+  const get = vi.fn<(deviceId: string, quality: Quality) => Promise<string>>(options.url ?? (async () => URL))
   const delegate = new RecordingDelegate({
     deviceId: 'cam-1',
     label: 'Front Door',
@@ -893,7 +897,7 @@ describe('recordingDelegate encoder', () => {
 
     expect(h.get).toHaveBeenCalledWith('cam-1', ADVERTISED_RECORDING_QUALITY)
     // The size, not just the name: what was advertised is what is delivered.
-    const opened = h.get.mock.calls[0]![1] as keyof typeof SUBSTREAM_SIZE
+    const opened = h.get.mock.calls[0]![1]
     expect(SUBSTREAM_SIZE[opened]).toEqual(ADVERTISED_RECORDING_SIZE)
   })
 
