@@ -186,11 +186,12 @@
         // live checkbox that quietly does nothing would be the dishonest
         // option, and hiding it entirely hides the roadmap.
         // Sub-project 2 must drop `comingLater` when the services land, or
-        // the settings stay permanently unreachable. Note also that a
-        // hand-edited `hksv: true` renders checked-but-disabled and cannot
-        // be cleared here — harmless while nothing reads it, but it must not
-        // outlive this release. No badge either: there is nothing a reset
-        // button could meaningfully do to a disabled control.
+        // the settings stay permanently unreachable. A hand-edited
+        // `<key>: true` for a still-`comingLater` toggle renders
+        // checked-but-disabled and cannot be cleared here — harmless while
+        // nothing reads it, but it must not outlive this release. No badge
+        // either: there is nothing a reset button could meaningfully do to
+        // a disabled control.
         input.disabled = true
         wrap.className = 'text-body-secondary small'
         wrap.append(' — arriving in a later release')
@@ -216,9 +217,9 @@
     // honour it, so the UI never lets someone flip a setting that will
     // silently do nothing.
     if (device.type === 'camera') {
-      // Live and enabled, like audio and talkback below and unlike hksv:
-      // these genuinely work now, so a disabled control would be the
-      // dishonest one. Only hksv still carries `comingLater`.
+      // Live and enabled, like audio, talkback and hksv below: these
+      // genuinely work now, so a disabled control would be the dishonest
+      // one. No toggle currently carries `comingLater`.
       const { wrap, select } = renderQualitySelect(document, device, settingOf(device.id, 'quality', config.defaults.quality))
       const refreshQualityBadge = attachBadge(wrap, 'quality', value => { select.value = value })
       select.addEventListener('change', async () => {

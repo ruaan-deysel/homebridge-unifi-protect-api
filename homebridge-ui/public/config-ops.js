@@ -167,7 +167,7 @@ export const TALKBACK_LABEL = 'Two-way audio'
  * renderToggle's marker (driven off NEEDS_RESTART) rather than baked into
  * this text — see AUDIO_LABEL for why that avoids duplication.
  */
-export const HKSV_LABEL = 'HomeKit Secure Video (restart to enable)'
+export const HKSV_LABEL = 'HomeKit Secure Video'
 
 /**
  * Builds the per-camera quality selector with DOM APIs only — never
