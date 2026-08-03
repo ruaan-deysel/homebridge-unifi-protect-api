@@ -581,9 +581,14 @@ describe('recordingDelegate encoder', () => {
     expect(h.get).toHaveBeenCalledTimes(1)
   })
 
+  // Each run PRODUCES media and still dies immediately — a camera flapping, not
+  // one that never connects. Producing is necessary for a healthy run but not
+  // sufficient: without the lifetime half of the test as well, every one of
+  // these would clear the tally and the slow cadence would be unreachable.
   it('slows the retry down after repeated short-lived runs instead of respawning every 10s', async () => {
     const h = await harnessStarted()
     for (let i = 0; i <= MAX_RESTARTS; i++) {
+      h.proc.stdout.emit('data', init(`flap-${i}`))
       h.proc.emit('close', 1)
       await vi.advanceTimersByTimeAsync(RESTART_DELAY_MS)
       await flush()

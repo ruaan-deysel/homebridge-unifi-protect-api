@@ -1811,6 +1811,10 @@ describe('uniFiProtectPlatform', () => {
     controllerOf(accessory).options.recording as { options: CameraRecordingOptions, delegate: RecordingDelegate } | undefined
   const recorderOf = (accessory: FakePlatformAccessory) => recordingOf(accessory)?.delegate
 
+  /** The platform's own map, which is what a disposal must actually release. */
+  const recorders = (platform: object) =>
+    (platform as unknown as { recorders: Map<string, RecordingDelegate> }).recorders
+
   /** Reaches the two injection points the delegate keeps for exactly this. */
   const innards = (recorder: RecordingDelegate) =>
     recorder as unknown as { options: { spawn?: SpawnFn, urls: { get: (id: string, quality: string) => Promise<string> } } }
@@ -2049,7 +2053,7 @@ describe('uniFiProtectPlatform', () => {
   // failed kill nothing held the delegate any more, no later attempt could
   // exist, and the ffmpeg outlived the accessory and the whole plugin.
   it('keeps a recorder whose kill failed, so a later attempt can still stop it', async () => {
-    const { api, accessories } = await withCameras(cameras, { config: hksvOn(DOORBELL) })
+    const { api, platform, accessories } = await withCameras(cameras, { config: hksvOn(DOORBELL) })
     const recorder = recorderOf(doorbellOf(accessories))!
     const spawns = await startRecorder(recorder)
     const child = spawns[0]!.child
@@ -2065,6 +2069,9 @@ describe('uniFiProtectPlatform', () => {
     expect(kills).toBe(1)
     // `encoding` must not lie about a process that is still running.
     expect(recorder.encoding).toBe(true)
+    // The delegate holds the ONLY handle to that child, so the platform holding
+    // the only handle to the delegate is what makes a retry possible at all.
+    expect(recorders(platform).has(`uuid-${DOORBELL}`)).toBe(true)
 
     // The retry the old code made impossible: the delegate is still reachable,
     // so the next disposal reaches the same child.
@@ -2079,6 +2086,7 @@ describe('uniFiProtectPlatform', () => {
     expect(kills).toBe(2)
     expect(child.killed).toBe(true)
     expect(recorder.encoding).toBe(false)
+    expect(recorders(platform).has(`uuid-${DOORBELL}`)).toBe(false)
   })
 
   /** The console stops reporting the doorbell; everything else stays. */
@@ -2098,6 +2106,10 @@ describe('uniFiProtectPlatform', () => {
     expect(platform.accessories.has(`uuid-${DOORBELL}`)).toBe(false)
     expect(spawns[0]!.child.killed).toBe(true)
     expect(recorder.encoding).toBe(false)
+    // And FORGOTTEN. A delegate is only worth keeping while its process is
+    // still alive to retry the kill on; kept past that, every camera the
+    // console stops reporting leaks one for the life of the process.
+    expect(recorders(platform).has(`uuid-${DOORBELL}`)).toBe(false)
   })
 
   // The restart policy retries FOREVER by design, so a delegate left behind is a
