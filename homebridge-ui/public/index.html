@@ -450,7 +450,17 @@
    */
   const report = (text, ok) => {
     statusEl.textContent = text
-    ;(ok ? homebridge.toast.success : homebridge.toast.error)(text)
+    // Called as METHODS, deliberately. Selecting one with a ternary and calling
+    // the result — `(ok ? toast.success : toast.error)(text)` — detaches it from
+    // `homebridge.toast`, and plugin-ui-utils' implementation does
+    // `this._postMessage(...)`, so every call threw
+    // "Cannot read properties of undefined (reading '_postMessage')". `report`
+    // is the shared status reporter and runs BEFORE discovery, so that one
+    // throw took out Test Connection and the whole device list with it.
+    if (ok)
+      homebridge.toast.success(text)
+    else
+      homebridge.toast.error(text)
   }
 
   document.getElementById('test').addEventListener('click', async () => {
