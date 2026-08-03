@@ -77,6 +77,31 @@ const DEFAULT_FRAGMENT_MS = 4000
 /** The body of a clip with nothing in it. See `handleRecordingStreamRequest`. */
 const EMPTY_PACKET = Buffer.alloc(0)
 
+/**
+ * How long a recording encoder waits on a silent RTSP socket before giving up,
+ * in MICROSECONDS — ffmpeg's unit for this option, not milliseconds.
+ *
+ * Without it a camera that stops sending mid-stream leaves ffmpeg blocked in
+ * the demuxer forever. No exit means no `onExit`, which means `scheduleRestart`
+ * never runs, the ring goes stale, and HKSV is silently dead for that camera
+ * until Homebridge itself restarts — the entire restart policy is unreachable
+ * for a stall that never ends. Nobody is watching a recorder, so nobody
+ * notices. Verified against the real ffmpeg 6.1.1 in the Homebridge container,
+ * pointed at a listener that accepts and then never speaks: without the option
+ * it hung until killed at 12 s; with `-timeout 5000000` it exited at 5 s.
+ *
+ * 15 s, not 4: fragments are 4 s, so this is nearly four fragment intervals of
+ * total silence before a healthy stream is declared dead. It also covers the
+ * connect, so a console that is slow to answer is not mistaken for a stall.
+ * `scheduleRestart` then does its usual job — 10 s, and backing off to 10 min
+ * for a camera that stays away.
+ *
+ * Live view has the same gap and does NOT get this, deliberately: that path is
+ * proven on real hardware, a stalled live view is in front of someone who can
+ * see it, and the blast radius of changing it is a working feature.
+ */
+const RTSP_TIMEOUT_US = 15_000_000
+
 export interface RecordingArgsOptions {
   url: string
   audio: boolean
@@ -108,7 +133,9 @@ export function recordingArgs(caps: FfmpegCapabilities, o: RecordingArgsOptions)
   const input = ['-hide_banner', '-loglevel', 'warning']
   if (caps.hwaccel === 'vaapi')
     input.push('-hwaccel', 'vaapi', '-hwaccel_device', '/dev/dri/renderD128', '-hwaccel_output_format', 'vaapi')
-  input.push('-rtsp_transport', 'tcp', '-i', o.url)
+  // `-timeout` BEFORE `-i`, because it is an input option and ffmpeg applies an
+  // option to the next file named after it.
+  input.push('-rtsp_transport', 'tcp', '-timeout', String(RTSP_TIMEOUT_US), '-i', o.url)
   return [
     ...input,
     ...(o.audio ? ['-c:a', 'aac', '-ar', '32000', '-ac', '1', '-b:a', '32k'] : ['-an']),

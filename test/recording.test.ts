@@ -182,6 +182,23 @@ describe('recordingArgs', () => {
     expect(args).not.toContain('-an')
   })
 
+  // Without this a camera that stops sending mid-stream leaves ffmpeg blocked
+  // in the demuxer forever: no exit, so no onExit, so scheduleRestart never
+  // runs and HKSV is dead for that camera until Homebridge restarts. Verified
+  // against the real ffmpeg 6.1.1 against a deaf listener - it hung until
+  // killed without the option, and exited on time with it.
+  it('gives the always-on input a read timeout, before -i where ffmpeg reads it', () => {
+    const args = recordingArgs(caps, { url: URL, audio: true, fragmentMs: 4000 })
+    expect(args).toContain('-timeout')
+    const timeout = args.indexOf('-timeout')
+    // Microseconds, ffmpeg's unit for this option. A value in milliseconds
+    // would be a 15ms timeout and would kill every healthy stream instantly.
+    expect(Number(args[timeout + 1])).toBe(15_000_000)
+    // An input option: after -i it applies to the OUTPUT and the input keeps
+    // waiting forever, which is silently the unfixed behaviour.
+    expect(timeout).toBeLessThan(args.indexOf('-i'))
+  })
+
   it('encodes video with the probed hardware encoder', () => {
     const args = recordingArgs(caps, { url: URL, audio: true, fragmentMs: 4000 })
     expect(args[args.indexOf('-c:v') + 1]).toBe('h264_vaapi')
