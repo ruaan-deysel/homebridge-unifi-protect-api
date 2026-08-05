@@ -38,6 +38,41 @@ describe('parseConfig', () => {
     expect(result.success && result.data.consoleCert).toBe('PEM')
   })
 
+  it('preserves the discoveredDevices cache when present', () => {
+    const devices = [{ id: 'cam1', name: 'Front Door', type: 'camera', hasSpeaker: true, hasMic: true, hasLedStatus: false, hasPackageCamera: true, smartDetectTypes: ['person'] }]
+    const result = parseConfig({ ...minimal, discoveredDevices: devices })
+    expect(result.success).toBe(true)
+    expect(result.success && result.data.discoveredDevices).toEqual(devices)
+  })
+
+  it('accepts a config with no discoveredDevices field', () => {
+    const result = parseConfig(minimal)
+    expect(result.success).toBe(true)
+    expect(result.success && result.data.discoveredDevices).toBeUndefined()
+  })
+
+  // The cache is UI-only and never read by the plugin, so a malformed or
+  // hand-edited value must be recovered to a usable list rather than aborting
+  // platform startup. Each `.catch` in the schema is exercised here.
+  it('recovers a non-array discoveredDevices to an empty list', () => {
+    const result = parseConfig({ ...minimal, discoveredDevices: 'nonsense' })
+    expect(result.success).toBe(true)
+    expect(result.success && result.data.discoveredDevices).toEqual([])
+  })
+
+  it('drops malformed entries but keeps valid cached devices', () => {
+    const valid = { id: 'cam1', name: 'Front Door', type: 'camera', hasSpeaker: true, hasMic: true, hasLedStatus: false, hasPackageCamera: true, smartDetectTypes: ['person'] }
+    const result = parseConfig({ ...minimal, discoveredDevices: [valid, 'garbage', { id: 42 }] })
+    expect(result.success).toBe(true)
+    expect(result.success && result.data.discoveredDevices).toEqual([valid])
+  })
+
+  it('recovers an invalid smartDetectTypes to an empty array', () => {
+    const result = parseConfig({ ...minimal, discoveredDevices: [{ id: 'cam1', name: 'Front Door', type: 'camera', hasSpeaker: false, hasMic: false, hasLedStatus: false, hasPackageCamera: false, smartDetectTypes: 'person' }] })
+    expect(result.success).toBe(true)
+    expect(result.success && result.data.discoveredDevices?.[0]?.smartDetectTypes).toEqual([])
+  })
+
   // Omitting `defaults` hits the OUTER `.default({...})` literal on the object,
   // which is a SEPARATE source of truth from the per-field `.default()`s. This
   // test therefore pins the literal, and the one below pins the fields — asserting

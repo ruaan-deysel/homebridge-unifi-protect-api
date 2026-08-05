@@ -117,6 +117,7 @@ declare module '*/homebridge-ui/public/config-ops.js' {
     apiKey: string
     defaults: Defaults
     devices: Record<string, DeviceOverride>
+    discoveredDevices: unknown[]
     [key: string]: unknown
   }
 
@@ -184,6 +185,7 @@ declare module '*/homebridge-ui/public/config-ops.js' {
   export function defaultFor(config: ConfigShape, key: string): unknown
   export function isOverridden(config: ConfigShape, deviceId: string, key: string): boolean
   export function clearDeviceSetting(config: ConfigShape, deviceId: string, key: string): ConfigShape
+  export function setDiscoveredDevices(config: ConfigShape, devices: unknown[]): ConfigShape
   export function cameraToggles(
     device: { type?: string, hasMic?: boolean, hasSpeaker?: boolean, hasPackageCamera?: boolean },
   ): { key: string, label: string, section: 'Live view' | 'Recording' | 'Extra accessories' }[]

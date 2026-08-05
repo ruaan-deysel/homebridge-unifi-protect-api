@@ -34,6 +34,7 @@ export function ensureConfig(raw) {
     apiKey: config.apiKey ?? '',
     defaults: { ...DEFAULTS, ...(config.defaults ?? {}), icloudTier: parseIcloudTier(config.defaults?.icloudTier) },
     devices: { ...(config.devices ?? {}) },
+    discoveredDevices: Array.isArray(config.discoveredDevices) ? [...config.discoveredDevices] : [],
   }
 }
 
@@ -457,4 +458,13 @@ export function setDeviceSetting(config, deviceId, key, value) {
     devices[deviceId] = entry
 
   return { ...config, devices }
+}
+
+/**
+ * Replaces the cached device list. Called after a successful `/discover` so the
+ * settings page can restore the list on the next load without a network request.
+ * Pure transform — the caller is responsible for persisting the result.
+ */
+export function setDiscoveredDevices(config, devices) {
+  return { ...config, discoveredDevices: [...devices] }
 }

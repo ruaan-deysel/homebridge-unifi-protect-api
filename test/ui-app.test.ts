@@ -552,3 +552,52 @@ describe('the device filter', () => {
     expect(rows().filter(row => row.style.display !== 'none')).toHaveLength(2)
   })
 })
+
+describe('discovered device cache', () => {
+  it('persists the discovered devices into the stored config after Test Connection', async () => {
+    const { doc, homebridge } = await start()
+    await doc.getElementById('test').fire('click')
+
+    const stored = homebridge.stored() as Record<string, unknown>
+    expect(stored).toBeDefined()
+    expect(stored.discoveredDevices).toEqual([CAMERA, CHIME])
+  })
+
+  it('renders the device list from the cache on load without a /discover request', async () => {
+    // Build a homebridge fake that already has cached devices in the config.
+    const cachedDevices = [CAMERA, CHIME]
+    const doc = makePage()
+    const win = new FakeElement('window')
+    const requests: { path: string, payload: Record<string, unknown> }[] = []
+    const updates: Record<string, unknown>[] = []
+    let saves = 0
+    const homebridge = {
+      toast: new FakeToast(),
+      requests,
+      updates,
+      saved: () => saves,
+      stored: () => updates.at(-1),
+      getPluginConfig: async () => [{ platform: 'UniFiProtect', name: 'UniFi Protect', host: '10.0.0.1', apiKey: 'k', discoveredDevices: cachedDevices }],
+      updatePluginConfig: async ([next]: [Record<string, unknown>]) => { updates.push(structuredClone(next)) },
+      savePluginConfig: async () => { saves++ },
+      request: async (path: string, payload: Record<string, unknown>) => {
+        requests.push({ path, payload })
+        if (path === '/console-cert')
+          return FIRST_SIGHT
+        if (path === '/test-connection')
+          return { nvrName: 'Dream Machine', version: '5.0.0' }
+        return { devices: [CAMERA, CHIME] }
+      },
+      fixScrollHeight: () => {},
+    }
+
+    await startUi(doc, homebridge, win)
+
+    // The device list must be populated from the cache — no /discover request.
+    const discoverRequests = requests.filter(r => r.path === '/discover')
+    expect(discoverRequests).toHaveLength(0)
+
+    const rows = findAll(doc.getElementById('device-list'), el => Boolean(el.dataset.id))
+    expect(rows.map(row => row.textContent)).toEqual(['Front Door', 'Ding Dong'])
+  })
+})
