@@ -399,7 +399,6 @@ describe('setDiscoveredDevices', () => {
   })
 })
 
-
 describe('isOverridden / clearDeviceSetting', () => {
   const base = ensureConfig({})
 
