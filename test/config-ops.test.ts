@@ -1,6 +1,6 @@
 import type { DeviceOverride, IcloudTier } from '../homebridge-ui/public/config-ops.js'
 import { describe, expect, it, vi } from 'vitest'
-import { AUDIO_LABEL, cameraToggles, clearDeviceSetting, debounce, defaultFor, DEFAULTS, ensureConfig, HKSV_LABEL, isOverridden, MAX_STREAMS_RANGE, NEEDS_RESTART, PACKAGE_LABEL, parseIcloudTier, parseMaxStreams, QUALITY_OPTIONS, RECORDING_LIMITS, recordingCount, renderDeviceHeader, renderQualitySelect, renderToggle, SAVE_DEBOUNCE_MS, setDeviceSetting, setGlobalSetting, shouldOfferPackageCamera, TALKBACK_LABEL, TIER_LABELS, tierWarning } from '../homebridge-ui/public/config-ops.js'
+import { AUDIO_LABEL, cameraToggles, clearDeviceSetting, debounce, defaultFor, DEFAULTS, ensureConfig, HKSV_LABEL, isOverridden, MAX_STREAMS_RANGE, NEEDS_RESTART, PACKAGE_LABEL, parseIcloudTier, parseMaxStreams, QUALITY_OPTIONS, RECORDING_LIMITS, recordingCount, renderDeviceHeader, renderQualitySelect, renderToggle, SAVE_DEBOUNCE_MS, setDeviceSetting, setDiscoveredDevices, setGlobalSetting, shouldOfferPackageCamera, TALKBACK_LABEL, TIER_LABELS, tierWarning } from '../homebridge-ui/public/config-ops.js'
 import { parseConfig, settingsFor } from '../src/config.js'
 
 // Minimal fake DOM — just enough to prove renderDeviceHeader never turns
@@ -317,7 +317,12 @@ describe('ensureConfig', () => {
       apiKey: '',
       defaults: DEFAULTS,
       devices: {},
+      discoveredDevices: [],
     })
+  })
+
+  it('defaults discoveredDevices to [] when absent', () => {
+    expect(ensureConfig({ platform: 'UniFiProtect', host: '10.0.0.1', apiKey: 'k' }).discoveredDevices).toEqual([])
   })
 
   // `updatePluginConfig` replaces the whole platform block, so anything
@@ -370,6 +375,30 @@ describe('setDeviceSetting', () => {
     expect(original.devices).toEqual({})
   })
 })
+
+describe('setDiscoveredDevices', () => {
+  const DEVICE = { id: 'cam1', name: 'Front Door', type: 'camera', hasSpeaker: true, hasMic: true, hasLedStatus: false, hasPackageCamera: false, smartDetectTypes: [] }
+
+  it('replaces the discoveredDevices field', () => {
+    const config = ensureConfig({})
+    const next = setDiscoveredDevices(config, [DEVICE])
+    expect(next.discoveredDevices).toEqual([DEVICE])
+  })
+
+  it('does not mutate the original config', () => {
+    const config = ensureConfig({})
+    setDiscoveredDevices(config, [DEVICE])
+    expect(config.discoveredDevices).toEqual([])
+  })
+
+  it('preserves all other config fields', () => {
+    const config = ensureConfig({ platform: 'UniFiProtect', host: '10.0.0.1', apiKey: 'k' })
+    const next = setDiscoveredDevices(config, [DEVICE])
+    expect(next.host).toBe('10.0.0.1')
+    expect(next.apiKey).toBe('k')
+  })
+})
+
 
 describe('isOverridden / clearDeviceSetting', () => {
   const base = ensureConfig({})

@@ -67,6 +67,22 @@ export const configSchema = z.object({
   ffmpegPath: z.string().optional(),
   /** Keyed by Protect device id, NEVER by name, so renames preserve settings. */
   devices: z.record(z.string(), deviceSettingsSchema).default({}),
+  /**
+   * Slim device metadata cached from the last successful `/discover` run.
+   * Written by the UI after Test Connection succeeds so the settings page can
+   * show the device list on every subsequent load without a network round-trip.
+   * Never read by the plugin itself — discovery is always fully dynamic.
+   */
+  discoveredDevices: z.array(z.object({
+    id: z.string(),
+    name: z.string(),
+    type: z.string(),
+    hasSpeaker: z.boolean(),
+    hasMic: z.boolean(),
+    hasLedStatus: z.boolean(),
+    hasPackageCamera: z.boolean(),
+    smartDetectTypes: z.array(z.string()),
+  })).optional(),
 })
 
 export type ProtectPluginConfig = z.infer<typeof configSchema>

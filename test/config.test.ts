@@ -38,6 +38,19 @@ describe('parseConfig', () => {
     expect(result.success && result.data.consoleCert).toBe('PEM')
   })
 
+  it('preserves the discoveredDevices cache when present', () => {
+    const devices = [{ id: 'cam1', name: 'Front Door', type: 'camera', hasSpeaker: true, hasMic: true, hasLedStatus: false, hasPackageCamera: true, smartDetectTypes: ['person'] }]
+    const result = parseConfig({ ...minimal, discoveredDevices: devices })
+    expect(result.success).toBe(true)
+    expect(result.success && result.data.discoveredDevices).toEqual(devices)
+  })
+
+  it('accepts a config with no discoveredDevices field', () => {
+    const result = parseConfig(minimal)
+    expect(result.success).toBe(true)
+    expect(result.success && result.data.discoveredDevices).toBeUndefined()
+  })
+
   // Omitting `defaults` hits the OUTER `.default({...})` literal on the object,
   // which is a SEPARATE source of truth from the per-field `.default()`s. This
   // test therefore pins the literal, and the one below pins the fields — asserting

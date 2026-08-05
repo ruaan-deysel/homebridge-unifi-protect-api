@@ -8,7 +8,7 @@
 // index.html keeps the markup plus a two-line bootstrap that calls `startUi`
 // with the real globals.
 
-import { cameraToggles, clearDeviceSetting, debounce, defaultFor, ensureConfig, HKSV_LABEL, isOverridden, NEEDS_RESTART, parseIcloudTier, parseMaxStreams, renderQualitySelect, renderToggle, SAVE_DEBOUNCE_MS, setDeviceSetting, setGlobalSetting, tierWarning } from './config-ops.js'
+import { cameraToggles, clearDeviceSetting, debounce, defaultFor, ensureConfig, HKSV_LABEL, isOverridden, NEEDS_RESTART, parseIcloudTier, parseMaxStreams, renderQualitySelect, renderToggle, SAVE_DEBOUNCE_MS, setDeviceSetting, setDiscoveredDevices, setGlobalSetting, tierWarning } from './config-ops.js'
 import { renderBadge, renderDetail, renderDeviceList, renderTabs } from './ui-render.js'
 
 /**
@@ -407,6 +407,11 @@ export async function startUi(doc, homebridge, win = globalThis) {
     updateTierWarning()
   }
 
+  // If a previous Test Connection cached the device list, render it immediately
+  // so the user sees the devices without pressing Test Connection again.
+  if (Array.isArray(config.discoveredDevices) && config.discoveredDevices.length > 0)
+    render(config.discoveredDevices)
+
   /**
    * Every line here is built with DOM APIs and lands as `textContent`.
    * Fingerprints and hostnames come from whatever answered on the network —
@@ -503,6 +508,12 @@ export async function startUi(doc, homebridge, win = globalThis) {
       report(`Connected — ${info.nvrName}, Protect ${info.version}`, true)
       const { devices } = await homebridge.request('/discover', credentials)
       render(devices)
+      // Persist the discovered devices so the next page load can restore the
+      // list without a network request. A failed write rolls `config` back but
+      // does not undo the render for the current session — the list is already
+      // showing and will stay until the page is reloaded.
+      config = setDiscoveredDevices(config, devices)
+      await save(syncConnection)
     }
     catch (error) {
       report(error.message, false)
