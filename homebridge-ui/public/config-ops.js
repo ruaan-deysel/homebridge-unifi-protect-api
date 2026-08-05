@@ -34,7 +34,7 @@ export function ensureConfig(raw) {
     apiKey: config.apiKey ?? '',
     defaults: { ...DEFAULTS, ...(config.defaults ?? {}), icloudTier: parseIcloudTier(config.defaults?.icloudTier) },
     devices: { ...(config.devices ?? {}) },
-    discoveredDevices: config.discoveredDevices ?? [],
+    discoveredDevices: Array.isArray(config.discoveredDevices) ? config.discoveredDevices : [],
   }
 }
 

@@ -72,6 +72,10 @@ export const configSchema = z.object({
    * Written by the UI after Test Connection succeeds so the settings page can
    * show the device list on every subsequent load without a network round-trip.
    * Never read by the plugin itself — discovery is always fully dynamic.
+   *
+   * Uses `.catch` at every level so that a single malformed/hand-edited entry
+   * (or an entirely wrong field type from an older config version) is silently
+   * dropped rather than aborting platform startup.
    */
   discoveredDevices: z.array(z.object({
     id: z.string(),
@@ -81,8 +85,10 @@ export const configSchema = z.object({
     hasMic: z.boolean(),
     hasLedStatus: z.boolean(),
     hasPackageCamera: z.boolean(),
-    smartDetectTypes: z.array(z.string()),
-  })).optional(),
+    smartDetectTypes: z.array(z.string()).catch([]),
+  }).catch({ id: '', name: '', type: '', hasSpeaker: false, hasMic: false, hasLedStatus: false, hasPackageCamera: false, smartDetectTypes: [] }))
+    .transform(arr => arr.filter(d => d.id !== ''))
+    .catch([]).optional(),
 })
 
 export type ProtectPluginConfig = z.infer<typeof configSchema>
