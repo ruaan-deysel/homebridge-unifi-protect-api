@@ -391,6 +391,14 @@ describe('setDiscoveredDevices', () => {
     expect(config.discoveredDevices).toEqual([])
   })
 
+  it('copies the supplied list so later mutation cannot alter the config', () => {
+    const config = ensureConfig({})
+    const input = [DEVICE]
+    const next = setDiscoveredDevices(config, input)
+    input.push({ ...DEVICE, id: 'cam2' })
+    expect(next.discoveredDevices).toEqual([DEVICE])
+  })
+
   it('preserves all other config fields', () => {
     const config = ensureConfig({ platform: 'UniFiProtect', host: '10.0.0.1', apiKey: 'k' })
     const next = setDiscoveredDevices(config, [DEVICE])

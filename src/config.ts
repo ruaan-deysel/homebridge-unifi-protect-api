@@ -88,7 +88,8 @@ export const configSchema = z.object({
     smartDetectTypes: z.array(z.string()).catch([]),
   }).catch({ id: '', name: '', type: '', hasSpeaker: false, hasMic: false, hasLedStatus: false, hasPackageCamera: false, smartDetectTypes: [] }))
     .transform(arr => arr.filter(d => d.id !== ''))
-    .catch([]).optional(),
+    .catch([])
+    .optional(),
 })
 
 export type ProtectPluginConfig = z.infer<typeof configSchema>

@@ -34,7 +34,7 @@ export function ensureConfig(raw) {
     apiKey: config.apiKey ?? '',
     defaults: { ...DEFAULTS, ...(config.defaults ?? {}), icloudTier: parseIcloudTier(config.defaults?.icloudTier) },
     devices: { ...(config.devices ?? {}) },
-    discoveredDevices: Array.isArray(config.discoveredDevices) ? config.discoveredDevices : [],
+    discoveredDevices: Array.isArray(config.discoveredDevices) ? [...config.discoveredDevices] : [],
   }
 }
 
@@ -466,5 +466,5 @@ export function setDeviceSetting(config, deviceId, key, value) {
  * Pure transform — the caller is responsible for persisting the result.
  */
 export function setDiscoveredDevices(config, devices) {
-  return { ...config, discoveredDevices: devices }
+  return { ...config, discoveredDevices: [...devices] }
 }
