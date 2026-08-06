@@ -44,3 +44,6 @@ docs/plans/
 # Raw event capture: intermediate artefact for building test/fixtures/events/*,
 # never redacted, may contain real device ids and stream tokens — never commit
 test/fixtures/events/raw-capture.json
+.agents/skills/autofix/github.md
+.agents/skills/autofix/SKILL.md
+.agents/skills/code-review/SKILL.md
