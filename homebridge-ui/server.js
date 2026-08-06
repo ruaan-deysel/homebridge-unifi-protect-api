@@ -16,12 +16,12 @@ function baseUrl(host) {
 
 /**
  * Pins a connection to one certificate. Mirrors `pinnedTlsOptions` in
- * src/protect/cert.ts — read the long comment there before touching this;
+ * src/protect/cert.ts - read the long comment there before touching this;
  * `checkServerIdentity` skips the hostname check ONLY, and certificate
  * identity stays fully enforced against `ca`.
  *
  * ponytail: duplicated rather than imported from ../dist/, for the same
- * reason httpsFetch below is — server.js is plain JS loaded outside the TS
+ * reason httpsFetch below is - server.js is plain JS loaded outside the TS
  * build. Both copies are a handful of lines and are covered by tests; collapse
  * them only if the UI ever gains a build step.
  */
@@ -35,8 +35,8 @@ function fingerprintOf(pem) {
 }
 
 /**
- * Reads the certificate the console presents. Sends nothing — no headers, no
- * API key — and drops the socket the moment the certificate is in hand, so it
+ * Reads the certificate the console presents. Sends nothing - no headers, no
+ * API key - and drops the socket the moment the certificate is in hand, so it
  * is safe to run against a peer that has not been trusted yet.
  */
 function readConsoleCert(host) {
@@ -63,10 +63,10 @@ function readConsoleCert(host) {
  *
  * `fetch` is deliberately not used: it cannot be given a custom trust anchor
  * in node without an undici dispatcher, and silently ignores an `agent`
- * option — the console's self-signed cert makes that a hard blocker (the
+ * option - the console's self-signed cert makes that a hard blocker (the
  * same reasoning behind src/protect/http.ts). This is inlined rather than
  * imported from ../dist/ because server.js is plain JS loaded outside the TS
- * build, and the shim needed here is a handful of lines — not worth coupling
+ * build, and the shim needed here is a handful of lines - not worth coupling
  * the UI server to build output existing/being current.
  */
 function httpsFetch(url, { headers, consoleCert } = {}) {
@@ -103,12 +103,12 @@ async function get(path, payload, deps) {
 
   let response
   try {
-    // Never log apiKey — it is sent only as the X-API-KEY header value.
+    // Never log apiKey - it is sent only as the X-API-KEY header value.
     response = await fetchImpl(url, { headers: { 'X-API-KEY': apiKey ?? '' }, consoleCert })
   }
   catch (error) {
     // A certificate error here means the pin rejected the peer during the
-    // handshake — the key was never written to the socket. Say so, rather than
+    // handshake - the key was never written to the socket. Say so, rather than
     // blaming the network.
     if (typeof error?.code === 'string' && error.code.includes('CERT'))
       throw fail(`${host} presented a certificate this plugin does not trust, so the API key was not sent. Check the fingerprint below.`)
@@ -148,7 +148,7 @@ export async function consoleCertRequest(payload = {}, deps) {
     pem: presented.pem,
     fingerprint: presented.fingerprint,
     trustedFingerprint,
-    // `null` where nothing is trusted yet — the UI treats that as first use,
+    // `null` where nothing is trusted yet - the UI treats that as first use,
     // which is a different thing from a mismatch.
     matches: trustedFingerprint === null ? null : trustedFingerprint === presented.fingerprint,
   }
@@ -202,7 +202,7 @@ class UiServer extends HomebridgePluginUiServer {
 }
 
 // Only start a server when spawned by Homebridge (a child process talking
-// over IPC), never on a plain module import — that's how the test suite
+// over IPC), never on a plain module import - that's how the test suite
 // loads these handlers directly.
 if (process.send && process.env.NODE_ENV !== 'test')
   void new UiServer()

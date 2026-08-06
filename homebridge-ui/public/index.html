@@ -55,14 +55,14 @@
       <label class="form-label" for="icloudTier">iCloud+ plan</label>
       <!--
         Apple caps HomeKit Secure Video by camera COUNT, not storage, so each
-        option names the count — that is the number the warning is about.
+        option names the count - that is the number the warning is about.
         Every `value` must be a key of RECORDING_LIMITS in config-ops.js;
         anything else falls back to the default via `parseIcloudTier`.
       -->
       <select class="form-select" id="icloudTier" style="max-width: 26rem">
-        <option value="50gb">50 GB — 1 camera</option>
-        <option value="200gb">200 GB — up to 5 cameras</option>
-        <option value="2tb">2 TB or more — unlimited cameras</option>
+        <option value="50gb">50 GB - 1 camera</option>
+        <option value="200gb">200 GB - up to 5 cameras</option>
+        <option value="2tb">2 TB or more - unlimited cameras</option>
       </select>
       <div class="form-text">Only drives the advisory warning; the plugin cannot see your subscription.</div>
     </div>
@@ -80,7 +80,7 @@
     horizontal margins (`calc(-.5 * var(--bs-gutter-x))`) that a container's
     padding is meant to absorb; without one the row is wider than the body and
     the settings modal grows a horizontal scrollbar. `container-fluid` supplies
-    exactly that padding — do NOT add `px-0` to it, which removes the padding
+    exactly that padding - do NOT add `px-0` to it, which removes the padding
     and reinstates the overflow (measured: exactly 8px, half of `g-3`'s gutter).
   -->
   <div class="container-fluid">
@@ -92,7 +92,7 @@
       <!--
         `min-width: 0` is what lets a flex child shrink below its content's
         intrinsic width. Without it a long setting label refuses to wrap and
-        pushes the column wider than the modal — the other half of the
+        pushes the column wider than the modal - the other half of the
         horizontal scrollbar.
       -->
       <div class="col-12 col-md-8" style="min-width: 0">
@@ -103,7 +103,7 @@
 </div>
 
 <div id="help-pane">
-  <p>UniFi Protect (API) talks to your console over its official Integration API using an API key — no username or password is stored.</p>
+  <p>UniFi Protect (API) talks to your console over its official Integration API using an API key - no username or password is stored.</p>
 
   <h6>Connection</h6>
   <dl>
@@ -118,7 +118,7 @@
   <h6>Defaults</h6>
   <dl>
     <dt>Maximum concurrent live views</dt>
-    <dd>A cap for the whole host, not per camera. Blank picks from the encoder found — 6 with hardware, 2 with software. A request past the cap is refused with a logged reason instead of overloading the machine. <strong>Restart required.</strong></dd>
+    <dd>A cap for the whole host, not per camera. Blank picks from the encoder found - 6 with hardware, 2 with software. A request past the cap is refused with a logged reason instead of overloading the machine. <strong>Restart required.</strong></dd>
     <dt>ffmpeg path</dt>
     <dd>Blank searches /usr/bin, /usr/local/bin, then PATH. <strong>Restart required.</strong></dd>
     <dt>iCloud+ plan</dt>
@@ -138,18 +138,18 @@
     <dt>Two-way audio</dt>
     <dd>Talk back through a camera with a speaker. Fixed at accessory setup for the same reason as audio. <strong>Restart required.</strong></dd>
     <dt>HomeKit Secure Video</dt>
-    <dd>Off by default and enabled per camera. A recording camera runs one continuous ffmpeg whether or not anything moves — that is what lets a clip start <em>before</em> the motion — costing roughly 15% of one core each on hardware encoding. <strong>Restart required.</strong></dd>
+    <dd>Off by default and enabled per camera. A recording camera runs one continuous ffmpeg whether or not anything moves - that is what lets a clip start <em>before</em> the motion - costing roughly 15% of one core each on hardware encoding. <strong>Restart required.</strong></dd>
     <dt>Package camera</dt>
     <dd>Offered only for cameras whose payload reports the downward lens. It appears as a second accessory at 2 fps, does not record, and therefore does not use one of your iCloud plan's camera slots. Takes effect on the next discovery.</dd>
   </dl>
 
   <h6>Hardware transcoding</h6>
   <p>Every Protect camera streams HEVC and HomeKit accepts only H.264, so every live view is a transcode. At startup the plugin probes ffmpeg, prefers Intel Quick Sync then VAAPI, and trial-encodes each one rather than trusting <code>-encoders</code> to list it; software is the last resort. The encoder it settled on is logged at startup.</p>
-  <p>The difference is not marginal: measured on an i7-8700K with UHD 630, 20 seconds of 2688×1512 costs 1.79 s of CPU via VAAPI and 49.1 s via libx264 — about 27×. That is why the live-view cap defaults to 6 on hardware and 2 on software.</p>
-  <p>Seeing <code>h264_vaapi</code> rather than <code>h264_qsv</code> on an Intel host is normal, not a fault. A warning naming <code>libx264</code> means hardware acceleration is not reaching the process — most often the render device is not passed into the Docker container (<code>--device=/dev/dri</code>), or the Homebridge user is not in the <code>render</code> group. Run Homebridge with DEBUG logging to see which candidates were rejected and why.</p>
+  <p>The difference is not marginal: measured on an i7-8700K with UHD 630, 20 seconds of 2688×1512 costs 1.79 s of CPU via VAAPI and 49.1 s via libx264 - about 27×. That is why the live-view cap defaults to 6 on hardware and 2 on software.</p>
+  <p>Seeing <code>h264_vaapi</code> rather than <code>h264_qsv</code> on an Intel host is normal, not a fault. A warning naming <code>libx264</code> means hardware acceleration is not reaching the process - most often the render device is not passed into the Docker container (<code>--device=/dev/dri</code>), or the Homebridge user is not in the <code>render</code> group. Run Homebridge with DEBUG logging to see which candidates were rejected and why.</p>
 
   <h6>Recording and live views share the GPU</h6>
-  <p>A recording camera does <strong>not</strong> consume one of the concurrent live-view slots — that cap exists to protect interactive viewing, and a recording process is not an interactive viewer. The two do however share the same encoder. Several cameras recording continuously reduce the headroom available to live views, so on a host near its limit, lower the live-view cap rather than assuming the two budgets are independent.</p>
+  <p>A recording camera does <strong>not</strong> consume one of the concurrent live-view slots - that cap exists to protect interactive viewing, and a recording process is not an interactive viewer. The two do however share the same encoder. Several cameras recording continuously reduce the headroom available to live views, so on a host near its limit, lower the live-view cap rather than assuming the two budgets are independent.</p>
 </div>
 
 <div id="tab-root"></div>

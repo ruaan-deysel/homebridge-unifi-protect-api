@@ -1,19 +1,19 @@
 // DOM construction for the tabbed shell. Pure config logic lives in
-// config-ops.js; this file only builds and wires elements — kept apart so
+// config-ops.js; this file only builds and wires elements - kept apart so
 // each half stays independently testable.
 
 /**
  * A tablist of real buttons, not clickable divs: screen readers announce the
  * role and position, and arrow-key navigation is what users of a tab strip
- * expect. Labels are OURS, never console-supplied — but they still go in as
+ * expect. Labels are OURS, never console-supplied - but they still go in as
  * textContent, because the rule is unconditional.
  *
  * Each button/pane pair is cross-referenced (`aria-controls`/`aria-labelledby`
  * against real `id`s) and the pane carries `role="tabpanel"`, so assistive
- * tech can tell which pane a tab owns — without that, a screen reader has no
+ * tech can tell which pane a tab owns - without that, a screen reader has no
  * way to associate the two. Roving `tabindex` (only the selected button is in
  * the Tab order, `0`; the rest are `-1`) keeps the strip a single Tab stop,
- * as arrow keys — not Tab — are how a tablist's own controls are supposed to
+ * as arrow keys - not Tab - are how a tablist's own controls are supposed to
  * move between tabs.
  */
 export function renderTabs(doc, labels) {
@@ -27,7 +27,7 @@ export function renderTabs(doc, labels) {
     pane.id = `tabpanel-${i}`
     pane.setAttribute('aria-labelledby', `tab-${i}`)
     // A tabpanel has to be in the Tab order itself, or a pane whose content is
-    // not focusable (the Help pane is all prose) can never be reached — arrow
+    // not focusable (the Help pane is all prose) can never be reached - arrow
     // keys move between tabs, and Tab from the strip has to land somewhere.
     pane.tabIndex = 0
     return pane
@@ -45,7 +45,7 @@ export function renderTabs(doc, labels) {
     // Home/End alongside the arrows: the WAI-ARIA tabs pattern lists them as
     // optional, but with four tabs they are the difference between one
     // keystroke and three. Arrows wrap, so Home/End are not merely shortcuts
-    // for holding an arrow down — they are unambiguous.
+    // for holding an arrow down - they are unambiguous.
     b.addEventListener('keydown', (event) => {
       const target = {
         ArrowRight: (i + 1) % labels.length,
@@ -63,7 +63,7 @@ export function renderTabs(doc, labels) {
     tablist.append(b)
     return b
   })
-  // `focus` defaults to true — clicking or arrow-keying a tab should move
+  // `focus` defaults to true - clicking or arrow-keying a tab should move
   // focus there. The one caller that opts out is construction itself: merely
   // building the shell (below) must not steal focus out of whatever the host
   // page was already focused on.
@@ -92,7 +92,7 @@ const GROUP_LABELS = { camera: 'Cameras', light: 'Lights', sensor: 'Sensors', ch
  * without bound and finding one camera meant scrolling past the rest.
  *
  * `name` is console-supplied and attacker-controlled. It lands as textContent
- * on a row that is built with createElement — never as markup, and never
+ * on a row that is built with createElement - never as markup, and never
  * interpolated into a class or an attribute that could break out. `id` lands
  * via `dataset`, which is a property assignment too, not markup.
  */
@@ -142,7 +142,7 @@ export function renderDeviceList(doc, devices, onSelect) {
 
 /**
  * Which value a control is showing: the global default, or this device's own.
- * Making that visible is the point — the flat UI showed only the resulting
+ * Making that visible is the point - the flat UI showed only the resulting
  * value, so there was no way to tell, and no way to get back to the default.
  * `onReset` is only wired when overridden; there is nothing to reset otherwise.
  *
@@ -170,18 +170,18 @@ export function renderBadge(doc, overridden, onReset, label = '') {
 const SECTIONS = ['General', 'Live view', 'Recording', 'Extra accessories']
 
 // Section labels need ids for `aria-labelledby`, and the ids have to be unique
-// across every pane ever built in this document — a counter is the only source
+// across every pane ever built in this document - a counter is the only source
 // of that which does not involve `device.id` (console-supplied) or collide when
 // the same device is selected twice.
 let sectionSeq = 0
 
 /**
  * One device's settings, grouped so related controls read as related.
- * `device.name` lands as textContent on the heading — attacker-controlled,
+ * `device.name` lands as textContent on the heading - attacker-controlled,
  * never markup. `heading.tabIndex = -1` makes it a programmatic focus target.
  *
  * Focus is NOT moved here. `focus()` on a node that is not in the document is
- * a silent no-op in every browser, and this pane is built detached — the
+ * a silent no-op in every browser, and this pane is built detached - the
  * caller inserts it afterwards. Focusing here therefore did nothing at all,
  * while a test counting `focus()` calls on a fake happily said it worked. So
  * `mount(container)` owns both halves: it inserts the pane and THEN focuses,
@@ -200,7 +200,7 @@ export function renderDetail(doc, device) {
   pane.append(heading)
   const bodies = {}
   // Kept so `mount` can hide a section whose body ends up with no visible
-  // controls — the label and its body have to disappear together.
+  // controls - the label and its body have to disappear together.
   const labels = {}
   for (const name of SECTIONS) {
     const labelId = `detail-section-${sectionSeq++}`
@@ -235,7 +235,7 @@ export function renderDetail(doc, device) {
     heading.focus()
     // Selecting a device swaps the whole right-hand pane, which changes the
     // document's height. The parent sizes the iframe from a mutation observer,
-    // but it is watching its own side — without this the modal keeps the old
+    // but it is watching its own side - without this the modal keeps the old
     // height and grows a scrollbar instead of the iframe growing.
     globalThis.homebridge?.fixScrollHeight?.()
   }
