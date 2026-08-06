@@ -505,7 +505,7 @@ export async function startUi(doc, homebridge, win = globalThis) {
       // reports the failure itself.
       if (!await save(syncConnection))
         return
-      report(`Connected - ${info.nvrName}, Protect ${info.version}`, true)
+      report(`Connected — ${info.nvrName}, Protect ${info.version}`, true)
       const { devices } = await homebridge.request('/discover', credentials)
       render(devices)
       // Persist the discovered devices so the next page load can restore the

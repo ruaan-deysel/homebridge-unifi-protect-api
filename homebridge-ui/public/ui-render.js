@@ -18,7 +18,7 @@
  */
 export function renderTabs(doc, labels) {
   const tablist = doc.createElement('div')
-  tablist.className = 'nav nav-tabs mb-3'
+  tablist.className = 'nav nav-pills nav-fill mb-3'
   tablist.setAttribute('role', 'tablist')
   const panes = labels.map((_, i) => {
     const pane = doc.createElement('div')
@@ -106,7 +106,7 @@ export function renderDeviceList(doc, devices, onSelect) {
     if (group.length === 0)
       continue
     const heading = doc.createElement('div')
-    heading.className = 'list-group-item list-group-item-secondary py-1 small text-uppercase'
+    heading.className = 'list-group-item list-group-item-secondary py-1 small text-uppercase fw-bold uip-group-heading'
     heading.textContent = GROUP_LABELS[type]
     list.append(heading)
     const groupRows = []
@@ -205,7 +205,7 @@ export function renderDetail(doc, device) {
   for (const name of SECTIONS) {
     const labelId = `detail-section-${sectionSeq++}`
     const label = doc.createElement('div')
-    label.className = 'text-body-secondary text-uppercase small border-bottom mt-3 mb-2'
+    label.className = 'text-uppercase small border-bottom mt-3 mb-2 uip-detail-section'
     label.id = labelId
     label.textContent = name
     const body = doc.createElement('div')

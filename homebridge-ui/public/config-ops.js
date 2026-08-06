@@ -224,12 +224,10 @@ export function renderQualitySelect(doc, device, value) {
 }
 
 /**
- * The package-toggle label. It names the frame rate deliberately: enabling this
- * creates a second accessory for one physical device, and the console serves
- * that lens at 2 fps - someone who enables it expecting normal video should be
- * told first, not surprised after the fact.
+ * The package-toggle label. Names it a separate accessory because enabling this
+ * creates a second HomeKit accessory for one physical device.
  */
-export const PACKAGE_LABEL = 'Package camera (separate accessory, 2 fps)'
+export const PACKAGE_LABEL = 'Package camera (separate accessory)'
 
 /**
  * Only cameras, and only where `hasPackageCamera` is `true` on the device

@@ -675,8 +675,8 @@ describe('package camera toggle', () => {
     expect(renderControls({ ...doorbell, type: 'chime' }).map(c => c.key)).not.toContain('packageCamera')
   })
 
-  it('states the frame rate in the label so nobody expects smooth video', () => {
-    expect(PACKAGE_LABEL).toContain('2 fps')
+  it('labels the toggle as a separate accessory so its effect is clear', () => {
+    expect(PACKAGE_LABEL).toContain('separate accessory')
   })
 })
 
