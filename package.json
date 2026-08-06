@@ -2,7 +2,7 @@
   "name": "homebridge-unifi-protect-api",
   "displayName": "UniFi Protect (API)",
   "type": "module",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Homebridge plugin for UniFi Protect using the official Integration API. API key only — no username or password.",
   "author": "Ruaan Deysel",
   "license": "Apache-2.0",

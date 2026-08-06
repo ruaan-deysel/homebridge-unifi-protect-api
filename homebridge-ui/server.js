@@ -16,9 +16,11 @@ function baseUrl(host) {
 
 /**
  * Pins a connection to one certificate. Mirrors `pinnedTlsOptions` in
- * src/protect/cert.ts - read the long comment there before touching this;
- * `checkServerIdentity` skips the hostname check ONLY, and certificate
- * identity stays fully enforced against `ca`.
+ * src/protect/cert.ts - read the long comment there before touching this.
+ * `checkServerIdentity` replaces the hostname check ONLY (the cert is issued
+ * for the UDM hostname, not the IP) and is NOT a no-op: it re-verifies identity
+ * by comparing the presented leaf against the trusted certificate byte for
+ * byte, so certificate identity stays fully enforced.
  *
  * ponytail: duplicated rather than imported from ../dist/, for the same
  * reason httpsFetch below is - server.js is plain JS loaded outside the TS
@@ -26,7 +28,14 @@ function baseUrl(host) {
  * them only if the UI ever gains a build step.
  */
 function pinned(pem) {
-  return { rejectUnauthorized: true, ca: [pem], checkServerIdentity: () => undefined }
+  const trusted = Buffer.from(pem.replace(/-----[^-]*-----/g, '').replace(/\s+/g, ''), 'base64')
+  return {
+    rejectUnauthorized: true,
+    ca: [pem],
+    checkServerIdentity: (_host, cert) => cert.raw.equals(trusted)
+      ? undefined
+      : Object.assign(new Error('The UniFi console presented a certificate that does not match the pinned one.'), { code: 'ERR_TLS_CERT_PIN_MISMATCH' }),
+  }
 }
 
 function fingerprintOf(pem) {

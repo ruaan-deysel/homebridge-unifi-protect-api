@@ -1,3 +1,4 @@
+import type { PeerCertificate } from 'node:tls'
 import { Buffer } from 'node:buffer'
 import { createHash } from 'node:crypto'
 import { connect } from 'node:tls'
@@ -25,23 +26,33 @@ export function fingerprintOf(pem: string): string {
 /**
  * TLS options that pin a connection to one specific certificate.
  *
- * READ THIS BEFORE "FIXING" IT. `checkServerIdentity` is overridden to skip the
- * HOSTNAME check and nothing else: the console's certificate is issued for the
- * UDM's own hostname while the plugin connects to it by IP address, and that
- * mismatch is the sole reason ordinary verification fails against real hardware.
- * Certificate identity is still fully enforced — `rejectUnauthorized: true`
- * plus the console's own certificate as the only trust anchor means node's
- * validator rejects any certificate but this exact one, during the handshake,
- * before a single byte of the request (the `X-API-KEY` header included) is
- * written to the socket. That is the property that stops a LAN attacker from
- * capturing the credential, and it is why post-handshake fingerprint comparison
- * is NOT used here: by the time such a check could run, the headers are gone.
+ * READ THIS BEFORE "FIXING" IT. `checkServerIdentity` replaces ONLY the hostname
+ * check, and is deliberately NOT a no-op: the console's certificate is issued
+ * for the UDM's own hostname while the plugin connects to it by IP address, and
+ * that mismatch is the sole reason ordinary verification fails against real
+ * hardware. Instead of skipping identity entirely, it re-verifies it by
+ * comparing the presented leaf certificate against the trusted one byte for
+ * byte, returning an `Error` on any mismatch.
+ *
+ * Certificate identity is enforced in two layers. `ca: [pem]` makes the
+ * console's own certificate the sole trust anchor and `rejectUnauthorized: true`
+ * makes node's validator reject anything that does not chain to it — that is the
+ * CA check, and it runs first. `checkServerIdentity` then runs and pins the
+ * exact leaf byte for byte, which is what replaces the hostname check node would
+ * otherwise do at this step. Both run DURING the handshake — before a single
+ * byte of the request (the `X-API-KEY` header included) is written to the
+ * socket — which is the property that stops a LAN attacker from capturing the
+ * credential.
  */
 export function pinnedTlsOptions(pem: string) {
+  const trusted = derOf(pem)
   return {
     rejectUnauthorized: true,
     ca: [pem],
-    checkServerIdentity: () => undefined,
+    checkServerIdentity: (_host: string, cert: PeerCertificate): Error | undefined =>
+      cert.raw.equals(trusted)
+        ? undefined
+        : Object.assign(new Error('The UniFi console presented a certificate that does not match the pinned one.'), { code: 'ERR_TLS_CERT_PIN_MISMATCH' }),
   }
 }
 

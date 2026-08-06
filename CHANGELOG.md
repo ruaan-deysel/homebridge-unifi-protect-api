@@ -6,6 +6,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-08-06
+
+### Security
+- Certificate pinning now verifies the console's certificate explicitly during the TLS
+  handshake instead of overriding `checkServerIdentity` with a no-op. The presented leaf
+  must match the trusted certificate byte for byte, so identity is enforced in two
+  independent layers (the pinned `ca` chain check, then the explicit compare) — resolving
+  the static-analysis findings that flagged the override as disabling validation. Behaviour
+  against real hardware is unchanged: the hostname mismatch of a UniFi console is still
+  tolerated, and a genuinely wrong certificate is now surfaced with an
+  `ERR_TLS_CERT_PIN_MISMATCH` code so the UI still reports it as a certificate error.
+- The developer diagnostic scripts (`live-check`, `capture-events`) no longer trust a
+  console certificate on first sight before sending the API key: they require an
+  out-of-band `PROTECT_CERT_SHA256` fingerprint, printing the presented one when none is
+  configured so it can be verified and set. They also pin every request to the read
+  certificate and send SNI only for DNS hostnames.
+
 ## [1.0.0] - 2026-08-06
 
 ### Changed

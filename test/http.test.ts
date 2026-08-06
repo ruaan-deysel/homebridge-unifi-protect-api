@@ -4,6 +4,7 @@ import type { TestCert } from './support/tls.js'
 import { Buffer } from 'node:buffer'
 import { createServer } from 'node:https'
 import { afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { pinnedTlsOptions } from '../src/protect/cert.js'
 import { httpsRequestFn } from '../src/protect/http.js'
 import { makeSelfSigned } from './support/tls.js'
 
@@ -161,5 +162,29 @@ describe('httpsRequestFn', () => {
     await expect(httpsRequestFn(`${peer.base}/thing`, { timeoutMs: 50, consoleCert: real.cert }))
       .rejects
       .toThrow('Request timed out')
+  })
+})
+
+describe('pinnedTlsOptions checkServerIdentity', () => {
+  const derOf = (pem: string) => Buffer.from(pem.replace(/-----[^-]*-----/g, '').replace(/\s+/g, ''), 'base64')
+
+  // Exercises checkServerIdentity in isolation. In a real handshake the `ca`
+  // trust anchor rejects a differently-issued certificate before this runs, so
+  // calling it directly is the only way to prove the explicit leaf pin behind
+  // that first line of defence.
+  it('accepts the exact pinned certificate despite the hostname mismatch', () => {
+    const { checkServerIdentity } = pinnedTlsOptions(real.cert)
+    // Same leaf the pin trusts — the hostname check that would otherwise fail
+    // (cert is for unifi.local, connection is by IP) is deliberately skipped.
+    expect(checkServerIdentity('127.0.0.1', { raw: derOf(real.cert) } as never)).toBeUndefined()
+  })
+
+  it('rejects any other certificate with a pin-mismatch code', () => {
+    const { checkServerIdentity } = pinnedTlsOptions(real.cert)
+    const error = checkServerIdentity('127.0.0.1', { raw: derOf(impostor.cert) } as never)
+    expect(error).toBeInstanceOf(Error)
+    // The code routes it to the UI's certificate-error message rather than a
+    // generic failure.
+    expect((error as { code?: string })?.code).toBe('ERR_TLS_CERT_PIN_MISMATCH')
   })
 })
