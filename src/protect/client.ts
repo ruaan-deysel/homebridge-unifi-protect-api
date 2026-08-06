@@ -139,6 +139,16 @@ export class ProtectClient {
     return this.validate(cameraSchema, await this.getJson(path, 'PATCH', patch), path)
   }
 
+  async patchLight(id: string, patch: Record<string, unknown>): Promise<z.infer<typeof lightSchema>> {
+    const path = `/v1/lights/${encodeURIComponent(id)}`
+    return this.validate(lightSchema, await this.getJson(path, 'PATCH', patch), path)
+  }
+
+  async patchChime(id: string, patch: Record<string, unknown>): Promise<z.infer<typeof chimeSchema>> {
+    const path = `/v1/chimes/${encodeURIComponent(id)}`
+    return this.validate(chimeSchema, await this.getJson(path, 'PATCH', patch), path)
+  }
+
   /** Raw `image/jpeg` bytes — never JSON-parsed. */
   async getSnapshot(id: string, options: { highQuality?: boolean, channel?: SnapshotChannel } = {}): Promise<Buffer> {
     const query = new URLSearchParams()

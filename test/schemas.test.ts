@@ -4,6 +4,7 @@ import {
   cameraSchema,
   chimeSchema,
   existingRtspsStreamsSchema,
+  lightSchema,
   liveviewSchema,
   nvrSchema,
   relayOutputStateSchema,
@@ -22,6 +23,10 @@ describe('generated schemas parse real hardware payloads', () => {
     for (const chime of load('chimes')) chimeSchema.parse(chime)
     for (const view of load('liveviews')) liveviewSchema.parse(view)
     nvrSchema.parse(load('nvrs'))
+  })
+
+  it('parses every light', () => {
+    for (const light of load('lights')) lightSchema.parse(light)
   })
 
   it('parses the rtsps stream response', () => {

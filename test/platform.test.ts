@@ -26,6 +26,10 @@ const cameras = JSON.parse(readFileSync('test/fixtures/cameras.json', 'utf8')) a
 function camera(name: string) {
   return cameras.find(c => c.name === name)!
 }
+/** Protect Lights, keyed by modelKey through makeClient like the cameras. */
+const lights = JSON.parse(readFileSync('test/fixtures/lights.json', 'utf8')) as Record<string, unknown>[]
+/** The single real chime, keyed by modelKey through makeClient. */
+const chimes = JSON.parse(readFileSync('test/fixtures/chimes.json', 'utf8')) as Record<string, unknown>[]
 /** Frames captured from the live event socket, verbatim. */
 function frames(file: string): unknown[] {
   return (JSON.parse(readFileSync(`test/fixtures/events/${file}.json`, 'utf8')) as { payload: unknown }[]).map(f => f.payload)
@@ -76,6 +80,8 @@ function makeClient(devices: unknown[]) {
     getChimes: vi.fn(async () => of('chime')),
     getViewers: vi.fn(async () => of('viewer')),
     patchCamera: vi.fn(async () => ({})),
+    patchLight: vi.fn(async () => ({})),
+    patchChime: vi.fn(async () => ({})),
     /**
      * Present so a call during discovery is VISIBLE, not so one is expected:
      * this is a POST that creates a stream on the console, and discovery must
@@ -1064,6 +1070,127 @@ describe('uniFiProtectPlatform', () => {
     expect(platform.client.patchCamera).toHaveBeenCalledWith(DOORBELL, { ledSettings: { isEnabled: true } })
   })
 
+  // A Protect Light is a different modelKey down a different reconcile branch,
+  // so discovery has to build its Lightbulb and motion sensor without any of
+  // the camera scaffolding (no CameraController, no streaming).
+  it('builds a Lightbulb and motion sensor for a discovered light', async () => {
+    const light = lights[0]!
+    const { platform } = await withCameras([light])
+    const accessory = platform.accessories.get(`uuid-${light.id}`) as unknown as FakeAccessory
+
+    expect(accessory.getServiceById(S.Lightbulb, 'light')).toBeDefined()
+    expect(accessory.getServiceById(S.MotionSensor, 'light-motion')).toBeDefined()
+    expect(accessory.controllers).toHaveLength(0)
+  })
+
+  it('sends isLightForceEnabled to patchLight when the bulb is switched', async () => {
+    const light = lights[0]!
+    const { platform } = await withCameras([light])
+    const accessory = platform.accessories.get(`uuid-${light.id}`) as unknown as FakeAccessory
+    const on = accessory.getServiceById(S.Lightbulb, 'light')!.getCharacteristic(C.On)
+
+    await on.setHandler!(true)
+
+    expect(platform.client.patchLight).toHaveBeenCalledWith(light.id, { isLightForceEnabled: true })
+  })
+
+  it('sends a mapped ledLevel to patchLight when brightness changes', async () => {
+    const light = lights[0]!
+    const { platform } = await withCameras([light])
+    const accessory = platform.accessories.get(`uuid-${light.id}`) as unknown as FakeAccessory
+    const brightness = accessory.getServiceById(S.Lightbulb, 'light')!.getCharacteristic(C.Brightness)
+
+    await brightness.setHandler!(100)
+
+    expect(platform.client.patchLight).toHaveBeenCalledWith(light.id, { lightDeviceSettings: { ledLevel: 6 } })
+  })
+
+  it('drives the light motion sensor off a deviceUpdate frame', async () => {
+    const light = lights[0]!
+    const { platform, bus } = await withCameras([light])
+    const accessory = platform.accessories.get(`uuid-${light.id}`) as unknown as FakeAccessory
+    const motion = accessory.getServiceById(S.MotionSensor, 'light-motion')!
+    expect(motion.valueOf_(C.MotionDetected)).toBe(false)
+
+    bus.emit('deviceUpdate', { type: 'update', item: { id: light.id, modelKey: 'light', isPirMotionDetected: true } })
+
+    expect(motion.valueOf_(C.MotionDetected)).toBe(true)
+  })
+
+  // The race applyRecentLightWrite exists to lose: a deviceUpdate frame that
+  // echoes the pre-write state must not flip the tile back inside the grace
+  // window after a successful force write.
+  it('keeps a fresh light write when a stale deviceUpdate echoes the old state', async () => {
+    const light = lights[0]!
+    const { platform, bus } = await withCameras([light])
+    const accessory = platform.accessories.get(`uuid-${light.id}`) as unknown as FakeAccessory
+    const on = accessory.getServiceById(S.Lightbulb, 'light')!.getCharacteristic(C.On)
+    // The fixture starts off; the discovery build reflects that.
+    expect(on.value).toBe(false)
+
+    // The user switches it on — records a recent write and flips the cache.
+    await on.setHandler!(true)
+    // A pre-write echo of the OLD state races in during the grace window.
+    bus.emit('deviceUpdate', { type: 'update', item: { id: light.id, modelKey: 'light', isLightOn: false } })
+
+    // The overlay wins: the tile stays on rather than snapping back off.
+    expect(on.value).toBe(true)
+  })
+
+  // A chime is another modelKey down its own reconcile branch: it becomes a
+  // volume Lightbulb, and its writes preserve the ring fields the PATCH requires.
+  it('builds a volume Lightbulb for a discovered chime', async () => {
+    const chime = chimes[0]!
+    const { platform } = await withCameras([chime])
+    const accessory = platform.accessories.get(`uuid-${chime.id}`) as unknown as FakeAccessory
+    const bulb = accessory.getServiceById(S.Lightbulb, 'chime-volume')!
+
+    expect(bulb).toBeDefined()
+    expect(accessory.controllers).toHaveLength(0)
+    // The fixture's ring volume is 80.
+    expect(bulb.getCharacteristic(C.Brightness).value).toBe(80)
+    expect(bulb.getCharacteristic(C.On).value).toBe(true)
+  })
+
+  it('preserves the ring fields and overrides only the volume when set', async () => {
+    const chime = chimes[0]!
+    const { platform } = await withCameras([chime])
+    const accessory = platform.accessories.get(`uuid-${chime.id}`) as unknown as FakeAccessory
+    const brightness = accessory.getServiceById(S.Lightbulb, 'chime-volume')!.getCharacteristic(C.Brightness)
+
+    await brightness.setHandler!(40)
+
+    const patch = (platform.client.patchChime as ReturnType<typeof vi.fn>).mock.calls[0]!
+    expect(patch[0]).toBe(chime.id)
+    // Every original field survives; only volume changed.
+    expect(patch[1]).toEqual({ ringSettings: [{ cameraId: '1caae4537220700882c792db', repeatTimes: 1, volume: 40 }] })
+  })
+
+  it('silences the chime when the tile is switched off', async () => {
+    const chime = chimes[0]!
+    const { platform } = await withCameras([chime])
+    const accessory = platform.accessories.get(`uuid-${chime.id}`) as unknown as FakeAccessory
+    const on = accessory.getServiceById(S.Lightbulb, 'chime-volume')!.getCharacteristic(C.On)
+
+    await on.setHandler!(false)
+
+    const patch = (platform.client.patchChime as ReturnType<typeof vi.fn>).mock.calls[0]!
+    expect((patch[1] as { ringSettings: { volume: number }[] }).ringSettings[0]!.volume).toBe(0)
+  })
+
+  it('keeps a fresh chime write when a stale deviceUpdate echoes the old volume', async () => {
+    const chime = chimes[0]!
+    const { platform, bus } = await withCameras([chime])
+    const accessory = platform.accessories.get(`uuid-${chime.id}`) as unknown as FakeAccessory
+    const bulb = accessory.getServiceById(S.Lightbulb, 'chime-volume')!
+
+    await bulb.getCharacteristic(C.Brightness).setHandler!(40)
+    // A pre-write echo of the OLD 80 races in during the grace window.
+    bus.emit('deviceUpdate', { type: 'update', item: { id: chime.id, modelKey: 'chime', ringSettings: [{ cameraId: '1caae4537220700882c792db', repeatTimes: 1, volume: 80 }] } })
+
+    expect(bulb.getCharacteristic(C.Brightness).value).toBe(40)
+  })
+
   // Fix round 2: the previous "partial nested delta" test never actually
   // reached `Object.assign` — the schema rejected it first. This one gets a
   // schema-valid frame PAST the schema and into the merge, and proves
@@ -1142,16 +1269,17 @@ describe('uniFiProtectPlatform', () => {
   })
 
   // Final review I1: `reconcile`'s `modelKey === 'camera'` guard was untested —
-  // replacing it with `true` left the whole suite green. Without it a light,
-  // sensor or chime grows a Motion sensor and enters the service removal loop,
-  // the code path that has produced four Criticals in this repo.
+  // replacing it with `true` left the whole suite green. Without it a sensor or
+  // viewer grows a Motion sensor and enters the service removal loop, the code
+  // path that has produced four Criticals in this repo. A viewer is used because
+  // it is still an unhandled model — lights and chimes now build their own services.
   it('builds no camera services for a non-camera device during discovery', async () => {
-    const light = { id: 'light1', name: 'Porch', modelKey: 'light', featureFlags: { hasSpeaker: true, hasLedStatus: true }, smartDetectSettings: { objectTypes: ['person'], audioTypes: [] } }
-    const { platform } = makePlatform(validConfig, [light])
+    const viewer = { id: 'viewer1', name: 'Hallway', modelKey: 'viewer', featureFlags: { hasSpeaker: true, hasLedStatus: true }, smartDetectSettings: { objectTypes: ['person'], audioTypes: [] } }
+    const { platform } = makePlatform(validConfig, [viewer])
 
     await platform.discover()
 
-    const accessory = platform.accessories.get('uuid-light1') as unknown as FakeAccessory
+    const accessory = platform.accessories.get('uuid-viewer1') as unknown as FakeAccessory
     // Registered — otherwise this would pass without reconcile touching it.
     expect(accessory).toBeDefined()
     expect(accessory.services).toEqual([])
@@ -1160,18 +1288,18 @@ describe('uniFiProtectPlatform', () => {
   // Final review I1, the second call site: same guard in `applyDeviceUpdate`,
   // equally untested.
   it('builds and removes nothing when a deviceUpdate frame arrives for a non-camera accessory', async () => {
-    const { platform, bus } = makePlatform(validConfig, [{ id: 'light1', name: 'Porch', modelKey: 'light' }])
+    const { platform, bus } = makePlatform(validConfig, [{ id: 'viewer1', name: 'Hallway', modelKey: 'viewer' }])
     await platform.discover()
-    const accessory = platform.accessories.get('uuid-light1') as unknown as FakePlatformAccessory
+    const accessory = platform.accessories.get('uuid-viewer1') as unknown as FakePlatformAccessory
     // A service some other module owns, carrying a subtype camera.ts claims.
     // It must survive, and no camera service may appear beside it.
-    const foreign = accessory.addService(S.MotionSensor, 'Porch Motion', 'motion')
+    const foreign = accessory.addService(S.MotionSensor, 'Hallway Motion', 'motion')
 
-    bus.emit('deviceUpdate', { type: 'update', item: { id: 'light1', modelKey: 'light', name: 'Porch Light' } })
+    bus.emit('deviceUpdate', { type: 'update', item: { id: 'viewer1', modelKey: 'viewer', name: 'Hallway View' } })
 
     // The frame really was processed — without this the test would pass just
     // as well if the schema had rejected it before reaching the guard.
-    expect(accessory.displayName).toBe('Porch Light')
+    expect(accessory.displayName).toBe('Hallway View')
     expect(accessory.services).toEqual([foreign])
   })
 
@@ -1456,14 +1584,14 @@ describe('uniFiProtectPlatform', () => {
   })
 
   it('gives a non-camera device no camera controller at all', async () => {
-    const { platform } = makePlatform(validConfig, [{ id: 'light1', name: 'Porch', modelKey: 'light' }])
+    const { platform } = makePlatform(validConfig, [{ id: 'viewer1', name: 'Hallway', modelKey: 'viewer' }])
 
     await platform.discover()
 
-    const light = platform.accessories.get('uuid-light1') as unknown as FakePlatformAccessory
-    expect(light).toBeDefined()
-    expect(light.controllers).toEqual([])
-    expect(light.services).toEqual([])
+    const viewer = platform.accessories.get('uuid-viewer1') as unknown as FakePlatformAccessory
+    expect(viewer).toBeDefined()
+    expect(viewer.controllers).toEqual([])
+    expect(viewer.services).toEqual([])
   })
 
   // A stranded ffmpeg holds a 4 MP HEVC decode open for as long as the host is

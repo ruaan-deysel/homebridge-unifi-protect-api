@@ -15,6 +15,8 @@ Bring UniFi Protect cameras into Apple Home using Ubiquiti's official Integratio
 - Camera status LED control
 - Package-camera live view and snapshots
 - Optional camera audio and two-way talkback
+- Protect floodlights as a dimmable light with a motion sensor
+- Chime volume control as a HomeKit light
 
 ## Requirements
 
@@ -59,7 +61,7 @@ recording several cameras.
 ## Known limitations
 
 The official Integration API does not currently provide recording-mode control, privacy zones,
-or event thumbnails. Protect light accessories are not yet supported.
+or event thumbnails.
 
 ## Support
 

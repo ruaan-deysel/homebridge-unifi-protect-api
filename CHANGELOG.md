@@ -6,7 +6,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.0.0] - 2026-08-03
+## [1.0.0] - 2026-08-06
 
 ### Changed
 - TypeScript is pinned to the 6.x line (`^6.0.3`), matching what Homebridge 2.2.1 itself
@@ -14,6 +14,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to assume Homebridge supports it; the caret keeps 7 out.
 
 ### Added
+- Protect floodlights are exposed as a HomeKit Lightbulb with brightness plus a motion
+  sensor. On/off maps to the console's force-enable override, so toggling the light in
+  HomeKit never overwrites its configured motion or schedule mode; brightness maps to the
+  hardware's six LED levels. Both the light and its PIR update in realtime from the device
+  event stream, and a change made in the Protect app is reflected in HomeKit.
+- Chimes are exposed as a HomeKit Lightbulb whose brightness controls the ring volume
+  (0-100), turning off to silence the chime. The volume applies to every doorbell the
+  chime is paired to, preserving each ring's tone and repeat count, and updates in realtime
+  from the device event stream.
 - Motion sensors for every camera, driven by the live event stream rather than polling.
   `GET /v1/events` does not exist in the Integration API, so a lost end-frame can never be
   reconciled by a query — each active event carries a failsafe timer that clears it.

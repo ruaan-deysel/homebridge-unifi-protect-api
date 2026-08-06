@@ -1,1 +1,32 @@
-[]
+[
+  {
+    "id": "light000000000000000001",
+    "modelKey": "light",
+    "state": "CONNECTED",
+    "name": "Driveway Light",
+    "mac": "AABBCCDDEE01",
+    "lightModeSettings": { "mode": "motion", "enableAt": "dark" },
+    "lightDeviceSettings": { "isIndicatorEnabled": true, "pirDuration": 30000, "pirSensitivity": 50, "ledLevel": 3 },
+    "isDark": true,
+    "isLightOn": false,
+    "isLightForceEnabled": false,
+    "lastMotion": 1445408038748,
+    "isPirMotionDetected": false,
+    "camera": null
+  },
+  {
+    "id": "light000000000000000002",
+    "modelKey": "light",
+    "state": "CONNECTED",
+    "name": "Backyard Light",
+    "mac": "AABBCCDDEE02",
+    "lightModeSettings": { "mode": "always", "enableAt": "fulltime" },
+    "lightDeviceSettings": { "isIndicatorEnabled": false, "pirDuration": 15000, "pirSensitivity": 80, "ledLevel": 6 },
+    "isDark": false,
+    "isLightOn": true,
+    "isLightForceEnabled": true,
+    "lastMotion": 1445408038748,
+    "isPirMotionDetected": true,
+    "camera": null
+  }
+]

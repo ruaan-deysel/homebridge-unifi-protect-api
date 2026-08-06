@@ -1,10 +1,14 @@
 import type { API, CameraRecordingOptions, CameraStreamingOptions, DynamicPlatformPlugin, HAP, Logging, PlatformAccessory, PlatformConfig } from 'homebridge'
 import type { z } from 'zod'
 import type { CameraCallbacks } from './accessories/camera.js'
+import type { ChimeCallbacks } from './accessories/chime.js'
+import type { LightCallbacks } from './accessories/light.js'
 import type { SensorChange } from './accessories/tracker.js'
 import type { ProtectPluginConfig } from './config.js'
 import type { FfmpegCapabilities, RunFfmpeg } from './protect/ffmpeg.js'
 import { applyChange, buildCameraServices, isUnderstood } from './accessories/camera.js'
+import { buildChimeServices } from './accessories/chime.js'
+import { buildLightServices } from './accessories/light.js'
 import { ADVERTISED_RECORDING_SIZE } from './accessories/quality.js'
 import { RecordingDelegate } from './accessories/recording.js'
 import { routeEvent } from './accessories/router.js'
@@ -459,6 +463,67 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
   }
 
   /**
+   * Device id -> the value a recent successful light write asked for, and when.
+   * The same race and self-clearing window as `recentLedWrites`: a discovery
+   * whose inventory GET was in flight when the PATCH landed returns the
+   * pre-write state, and caching that flips the tile back in front of the user.
+   */
+  private readonly recentLightWrites = new Map<string, { on?: boolean, level?: number, at: number }>()
+
+  private readonly lightCallbacks: LightCallbacks = {
+    setOn: async (deviceId, on) => {
+      await this.client.patchLight(deviceId, { isLightForceEnabled: on })
+      this.recordLightWrite(deviceId, { on })
+      // Optimistic cache update, mirroring `setLed` — `isLightOn` is what the
+      // On characteristic reads back, so force the visible state too.
+      this.optimisticLight(deviceId, device => ({ ...device, isLightOn: on, isLightForceEnabled: on }))
+    },
+    setBrightness: async (deviceId, level) => {
+      await this.client.patchLight(deviceId, { lightDeviceSettings: { ledLevel: level } })
+      this.recordLightWrite(deviceId, { level })
+      this.optimisticLight(deviceId, (device) => {
+        const lightDeviceSettings = { ...(device.lightDeviceSettings as Record<string, unknown> | undefined), ledLevel: level }
+        return { ...device, lightDeviceSettings }
+      })
+    },
+  }
+
+  private recordLightWrite(deviceId: string, patch: { on?: boolean, level?: number }): void {
+    const previous = this.recentLightWrites.get(deviceId)
+    const fresh = previous && performance.now() - previous.at < LED_WRITE_GRACE_MS ? previous : undefined
+    this.recentLightWrites.set(deviceId, { ...fresh, ...patch, at: performance.now() })
+  }
+
+  private optimisticLight(deviceId: string, update: (device: Record<string, unknown>) => Record<string, unknown>): void {
+    const accessory = this.accessories.get(this.api.hap.uuid.generate(deviceId))
+    if (!accessory)
+      return
+    accessory.context.device = update(accessory.context.device as Record<string, unknown>)
+  }
+
+  /**
+   * Device id -> the ring volume a recent successful chime write asked for, and
+   * when. Same self-clearing grace window as the LED and light write-backs.
+   */
+  private readonly recentChimeWrites = new Map<string, { volume: number, at: number }>()
+
+  private readonly chimeCallbacks: ChimeCallbacks = {
+    setVolume: async (deviceId, volume) => {
+      const accessory = this.accessories.get(this.api.hap.uuid.generate(deviceId))
+      const device = accessory?.context.device as Record<string, unknown> | undefined
+      const rings = Array.isArray(device?.ringSettings) ? device.ringSettings as Record<string, unknown>[] : []
+      // Preserve every existing ring field (cameraId, ringtoneId, repeatTimes) —
+      // the PATCH schema requires them — and override only the volume.
+      const ringSettings = rings.map(ring => ({ ...ring, volume }))
+      await this.client.patchChime(deviceId, { ringSettings })
+      this.recentChimeWrites.set(deviceId, { volume, at: performance.now() })
+      // Optimistic cache update, mirroring the light path.
+      if (accessory)
+        accessory.context.device = { ...device, ringSettings }
+    },
+  }
+
+  /**
    * Sanitised (see `sanitizingLog`), and the only logger anything in this
    * plugin gets — the client, the event bus and every delegate are handed
    * THIS, not the raw Homebridge one.
@@ -741,6 +806,50 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
     const raw = device as unknown as Record<string, unknown>
     const ledSettings = { ...(raw.ledSettings as Record<string, unknown> | undefined), isEnabled: recent.on }
     return { ...raw, ledSettings } as unknown as DiscoveredDevice
+  }
+
+  /**
+   * The light equivalent of `applyRecentLedWrite`: overlays a still-fresh force
+   * or brightness write on a REST read that may have raced the PATCH. Overlays
+   * `isLightOn` too, because that is what the On characteristic reads back.
+   */
+  private applyRecentLightWrite(device: DiscoveredDevice): DiscoveredDevice {
+    const recent = this.recentLightWrites.get(device.id)
+    if (!recent)
+      return device
+    if (performance.now() - recent.at >= LED_WRITE_GRACE_MS) {
+      this.recentLightWrites.delete(device.id)
+      return device
+    }
+    const raw = device as unknown as Record<string, unknown>
+    const next: Record<string, unknown> = { ...raw }
+    if (recent.on !== undefined) {
+      next.isLightOn = recent.on
+      next.isLightForceEnabled = recent.on
+    }
+    if (recent.level !== undefined)
+      next.lightDeviceSettings = { ...(raw.lightDeviceSettings as Record<string, unknown> | undefined), ledLevel: recent.level }
+    return next as unknown as DiscoveredDevice
+  }
+
+  /**
+   * The chime equivalent of `applyRecentLightWrite`: overlays a still-fresh
+   * volume write on a REST read that may have raced the PATCH, so the tile does
+   * not snap back to the pre-write loudness.
+   */
+  private applyRecentChimeWrite(device: DiscoveredDevice): DiscoveredDevice {
+    const recent = this.recentChimeWrites.get(device.id)
+    if (!recent)
+      return device
+    if (performance.now() - recent.at >= LED_WRITE_GRACE_MS) {
+      this.recentChimeWrites.delete(device.id)
+      return device
+    }
+    const raw = device as unknown as Record<string, unknown>
+    if (!Array.isArray(raw.ringSettings))
+      return device
+    const ringSettings = (raw.ringSettings as Record<string, unknown>[]).map(ring => ({ ...ring, volume: recent.volume }))
+    return { ...raw, ringSettings } as unknown as DiscoveredDevice
   }
 
   /**
@@ -1078,7 +1187,7 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
       // Before anything caches or re-diffs it: a REST read that raced a LED
       // write carries the pre-write ledSettings, and `wireLed` would push that
       // stale value straight back onto the switch.
-      const device = this.applyRecentLedWrite(reportedDevice)
+      const device = this.applyRecentChimeWrite(this.applyRecentLightWrite(this.applyRecentLedWrite(reportedDevice)))
       const label = labelFor(device)
       let accessory = this.accessories.get(uuid)
       if (accessory) {
@@ -1114,6 +1223,12 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
         const packageUuid = await this.attachPackageCamera(device)
         if (packageUuid)
           packages.add(packageUuid)
+      }
+      else if (device.modelKey === 'light') {
+        buildLightServices(this.api, this.log, accessory, device as unknown as Record<string, unknown>, this.lightCallbacks)
+      }
+      else if (device.modelKey === 'chime') {
+        buildChimeServices(this.api, this.log, accessory, device as unknown as Record<string, unknown>, this.chimeCallbacks)
       }
     }
 
@@ -1319,7 +1434,16 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
       return
 
     // Merge — the frame is a delta, not the whole device.
-    const device = Object.assign({}, accessory.context.device as DiscoveredDevice, update)
+    const merged = Object.assign({}, accessory.context.device as DiscoveredDevice, update)
+    // A still-fresh optimistic write outranks a stale echo of the pre-write
+    // state: without this, a `deviceUpdate` frame that raced a successful PATCH
+    // flips the tile back in front of the user, the same race the discovery-path
+    // overlays cover.
+    const device = modelKey === 'light'
+      ? this.applyRecentLightWrite(merged)
+      : modelKey === 'chime'
+        ? this.applyRecentChimeWrite(merged)
+        : merged
     accessory.context.device = device
     const label = labelFor(device)
     if (accessory.displayName !== label) {
@@ -1345,6 +1469,22 @@ export class UniFiProtectPlatform implements DynamicPlatformPlugin {
         // errorMessage, and the STRING: Homebridge's log.error(err) runs
         // util.inspect over the object, which has leaked the API key out of an
         // error's request context in this repo before.
+        this.log.warn(`Could not rebuild services for "${label}": ${errorMessage(error)}`)
+      }
+    }
+    else if (modelKey === 'light') {
+      try {
+        buildLightServices(this.api, this.log, accessory, device as unknown as Record<string, unknown>, this.lightCallbacks)
+      }
+      catch (error) {
+        this.log.warn(`Could not rebuild services for "${label}": ${errorMessage(error)}`)
+      }
+    }
+    else if (modelKey === 'chime') {
+      try {
+        buildChimeServices(this.api, this.log, accessory, device as unknown as Record<string, unknown>, this.chimeCallbacks)
+      }
+      catch (error) {
         this.log.warn(`Could not rebuild services for "${label}": ${errorMessage(error)}`)
       }
     }
