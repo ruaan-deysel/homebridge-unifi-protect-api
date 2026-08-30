@@ -79,7 +79,15 @@ export function routeEvent(frame: unknown): RoutedEvent | null {
     subtypes = ['motion']
   }
   else if (SMART_DETECT_EVENTS.has(type)) {
-    subtypes = detectSubtypes(item, t => (DETECT_TYPES.has(t) ? `detect-${t}` : undefined))
+    // Protect 7.2.105 emits classic `motion` events only for doorbells; every
+    // other camera surfaces motion purely as smart-detect events. Without the
+    // leading `motion` subtype here, a camera's Motion sensor — the tile
+    // HomeKit notifications, automations and HKSV key off — never fires on
+    // those cameras, and only the doorbell ever appears to detect motion. A
+    // smart detection IS motion, so the generic sensor rides along with the
+    // per-type ones; the tracker's holder counts keep it on until every
+    // overlapping event has ended.
+    subtypes = ['motion', ...detectSubtypes(item, t => (DETECT_TYPES.has(t) ? `detect-${t}` : undefined))]
   }
   else if (type === 'smartAudioDetect') {
     subtypes = detectSubtypes(item, t => AUDIO_SUBTYPES.get(t))

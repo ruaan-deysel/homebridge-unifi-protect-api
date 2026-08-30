@@ -6,6 +6,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-08-30
+
+### Fixed
+- Motion now fires on every camera, not only the doorbell. Protect 7.2.105 emits classic
+  `motion` events only for doorbells; every other camera surfaces motion purely as smart-detect
+  events, which the plugin routed solely to the per-type Person/Vehicle/Animal sensors — so the
+  camera's Motion sensor, the tile HomeKit notifications, automations and HKSV key off, never
+  fired. A smart-detect event now drives the camera's Motion sensor alongside its per-type
+  sensors (verified against the live event stream: `smartDetectZone` frames for Driveway, Garage
+  and Backyard while the Motion sensors stayed dark). A smart-detect event whose detection types
+  cannot be read still triggers motion, and audio detections continue to drive only their
+  smoke/CO sensors.
+
 ## [1.0.1] - 2026-08-06
 
 ### Security

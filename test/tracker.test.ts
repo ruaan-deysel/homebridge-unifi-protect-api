@@ -171,7 +171,7 @@ describe('eventTracker', () => {
       // shared device+subtype (e.g. repeated `motion` on one camera) is not
       // artificially treated as concurrently held by several events at once.
       const seen = new Set<string>()
-      const offTransitions: { deviceId?: string, subtype: string }[] = []
+      const offsByEvent = new Map<string, { deviceId: string, subtype: string }[]>()
       for (const routed of routedFrames) {
         if (!routed)
           continue
@@ -182,16 +182,22 @@ describe('eventTracker', () => {
         // Drive the tracker exactly as the platform would, one frame at a time,
         // in fixture order — duplicates included.
         const changes = t.apply(routed)
-        for (const change of changes) {
-          if (!change.active)
-            offTransitions.push({ deviceId: change.deviceId, subtype: change.subtype })
-        }
+        const offs = changes.filter(change => !change.active)
+        if (offs.length)
+          offsByEvent.set(routed.eventId, [...(offsByEvent.get(routed.eventId) ?? []), ...offs])
       }
 
       // Every distinct, stateful event id in the fixture ends exactly once,
       // regardless of how many duplicate end frames it produced (...002 and
-      // ...006 redeliver 3x, ...001 and ...005 redeliver 2x).
-      expect(offTransitions.length).toBe(seen.size)
+      // ...006 redeliver 3x, ...001 and ...005 redeliver 2x). A smart-detect
+      // event now releases TWO subtypes (motion plus its detect-* types), so
+      // the count is per event id, and each event's releases must be unique by
+      // device+subtype — a duplicate end adds no second release of anything.
+      expect(offsByEvent.size).toBe(seen.size)
+      for (const [eventId, offs] of offsByEvent) {
+        const unique = new Set(offs.map(o => `${o.deviceId}:${o.subtype}`))
+        expect(unique.size, eventId).toBe(offs.length)
+      }
       expect(t.activeCount).toBe(0)
     })
   })

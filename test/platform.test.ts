@@ -895,7 +895,11 @@ describe('uniFiProtectPlatform', () => {
     ])
       expect(() => bus.emit('protectEvent', frame), JSON.stringify(frame ?? null)).not.toThrow()
 
-    expect(detected(DOORBELL, 'motion')).toBeFalsy()
+    // The malformed smartDetectZone frame carries no readable types, so no
+    // per-type sensor may light — but the camera DID report an event, and
+    // smart-detect events drive the generic Motion sensor too, so that one
+    // firing is the intended behavior, not a leak.
+    expect(detected(DOORBELL, 'detect-person')).toBeFalsy()
   })
 
   // There is no `GET /v1/events` on this API: an event open across a dropped

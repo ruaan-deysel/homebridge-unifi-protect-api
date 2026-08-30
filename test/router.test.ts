@@ -40,10 +40,10 @@ describe('routeEvent', () => {
     expect(routed).toMatchObject({ subtypes: ['ring'], phase: 'start', stateless: true })
   })
 
-  it('maps a real smartDetectZone (person) event to detect-person', () => {
+  it('maps a real smartDetectZone (person) event to motion plus detect-person', () => {
     const frame = load('smart-detect').find((f: { payload: { type: string } }) => f.payload.type === 'add')
     const routed = routeEvent(frame.payload)
-    expect(routed).toMatchObject({ subtypes: ['detect-person'], phase: 'start' })
+    expect(routed).toMatchObject({ subtypes: ['motion', 'detect-person'], phase: 'start' })
     // smartDetectTypes is observed only on smartDetectZone/Line/LoiterZone items,
     // never on motion or ring.
     expect(Array.isArray(frame.payload.item.smartDetectTypes)).toBe(true)
@@ -70,7 +70,7 @@ describe('routeEvent', () => {
         type: 'add',
         item: { id: 'e1', device: 'cam1', type, start: 1, smartDetectTypes: ['person', 'vehicle'] },
       })
-      expect(routed?.subtypes, type).toEqual(['detect-person', 'detect-vehicle'])
+      expect(routed?.subtypes, type).toEqual(['motion', 'detect-person', 'detect-vehicle'])
     }
   })
 
@@ -91,19 +91,22 @@ describe('routeEvent', () => {
     expect(routed?.subtypes).toEqual(['audio-alrmSmoke', 'audio-alrmCmonx'])
   })
 
-  it('drops an unknown detection type without throwing', () => {
+  it('drops an unknown detection type without throwing, keeping the motion trigger', () => {
     const routed = routeEvent({
       type: 'add',
       item: { id: 'e3', device: 'cam1', type: 'smartDetectZone', start: 1, smartDetectTypes: ['person', 'teleporter'] },
     })
-    expect(routed?.subtypes).toEqual(['detect-person'])
+    expect(routed?.subtypes).toEqual(['motion', 'detect-person'])
   })
 
-  it('returns null when every detection type is unknown', () => {
+  it('still triggers motion when every detection type is unknown', () => {
+    // A firmware update could rename the types out from under the plugin, but
+    // the camera genuinely saw something: the Motion sensor must fire even
+    // when no per-type sensor can be named.
     expect(routeEvent({
       type: 'add',
       item: { id: 'e4', device: 'cam1', type: 'smartDetectZone', start: 1, smartDetectTypes: ['teleporter'] },
-    })).toBeNull()
+    })).toMatchObject({ subtypes: ['motion'], phase: 'start' })
   })
 
   it('marks a ring as stateless', () => {
@@ -119,7 +122,7 @@ describe('routeEvent', () => {
       type: 'add',
       item: { id: 'e7', device: '3df76e6abedbeab796e616d9', type: 'smartDetectZone', start: 1785563286381, smartDetectTypes: ['vehicle', 'animal'] },
     })
-    expect(routed?.subtypes).toEqual(['detect-vehicle', 'detect-animal'])
+    expect(routed?.subtypes).toEqual(['motion', 'detect-vehicle', 'detect-animal'])
   })
 
   it('distinguishes the three phases', () => {
