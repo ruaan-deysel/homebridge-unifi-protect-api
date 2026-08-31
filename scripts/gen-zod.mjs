@@ -3,7 +3,7 @@
 // OpenAPI 3.1 schemas ARE JSON Schema, so this mapping is mechanical.
 import { readFileSync, writeFileSync } from 'node:fs'
 
-const SPEC = 'spec/protect-7.1.87.openapi.json'
+const SPEC = 'spec/protect-7.2.105.openapi.json'
 const OUT = 'src/protect/schemas.ts'
 
 const spec = JSON.parse(readFileSync(SPEC, 'utf8'))
@@ -15,7 +15,7 @@ const idOf = name => `${name.replace(/[^a-z0-9]/gi, '_')}Schema`
 const lit = v => JSON.stringify(v)
 
 /**
- * Properties the spec marks `required` that real Protect 7.1.87 hardware omits.
+ * Properties the spec marks `required` that real Protect hardware omits.
  * Verified against a live UDM-Pro:
  *  - ringSettings.ringtoneId is absent when the paired camera uses the default
  *    ringtone;
@@ -26,6 +26,10 @@ const lit = v => JSON.stringify(v)
 const OPTIONAL_OVERRIDES = {
   ringSettings: ['ringtoneId'],
   nvrArmMode: ['armProfileId'],
+  // Observed on live 7.2.105 hardware (2026-08-30, 5 cameras + chime): the spec
+  // marks camera.lcdMessage required, but /cameras omits it unless a doorbell
+  // message is currently set. Honouring the spec would reject genuine payloads.
+  camera: ['lcdMessage'],
 }
 
 /**
@@ -58,11 +62,12 @@ const HANDLED = new Set([
   'maxLength',
   'minItems',
   'maxItems',
+  'pattern',
 ])
 /** Documentation only — no effect on validation. */
 const IGNORED = new Set(['description', 'title', 'examples', 'example', 'deprecated'])
 
-function convert(node, name) {
+function convert(node, name, isComponent = false) {
   if (!node || typeof node !== 'object')
     return 'z.unknown()'
 
@@ -118,6 +123,12 @@ function convert(node, name) {
     return `z.union([${inner.join(', ')}])`
   }
 
+  // `pattern` is JSON Schema's unanchored substring match — exactly zod's
+  // `.regex()` semantics — but only on strings. A pattern anywhere else must
+  // fail the build rather than be dropped.
+  if (node.pattern !== undefined && node.type !== 'string')
+    throw new Error(`gen-zod: "pattern" on a non-string type in schema "${name}". Add a handler in convert() — do not ignore it.`)
+
   switch (node.type) {
     case 'string':
       return node.format === 'uri' ? 'z.url()' : withStr(node, 'z.string()')
@@ -132,9 +143,9 @@ function convert(node, name) {
     case 'array':
       return withArr(node, `z.array(${convert(node.items, name)})`)
     case 'object':
-      return objectOf(node, name)
+      return objectOf(node, name, isComponent)
     default:
-      return node.properties ? objectOf(node, name) : 'z.unknown()'
+      return node.properties ? objectOf(node, name, isComponent) : 'z.unknown()'
   }
 }
 
@@ -144,6 +155,8 @@ function withStr(node, base) {
     s += `.min(${node.minLength})`
   if (node.maxLength !== undefined)
     s += `.max(${node.maxLength})`
+  if (node.pattern !== undefined)
+    s += `.regex(new RegExp(${lit(node.pattern)}))`
   return s
 }
 
@@ -169,13 +182,21 @@ function withArr(node, base) {
   return s
 }
 
-function objectOf(node, name) {
+function objectOf(node, name, isComponent = false) {
   const props = node.properties ?? {}
   const required = new Set(node.required ?? [])
   // Self-policing: a no-op override is the dangerous direction. If the spec ever
   // stops marking the field required, the entry must be deleted rather than left
-  // to rot as a silent permanent weakening of the schema.
-  for (const key of OPTIONAL_OVERRIDES[node.title ?? name] ?? []) {
+  // to rot as a silent permanent weakening of the schema. Two guards on where
+  // overrides apply:
+  //  - `title` ONLY: nested anonymous objects fall back to the parent schema's
+  //    `name`, which would apply the parent's overrides to every nested object.
+  //  - `isComponent`: the spec re-declares inline copies of device schemas
+  //    (deviceBulk, the PartialWithReference variants) under the same title —
+  //    a partial variant marks almost nothing required, so an override whose
+  //    purpose is relaxing a required field is meaningless there and its
+  //    self-policing would fire on the partial, not on real rot.
+  for (const key of isComponent ? (OPTIONAL_OVERRIDES[node.title] ?? []) : []) {
     if (!required.delete(key))
       throw new Error(`gen-zod: OPTIONAL_OVERRIDES entry ${node.title ?? name}.${key} is no longer required in the spec — delete the entry.`)
   }
@@ -248,7 +269,7 @@ const body = names.map((n) => {
   const id = idOf(n)
   const type = id.replace(/Schema$/, '')
   const typeName = type.charAt(0).toUpperCase() + type.slice(1)
-  const expr = convert(schemas[n], n)
+  const expr = convert(schemas[n], n, true)
   // Almost every schema here is looseObject. The handful the spec closes with
   // `additionalProperties: false` behave the opposite way, and a consumer that
   // assumes otherwise will see valid payloads rejected after a firmware bump.

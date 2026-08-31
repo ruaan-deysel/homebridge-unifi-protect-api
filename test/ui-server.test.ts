@@ -15,15 +15,15 @@ const creds = { host: '10.0.0.1', apiKey: 'k', consoleCert: CERT_A }
 describe('testConnectionRequest', () => {
   it('returns the protect version and nvr name', async () => {
     const fetchImpl = vi.fn(async (url: string) =>
-      url.endsWith('/meta/info') ? ok({ applicationVersion: '7.1.87' }) : ok({ id: 'n1', name: 'UDM-Pro' })) as never
+      url.endsWith('/meta/info') ? ok({ applicationVersion: '7.2.105' }) : ok({ id: 'n1', name: 'UDM-Pro' })) as never
 
     const result = await testConnectionRequest(creds, { fetchImpl })
 
-    expect(result).toEqual({ version: '7.1.87', nvrName: 'UDM-Pro' })
+    expect(result).toEqual({ version: '7.2.105', nvrName: 'UDM-Pro' })
   })
 
   it('pins every request to the trusted certificate', async () => {
-    const fetchImpl = vi.fn(async () => ok({ applicationVersion: '7.1.87' })) as never
+    const fetchImpl = vi.fn(async () => ok({ applicationVersion: '7.2.105' })) as never
 
     await testConnectionRequest(creds, { fetchImpl })
 

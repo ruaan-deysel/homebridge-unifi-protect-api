@@ -1,9 +1,67 @@
 [
   {
+    "id": "31bb9ef8d089b17563cb6a1b",
+    "modelKey": "camera",
+    "state": "CONNECTED",
+    "name": "Sidegate",
+    "type": "UVC G5 Bullet",
+    "guid": "fbd87537-3718-bbc4-38c3-142a13f4bfeb",
+    "mac": "559E80F097DC",
+    "isMicEnabled": true,
+    "osdSettings": {
+      "isNameEnabled": false,
+      "isDateEnabled": false,
+      "isLogoEnabled": false,
+      "isDebugEnabled": false,
+      "overlayLocation": "topLeft"
+    },
+    "ledSettings": {
+      "isEnabled": true,
+      "welcomeLed": true,
+      "floodLed": true
+    },
+    "micVolume": 100,
+    "activePatrolSlot": null,
+    "videoMode": "lprNoneReflex",
+    "hdrType": "auto",
+    "featureFlags": {
+      "supportFullHdSnapshot": false,
+      "hasHdr": true,
+      "smartDetectTypes": [
+        "person",
+        "vehicle",
+        "animal"
+      ],
+      "smartDetectAudioTypes": [
+        "alrmSmoke",
+        "alrmCmonx",
+        "alrmBabyCry",
+        "alrmSpeak"
+      ],
+      "videoModes": [
+        "default",
+        "sport",
+        "slowShutter"
+      ],
+      "hasMic": true,
+      "hasLedStatus": false,
+      "hasSpeaker": false
+    },
+    "smartDetectSettings": {
+      "objectTypes": [
+        "person"
+      ],
+      "audioTypes": []
+    },
+    "hasPackageCamera": false
+  },
+  {
     "id": "1caae4537220700882c792db",
     "modelKey": "camera",
     "state": "CONNECTED",
     "name": "Doorbell",
+    "type": "UVC G4 Doorbell Pro PoE",
+    "guid": "3f2bf646-194e-74e8-55ff-c682cdc57b57",
     "mac": "040B314EE618",
     "isMicEnabled": true,
     "osdSettings": {
@@ -18,7 +76,6 @@
       "welcomeLed": true,
       "floodLed": true
     },
-    "lcdMessage": {},
     "micVolume": 100,
     "activePatrolSlot": null,
     "videoMode": "default",
@@ -59,66 +116,12 @@
     "hasPackageCamera": true
   },
   {
-    "id": "2927ea3f7c509dfd9bfa425c",
-    "modelKey": "camera",
-    "state": "CONNECTED",
-    "name": "Backyard",
-    "mac": "307725C09E6B",
-    "isMicEnabled": true,
-    "osdSettings": {
-      "isNameEnabled": false,
-      "isDateEnabled": false,
-      "isLogoEnabled": false,
-      "isDebugEnabled": false,
-      "overlayLocation": "topLeft"
-    },
-    "ledSettings": {
-      "isEnabled": true,
-      "welcomeLed": true,
-      "floodLed": true
-    },
-    "lcdMessage": {},
-    "micVolume": 100,
-    "activePatrolSlot": null,
-    "videoMode": "lprNoneReflex",
-    "hdrType": "auto",
-    "featureFlags": {
-      "supportFullHdSnapshot": false,
-      "hasHdr": true,
-      "smartDetectTypes": [
-        "person",
-        "vehicle",
-        "animal"
-      ],
-      "smartDetectAudioTypes": [
-        "alrmSmoke",
-        "alrmCmonx",
-        "alrmBabyCry",
-        "alrmSpeak"
-      ],
-      "videoModes": [
-        "default",
-        "sport",
-        "slowShutter"
-      ],
-      "hasMic": true,
-      "hasLedStatus": true,
-      "hasSpeaker": false
-    },
-    "smartDetectSettings": {
-      "objectTypes": [
-        "person",
-        "animal"
-      ],
-      "audioTypes": []
-    },
-    "hasPackageCamera": false
-  },
-  {
     "id": "3df76e6abedbeab796e616d9",
     "modelKey": "camera",
     "state": "CONNECTED",
     "name": "Driveway",
+    "type": "UVC G5 Turret Ultra",
+    "guid": "c8a5ee31-886f-e71b-093f-ae3a1a8cd471",
     "mac": "B14DD6E82915",
     "isMicEnabled": true,
     "osdSettings": {
@@ -133,7 +136,6 @@
       "welcomeLed": true,
       "floodLed": true
     },
-    "lcdMessage": {},
     "micVolume": 100,
     "activePatrolSlot": null,
     "videoMode": "lprNoneReflex",
@@ -164,19 +166,20 @@
     "smartDetectSettings": {
       "objectTypes": [
         "person",
-        "vehicle",
-        "animal"
+        "vehicle"
       ],
       "audioTypes": []
     },
     "hasPackageCamera": false
   },
   {
-    "id": "31bb9ef8d089b17563cb6a1b",
+    "id": "2927ea3f7c509dfd9bfa425c",
     "modelKey": "camera",
     "state": "CONNECTED",
-    "name": "Sidegate",
-    "mac": "559E80F097DC",
+    "name": "Backyard",
+    "type": "UVC G5 Turret Ultra",
+    "guid": "c8a5ee31-886f-e71b-093f-ae3a1a8cd471",
+    "mac": "307725C09E6B",
     "isMicEnabled": true,
     "osdSettings": {
       "isNameEnabled": false,
@@ -190,7 +193,6 @@
       "welcomeLed": true,
       "floodLed": true
     },
-    "lcdMessage": {},
     "micVolume": 100,
     "activePatrolSlot": null,
     "videoMode": "lprNoneReflex",
@@ -215,13 +217,12 @@
         "slowShutter"
       ],
       "hasMic": true,
-      "hasLedStatus": false,
+      "hasLedStatus": true,
       "hasSpeaker": false
     },
     "smartDetectSettings": {
       "objectTypes": [
-        "person",
-        "animal"
+        "person"
       ],
       "audioTypes": []
     },
@@ -232,6 +233,8 @@
     "modelKey": "camera",
     "state": "CONNECTED",
     "name": "Garage",
+    "type": "UVC G5 Turret Ultra",
+    "guid": "c8a5ee31-886f-e71b-093f-ae3a1a8cd471",
     "mac": "3E554B184C7E",
     "isMicEnabled": true,
     "osdSettings": {
@@ -246,7 +249,6 @@
       "welcomeLed": true,
       "floodLed": true
     },
-    "lcdMessage": {},
     "micVolume": 100,
     "activePatrolSlot": null,
     "videoMode": "lprNoneReflex",

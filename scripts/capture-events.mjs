@@ -12,7 +12,7 @@ import WebSocket from 'ws'
 
 const env = Object.fromEntries(
   readFileSync('.env', 'utf8').split('\n')
-    .map(l => l.match(/^([A-Z_]+)=(.*)$/)).filter(Boolean)
+    .map(l => l.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/)).filter(Boolean)
     .map(m => [m[1], m[2].trim()]),
 )
 const host = env.PROTECT_HOST

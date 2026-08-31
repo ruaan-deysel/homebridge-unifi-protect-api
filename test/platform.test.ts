@@ -73,7 +73,7 @@ const validConfig = { platform: 'UniFiProtect', name: 'UniFi Protect', host: '10
 function makeClient(devices: unknown[]) {
   const of = (modelKey: string) => devices.filter(d => (d as { modelKey?: string })?.modelKey === modelKey)
   return {
-    getMetaInfo: vi.fn(async () => ({ applicationVersion: '7.1.87' })),
+    getMetaInfo: vi.fn(async () => ({ applicationVersion: '7.2.105' })),
     getCameras: vi.fn(async () => of('camera')),
     getLights: vi.fn(async () => of('light')),
     getSensors: vi.fn(async () => of('sensor')),
@@ -635,7 +635,7 @@ describe('uniFiProtectPlatform', () => {
 
     const inFlight = platform.discover()
     api.emit('shutdown')
-    resolveMeta({ applicationVersion: '7.1.87' })
+    resolveMeta({ applicationVersion: '7.2.105' })
     await inFlight
 
     expect(bus.stop).toHaveBeenCalled()
@@ -734,9 +734,10 @@ describe('uniFiProtectPlatform', () => {
     expect(sensorSubtypes(doorbell)).toEqual(
       ['detect-animal', 'detect-package', 'detect-person', 'detect-vehicle', 'led', 'motion', 'ring'],
     )
-    // Sidegate reports hasLedStatus: false and no speaker.
+    // Sidegate reports hasLedStatus: false and no speaker; on the capturing
+    // console it had only person detection enabled.
     const sidegate = platform.accessories.get(`uuid-${camera('Sidegate').id}`) as unknown as FakeAccessory
-    expect(sensorSubtypes(sidegate)).toEqual(['detect-animal', 'detect-person', 'motion'])
+    expect(sensorSubtypes(sidegate)).toEqual(['detect-person', 'motion'])
   })
 
   it('rebuilds services on a later discovery when a detection type is disabled in protect', async () => {

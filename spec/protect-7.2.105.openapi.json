@@ -41,14 +41,14 @@
               "application/json": {
                 "schema": {
                   "type": "object",
+                  "required": [
+                    "applicationVersion"
+                  ],
                   "properties": {
                     "applicationVersion": {
                       "$ref": "#/components/schemas/protectVersion"
                     }
-                  },
-                  "required": [
-                    "applicationVersion"
-                  ]
+                  }
                 }
               }
             }
@@ -3509,17 +3509,190 @@
           }
         }
       }
+    },
+    "/v1/pos/cameras/{id}/transactions": {
+      "post": {
+        "summary": "Ingest a POS transaction",
+        "description": "Records a point of sale transaction as a camera event so the transaction details can be overlaid on recorded footage. Requires write access to the target camera. Footage capture is best-effort: the overlay only appears where the target camera was recording the transaction window (e.g. cameras in detections or adaptive recording modes), and a backdated timestamp may fall outside retained footage. A 200 response confirms the event was recorded, not that video exists for the window.",
+        "tags": [
+          "Point of sale event ingestion"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "Camera id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/posTransactionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/posTransactionResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A transaction with the same externalId for this camera is already being processed; retry shortly."
+          },
+          "default": {
+            "description": "Error response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/genericError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
     "schemas": {
       "protectVersion": {
         "type": "string",
-        "description": "Software version.",
+        "description": "Protect application version",
         "examples": [
           "1.0.0"
         ],
         "title": "protectVersion"
+      },
+      "posTransactionRequest": {
+        "type": "object",
+        "required": [
+          "type",
+          "externalId",
+          "amount"
+        ],
+        "properties": {
+          "type": {
+            "enum": [
+              "sale",
+              "refund"
+            ],
+            "description": "Transaction type"
+          },
+          "externalId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "description": "Caller-supplied transaction id, unique per camera. Used for best-effort idempotency within a short window (in-memory, per-process; it resets on restart, so a retry after a restart or after the window elapses may create a duplicate event)."
+          },
+          "amount": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Transaction total amount"
+          },
+          "currency": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 3,
+            "pattern": "^[A-Z]{3}$",
+            "description": "Uppercase ISO 4217 currency code, e.g. USD"
+          },
+          "lineItems": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "title",
+                "quantity"
+              ],
+              "properties": {
+                "title": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 255,
+                  "description": "Line item title"
+                },
+                "quantity": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "Line item quantity"
+                }
+              },
+              "additionalProperties": false
+            },
+            "maxItems": 200,
+            "description": "Purchased line items"
+          },
+          "location": {
+            "type": "object",
+            "required": [
+              "id"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255,
+                "description": "Location or register identifier"
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255,
+                "description": "Human-readable location or register name"
+              }
+            },
+            "additionalProperties": false
+          },
+          "paymentTypes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
+            },
+            "maxItems": 20,
+            "description": "Payment method names"
+          },
+          "timestamp": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Transaction time in epoch milliseconds. Must be within the last 24 hours and no more than 5 minutes ahead of server time; out-of-range values are rejected. A value within the allowed skew is clamped to now."
+          }
+        },
+        "additionalProperties": false,
+        "description": "A POS transaction to overlay on camera footage",
+        "title": "posTransactionRequest"
+      },
+      "posTransactionResponse": {
+        "type": "object",
+        "required": [
+          "created"
+        ],
+        "properties": {
+          "created": {
+            "type": "boolean",
+            "description": "True when a new event was created; false when an event with the same externalId was already ingested (eventId echoes the existing one). Idempotency is best-effort - see the externalId description."
+          },
+          "eventId": {
+            "type": "string",
+            "description": "Id of the created (or previously created) event"
+          }
+        },
+        "description": "Result of POS transaction ingestion",
+        "title": "posTransactionResponse"
       },
       "genericError": {
         "type": "object",
@@ -3587,6 +3760,12 @@
               }
             ]
           },
+          "type": {
+            "$ref": "#/components/schemas/deviceType"
+          },
+          "guid": {
+            "$ref": "#/components/schemas/deviceGuid"
+          },
           "mac": {
             "$ref": "#/components/schemas/mac"
           },
@@ -3609,6 +3788,8 @@
           "modelKey",
           "state",
           "name",
+          "type",
+          "guid",
           "mac",
           "liveview",
           "streamLimit"
@@ -3645,6 +3826,28 @@
           "Server Room"
         ],
         "title": "name"
+      },
+      "deviceType": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "description": "The device model name.",
+        "examples": [
+          "UVC Micro"
+        ],
+        "title": "deviceType"
+      },
+      "deviceGuid": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "description": "Stable identifier for the device model.",
+        "examples": [
+          "6b8fdd7c-7e4c-4156-bb39-be05ca855491"
+        ],
+        "title": "deviceGuid"
       },
       "mac": {
         "type": "string",
@@ -3931,6 +4134,15 @@
               }
             ]
           },
+          "type": {
+            "$ref": "#/components/schemas/nvrType"
+          },
+          "guid": {
+            "$ref": "#/components/schemas/nvrGuid"
+          },
+          "mac": {
+            "$ref": "#/components/schemas/mac"
+          },
           "doorbellSettings": {
             "$ref": "#/components/schemas/doorbellSettings"
           },
@@ -3942,6 +4154,9 @@
           "id",
           "modelKey",
           "name",
+          "type",
+          "guid",
+          "mac",
           "doorbellSettings",
           "armMode"
         ],
@@ -3961,6 +4176,24 @@
         "const": "nvr",
         "description": "The model key of the nvr",
         "title": "nvrModelKey"
+      },
+      "nvrType": {
+        "type": "string",
+        "description": "The NVR model name.",
+        "examples": [
+          "UNVR-PRO",
+          "UDM-PRO",
+          "UNKNOWN"
+        ],
+        "title": "nvrType"
+      },
+      "nvrGuid": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "description": "GUID of the NVR",
+        "title": "nvrGuid"
       },
       "doorbellSettings": {
         "type": "object",
@@ -4107,6 +4340,12 @@
               }
             ]
           },
+          "type": {
+            "$ref": "#/components/schemas/deviceType"
+          },
+          "guid": {
+            "$ref": "#/components/schemas/deviceGuid"
+          },
           "mac": {
             "$ref": "#/components/schemas/mac"
           },
@@ -4156,6 +4395,8 @@
           "modelKey",
           "state",
           "name",
+          "type",
+          "guid",
           "mac",
           "isMicEnabled",
           "osdSettings",
@@ -4496,7 +4737,7 @@
             "alrmGlassBreak"
           ]
         },
-        "title": "objectTypes"
+        "title": "audioTypes"
       },
       "hasPackageCamera": {
         "type": "boolean",
@@ -4525,6 +4766,12 @@
               }
             ]
           },
+          "type": {
+            "$ref": "#/components/schemas/deviceType"
+          },
+          "guid": {
+            "$ref": "#/components/schemas/deviceGuid"
+          },
           "mac": {
             "$ref": "#/components/schemas/mac"
           },
@@ -4548,6 +4795,8 @@
           "modelKey",
           "state",
           "name",
+          "type",
+          "guid",
           "mac",
           "cameraIds",
           "ringSettings"
@@ -4640,6 +4889,12 @@
               }
             ]
           },
+          "type": {
+            "$ref": "#/components/schemas/deviceType"
+          },
+          "guid": {
+            "$ref": "#/components/schemas/deviceGuid"
+          },
           "mac": {
             "$ref": "#/components/schemas/mac"
           },
@@ -4681,6 +4936,8 @@
           "modelKey",
           "state",
           "name",
+          "type",
+          "guid",
           "mac",
           "lightModeSettings",
           "lightDeviceSettings",
@@ -4846,6 +5103,12 @@
               }
             ]
           },
+          "type": {
+            "$ref": "#/components/schemas/deviceType"
+          },
+          "guid": {
+            "$ref": "#/components/schemas/deviceGuid"
+          },
           "mac": {
             "$ref": "#/components/schemas/mac"
           },
@@ -4870,6 +5133,8 @@
           "modelKey",
           "state",
           "name",
+          "type",
+          "guid",
           "mac",
           "volume",
           "micVolume",
@@ -5010,6 +5275,12 @@
               }
             ]
           },
+          "type": {
+            "$ref": "#/components/schemas/deviceType"
+          },
+          "guid": {
+            "$ref": "#/components/schemas/deviceGuid"
+          },
           "mac": {
             "$ref": "#/components/schemas/mac"
           },
@@ -5028,6 +5299,8 @@
           "modelKey",
           "state",
           "name",
+          "type",
+          "guid",
           "mac",
           "platform",
           "clients",
@@ -5108,6 +5381,12 @@
               }
             ]
           },
+          "type": {
+            "$ref": "#/components/schemas/deviceType"
+          },
+          "guid": {
+            "$ref": "#/components/schemas/deviceGuid"
+          },
           "mac": {
             "$ref": "#/components/schemas/mac"
           },
@@ -5116,6 +5395,9 @@
           },
           "batteryStatus": {
             "$ref": "#/components/schemas/batteryStatus"
+          },
+          "featureFlags": {
+            "$ref": "#/components/schemas/sensorFeatureFlags"
           },
           "stats": {
             "$ref": "#/components/schemas/sensorStats"
@@ -5183,6 +5465,8 @@
           "modelKey",
           "state",
           "name",
+          "type",
+          "guid",
           "mac",
           "mountType",
           "batteryStatus",
@@ -5262,6 +5546,65 @@
         "description": "[DEPRECATED] Use wirelessConnectionState.batteryStatus instead. Battery status.",
         "title": "batteryStatus"
       },
+      "sensorFeatureFlags": {
+        "type": "object",
+        "properties": {
+          "temperature": {
+            "$ref": "#/components/schemas/sensorIntegrationFeatureCapability",
+            "description": "Matches `stats.temperature` and `temperatureSettings`."
+          },
+          "humidity": {
+            "$ref": "#/components/schemas/sensorIntegrationFeatureCapability",
+            "description": "Matches `stats.humidity` and `humiditySettings`."
+          },
+          "light": {
+            "$ref": "#/components/schemas/sensorIntegrationFeatureCapability",
+            "description": "Matches `stats.light` and `lightSettings`."
+          },
+          "motion": {
+            "$ref": "#/components/schemas/sensorIntegrationFeatureCapability",
+            "description": "Matches motion state and `motionSettings`."
+          },
+          "waterLeak": {
+            "$ref": "#/components/schemas/sensorIntegrationFeatureCapability",
+            "description": "Matches leak state and `leakSettings`."
+          },
+          "open": {
+            "$ref": "#/components/schemas/sensorIntegrationFeatureCapability",
+            "description": "Matches entry/door-window/garage open state (`isOpened`)."
+          },
+          "tamper": {
+            "$ref": "#/components/schemas/sensorIntegrationFeatureCapability",
+            "description": "Matches tamper detection (`tamperingDetectedAt`)."
+          },
+          "smoke": {
+            "$ref": "#/components/schemas/sensorIntegrationFeatureCapability",
+            "description": "Matches smoke / CO alarm surfaces (`alarmSettings`, `alarmTriggeredAt`)."
+          }
+        },
+        "description": "Sensor feature flags.",
+        "title": "sensorFeatureFlags"
+      },
+      "sensorIntegrationFeatureCapability": {
+        "type": "object",
+        "properties": {
+          "channelCount": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "description": "If a capability key is absent (`undefined`), the capability should be treated as not supported. When present, a positive value indicates how many independent channels of that measurement or input the sensor exposes. For example, two temperature probes would report as two channels.",
+            "examples": [
+              1,
+              2
+            ]
+          }
+        },
+        "required": [
+          "channelCount"
+        ],
+        "additionalProperties": false,
+        "description": "Capability slice for integration responses: how many channels the device provides for one domain (see `channelCount`).",
+        "title": "sensorIntegrationFeatureCapability"
+      },
       "sensorStats": {
         "type": "object",
         "properties": {
@@ -5301,7 +5644,7 @@
                 "$ref": "#/components/schemas/sensorStatus"
               }
             },
-            "description": "Ambient light value (Lux)."
+            "description": "Relative humidity value (%)."
           },
           "temperature": {
             "type": "object",
@@ -5320,7 +5663,7 @@
                 "$ref": "#/components/schemas/sensorStatus"
               }
             },
-            "description": "Ambient light value (Lux)."
+            "description": "Temperature value (Celsius)."
           }
         },
         "description": "Sensor statistics.",
@@ -5789,6 +6132,12 @@
               }
             ]
           },
+          "type": {
+            "$ref": "#/components/schemas/deviceType"
+          },
+          "guid": {
+            "$ref": "#/components/schemas/deviceGuid"
+          },
           "mac": {
             "$ref": "#/components/schemas/mac"
           },
@@ -5813,6 +6162,8 @@
           "modelKey",
           "state",
           "name",
+          "type",
+          "guid",
           "mac",
           "volume",
           "ledSettings",
@@ -5984,6 +6335,12 @@
               }
             ]
           },
+          "type": {
+            "$ref": "#/components/schemas/deviceType"
+          },
+          "guid": {
+            "$ref": "#/components/schemas/deviceGuid"
+          },
           "mac": {
             "$ref": "#/components/schemas/mac"
           },
@@ -6005,6 +6362,8 @@
           "modelKey",
           "state",
           "name",
+          "type",
+          "guid",
           "mac",
           "awayState",
           "buttonLabels",
@@ -6091,7 +6450,8 @@
             "left",
             "right",
             "input1",
-            "input2"
+            "input2",
+            "main"
           ]
         },
         "description": "Available button types on the fob.",
@@ -6126,6 +6486,12 @@
               }
             ]
           },
+          "type": {
+            "$ref": "#/components/schemas/deviceType"
+          },
+          "guid": {
+            "$ref": "#/components/schemas/deviceGuid"
+          },
           "mac": {
             "$ref": "#/components/schemas/mac"
           },
@@ -6147,6 +6513,8 @@
           "modelKey",
           "state",
           "name",
+          "type",
+          "guid",
           "mac",
           "ledSettings",
           "outputs",
@@ -6462,6 +6830,12 @@
               }
             ]
           },
+          "type": {
+            "$ref": "#/components/schemas/deviceType"
+          },
+          "guid": {
+            "$ref": "#/components/schemas/deviceGuid"
+          },
           "mac": {
             "$ref": "#/components/schemas/mac"
           }
@@ -6471,6 +6845,8 @@
           "modelKey",
           "state",
           "name",
+          "type",
+          "guid",
           "mac"
         ],
         "title": "aiProcessor"
@@ -6512,6 +6888,12 @@
               }
             ]
           },
+          "type": {
+            "$ref": "#/components/schemas/deviceType"
+          },
+          "guid": {
+            "$ref": "#/components/schemas/deviceGuid"
+          },
           "mac": {
             "$ref": "#/components/schemas/mac"
           }
@@ -6521,6 +6903,8 @@
           "modelKey",
           "state",
           "name",
+          "type",
+          "guid",
           "mac"
         ],
         "title": "aiPort"
@@ -6553,6 +6937,12 @@
               }
             ]
           },
+          "type": {
+            "$ref": "#/components/schemas/deviceType"
+          },
+          "guid": {
+            "$ref": "#/components/schemas/deviceGuid"
+          },
           "mac": {
             "$ref": "#/components/schemas/mac"
           },
@@ -6574,6 +6964,8 @@
           "modelKey",
           "state",
           "name",
+          "type",
+          "guid",
           "mac",
           "isAlarmHub",
           "ledSettings",
@@ -7538,6 +7930,15 @@
               }
             ]
           },
+          "type": {
+            "$ref": "#/components/schemas/nvrType"
+          },
+          "guid": {
+            "$ref": "#/components/schemas/nvrGuid"
+          },
+          "mac": {
+            "$ref": "#/components/schemas/mac"
+          },
           "doorbellSettings": {
             "$ref": "#/components/schemas/doorbellSettings"
           },
@@ -7572,6 +7973,12 @@
                 "type": "null"
               }
             ]
+          },
+          "type": {
+            "$ref": "#/components/schemas/deviceType"
+          },
+          "guid": {
+            "$ref": "#/components/schemas/deviceGuid"
           },
           "mac": {
             "$ref": "#/components/schemas/mac"
@@ -7645,6 +8052,12 @@
               }
             ]
           },
+          "type": {
+            "$ref": "#/components/schemas/deviceType"
+          },
+          "guid": {
+            "$ref": "#/components/schemas/deviceGuid"
+          },
           "mac": {
             "$ref": "#/components/schemas/mac"
           },
@@ -7690,6 +8103,12 @@
                 "type": "null"
               }
             ]
+          },
+          "type": {
+            "$ref": "#/components/schemas/deviceType"
+          },
+          "guid": {
+            "$ref": "#/components/schemas/deviceGuid"
           },
           "mac": {
             "$ref": "#/components/schemas/mac"
@@ -7755,6 +8174,12 @@
               }
             ]
           },
+          "type": {
+            "$ref": "#/components/schemas/deviceType"
+          },
+          "guid": {
+            "$ref": "#/components/schemas/deviceGuid"
+          },
           "mac": {
             "$ref": "#/components/schemas/mac"
           },
@@ -7799,6 +8224,12 @@
                 "type": "null"
               }
             ]
+          },
+          "type": {
+            "$ref": "#/components/schemas/deviceType"
+          },
+          "guid": {
+            "$ref": "#/components/schemas/deviceGuid"
           },
           "mac": {
             "$ref": "#/components/schemas/mac"
@@ -7847,6 +8278,12 @@
               }
             ]
           },
+          "type": {
+            "$ref": "#/components/schemas/deviceType"
+          },
+          "guid": {
+            "$ref": "#/components/schemas/deviceGuid"
+          },
           "mac": {
             "$ref": "#/components/schemas/mac"
           },
@@ -7888,6 +8325,12 @@
               }
             ]
           },
+          "type": {
+            "$ref": "#/components/schemas/deviceType"
+          },
+          "guid": {
+            "$ref": "#/components/schemas/deviceGuid"
+          },
           "mac": {
             "$ref": "#/components/schemas/mac"
           },
@@ -7896,6 +8339,9 @@
           },
           "batteryStatus": {
             "$ref": "#/components/schemas/batteryStatus"
+          },
+          "featureFlags": {
+            "$ref": "#/components/schemas/sensorFeatureFlags"
           },
           "stats": {
             "$ref": "#/components/schemas/sensorStats"
@@ -7986,6 +8432,12 @@
               }
             ]
           },
+          "type": {
+            "$ref": "#/components/schemas/deviceType"
+          },
+          "guid": {
+            "$ref": "#/components/schemas/deviceGuid"
+          },
           "mac": {
             "$ref": "#/components/schemas/mac"
           },
@@ -8033,6 +8485,12 @@
               }
             ]
           },
+          "type": {
+            "$ref": "#/components/schemas/deviceType"
+          },
+          "guid": {
+            "$ref": "#/components/schemas/deviceGuid"
+          },
           "mac": {
             "$ref": "#/components/schemas/mac"
           },
@@ -8076,6 +8534,12 @@
                 "type": "null"
               }
             ]
+          },
+          "type": {
+            "$ref": "#/components/schemas/deviceType"
+          },
+          "guid": {
+            "$ref": "#/components/schemas/deviceGuid"
           },
           "mac": {
             "$ref": "#/components/schemas/mac"
@@ -8121,6 +8585,12 @@
               }
             ]
           },
+          "type": {
+            "$ref": "#/components/schemas/deviceType"
+          },
+          "guid": {
+            "$ref": "#/components/schemas/deviceGuid"
+          },
           "mac": {
             "$ref": "#/components/schemas/mac"
           }
@@ -8153,6 +8623,12 @@
               }
             ]
           },
+          "type": {
+            "$ref": "#/components/schemas/deviceType"
+          },
+          "guid": {
+            "$ref": "#/components/schemas/deviceGuid"
+          },
           "mac": {
             "$ref": "#/components/schemas/mac"
           }
@@ -8184,6 +8660,12 @@
                 "type": "null"
               }
             ]
+          },
+          "type": {
+            "$ref": "#/components/schemas/deviceType"
+          },
+          "guid": {
+            "$ref": "#/components/schemas/deviceGuid"
           },
           "mac": {
             "$ref": "#/components/schemas/mac"
@@ -8561,6 +9043,15 @@
                   }
                 ]
               },
+              "type": {
+                "$ref": "#/components/schemas/nvrType"
+              },
+              "guid": {
+                "$ref": "#/components/schemas/nvrGuid"
+              },
+              "mac": {
+                "$ref": "#/components/schemas/mac"
+              },
               "doorbellSettings": {
                 "$ref": "#/components/schemas/doorbellSettings"
               },
@@ -8572,6 +9063,9 @@
               "id",
               "modelKey",
               "name",
+              "type",
+              "guid",
+              "mac",
               "doorbellSettings",
               "armMode"
             ],
@@ -8608,6 +9102,12 @@
                     "type": "null"
                   }
                 ]
+              },
+              "type": {
+                "$ref": "#/components/schemas/deviceType"
+              },
+              "guid": {
+                "$ref": "#/components/schemas/deviceGuid"
               },
               "mac": {
                 "$ref": "#/components/schemas/mac"
@@ -8658,6 +9158,8 @@
               "modelKey",
               "state",
               "name",
+              "type",
+              "guid",
               "mac",
               "isMicEnabled",
               "osdSettings",
@@ -8705,6 +9207,12 @@
                   }
                 ]
               },
+              "type": {
+                "$ref": "#/components/schemas/deviceType"
+              },
+              "guid": {
+                "$ref": "#/components/schemas/deviceGuid"
+              },
               "mac": {
                 "$ref": "#/components/schemas/mac"
               },
@@ -8728,6 +9236,8 @@
               "modelKey",
               "state",
               "name",
+              "type",
+              "guid",
               "mac",
               "cameraIds",
               "ringSettings"
@@ -8765,6 +9275,12 @@
                     "type": "null"
                   }
                 ]
+              },
+              "type": {
+                "$ref": "#/components/schemas/deviceType"
+              },
+              "guid": {
+                "$ref": "#/components/schemas/deviceGuid"
               },
               "mac": {
                 "$ref": "#/components/schemas/mac"
@@ -8807,6 +9323,8 @@
               "modelKey",
               "state",
               "name",
+              "type",
+              "guid",
               "mac",
               "lightModeSettings",
               "lightDeviceSettings",
@@ -8851,6 +9369,12 @@
                   }
                 ]
               },
+              "type": {
+                "$ref": "#/components/schemas/deviceType"
+              },
+              "guid": {
+                "$ref": "#/components/schemas/deviceGuid"
+              },
               "mac": {
                 "$ref": "#/components/schemas/mac"
               },
@@ -8873,6 +9397,8 @@
               "modelKey",
               "state",
               "name",
+              "type",
+              "guid",
               "mac",
               "liveview",
               "streamLimit"
@@ -8911,6 +9437,12 @@
                   }
                 ]
               },
+              "type": {
+                "$ref": "#/components/schemas/deviceType"
+              },
+              "guid": {
+                "$ref": "#/components/schemas/deviceGuid"
+              },
               "mac": {
                 "$ref": "#/components/schemas/mac"
               },
@@ -8935,6 +9467,8 @@
               "modelKey",
               "state",
               "name",
+              "type",
+              "guid",
               "mac",
               "volume",
               "micVolume",
@@ -8976,6 +9510,12 @@
                   }
                 ]
               },
+              "type": {
+                "$ref": "#/components/schemas/deviceType"
+              },
+              "guid": {
+                "$ref": "#/components/schemas/deviceGuid"
+              },
               "mac": {
                 "$ref": "#/components/schemas/mac"
               },
@@ -8994,6 +9534,8 @@
               "modelKey",
               "state",
               "name",
+              "type",
+              "guid",
               "mac",
               "platform",
               "clients",
@@ -9033,6 +9575,12 @@
                   }
                 ]
               },
+              "type": {
+                "$ref": "#/components/schemas/deviceType"
+              },
+              "guid": {
+                "$ref": "#/components/schemas/deviceGuid"
+              },
               "mac": {
                 "$ref": "#/components/schemas/mac"
               },
@@ -9041,6 +9589,9 @@
               },
               "batteryStatus": {
                 "$ref": "#/components/schemas/batteryStatus"
+              },
+              "featureFlags": {
+                "$ref": "#/components/schemas/sensorFeatureFlags"
               },
               "stats": {
                 "$ref": "#/components/schemas/sensorStats"
@@ -9108,6 +9659,8 @@
               "modelKey",
               "state",
               "name",
+              "type",
+              "guid",
               "mac",
               "mountType",
               "batteryStatus",
@@ -9166,6 +9719,12 @@
                   }
                 ]
               },
+              "type": {
+                "$ref": "#/components/schemas/deviceType"
+              },
+              "guid": {
+                "$ref": "#/components/schemas/deviceGuid"
+              },
               "mac": {
                 "$ref": "#/components/schemas/mac"
               },
@@ -9190,6 +9749,8 @@
               "modelKey",
               "state",
               "name",
+              "type",
+              "guid",
               "mac",
               "volume",
               "ledSettings",
@@ -9231,6 +9792,12 @@
                   }
                 ]
               },
+              "type": {
+                "$ref": "#/components/schemas/deviceType"
+              },
+              "guid": {
+                "$ref": "#/components/schemas/deviceGuid"
+              },
               "mac": {
                 "$ref": "#/components/schemas/mac"
               },
@@ -9252,6 +9819,8 @@
               "modelKey",
               "state",
               "name",
+              "type",
+              "guid",
               "mac",
               "awayState",
               "buttonLabels",
@@ -9292,6 +9861,12 @@
                   }
                 ]
               },
+              "type": {
+                "$ref": "#/components/schemas/deviceType"
+              },
+              "guid": {
+                "$ref": "#/components/schemas/deviceGuid"
+              },
               "mac": {
                 "$ref": "#/components/schemas/mac"
               },
@@ -9313,6 +9888,8 @@
               "modelKey",
               "state",
               "name",
+              "type",
+              "guid",
               "mac",
               "ledSettings",
               "outputs",
@@ -9353,6 +9930,12 @@
                   }
                 ]
               },
+              "type": {
+                "$ref": "#/components/schemas/deviceType"
+              },
+              "guid": {
+                "$ref": "#/components/schemas/deviceGuid"
+              },
               "mac": {
                 "$ref": "#/components/schemas/mac"
               }
@@ -9362,6 +9945,8 @@
               "modelKey",
               "state",
               "name",
+              "type",
+              "guid",
               "mac"
             ],
             "title": "aiProcessor"
@@ -9398,6 +9983,12 @@
                   }
                 ]
               },
+              "type": {
+                "$ref": "#/components/schemas/deviceType"
+              },
+              "guid": {
+                "$ref": "#/components/schemas/deviceGuid"
+              },
               "mac": {
                 "$ref": "#/components/schemas/mac"
               }
@@ -9407,6 +9998,8 @@
               "modelKey",
               "state",
               "name",
+              "type",
+              "guid",
               "mac"
             ],
             "title": "aiPort"
@@ -9443,6 +10036,12 @@
                   }
                 ]
               },
+              "type": {
+                "$ref": "#/components/schemas/deviceType"
+              },
+              "guid": {
+                "$ref": "#/components/schemas/deviceGuid"
+              },
               "mac": {
                 "$ref": "#/components/schemas/mac"
               },
@@ -9464,6 +10063,8 @@
               "modelKey",
               "state",
               "name",
+              "type",
+              "guid",
               "mac",
               "isAlarmHub",
               "ledSettings",
@@ -9521,6 +10122,15 @@
                   }
                 ]
               },
+              "type": {
+                "$ref": "#/components/schemas/nvrType"
+              },
+              "guid": {
+                "$ref": "#/components/schemas/nvrGuid"
+              },
+              "mac": {
+                "$ref": "#/components/schemas/mac"
+              },
               "doorbellSettings": {
                 "$ref": "#/components/schemas/doorbellSettings"
               },
@@ -9565,6 +10175,12 @@
                     "type": "null"
                   }
                 ]
+              },
+              "type": {
+                "$ref": "#/components/schemas/deviceType"
+              },
+              "guid": {
+                "$ref": "#/components/schemas/deviceGuid"
               },
               "mac": {
                 "$ref": "#/components/schemas/mac"
@@ -9648,6 +10264,12 @@
                   }
                 ]
               },
+              "type": {
+                "$ref": "#/components/schemas/deviceType"
+              },
+              "guid": {
+                "$ref": "#/components/schemas/deviceGuid"
+              },
               "mac": {
                 "$ref": "#/components/schemas/mac"
               },
@@ -9703,6 +10325,12 @@
                     "type": "null"
                   }
                 ]
+              },
+              "type": {
+                "$ref": "#/components/schemas/deviceType"
+              },
+              "guid": {
+                "$ref": "#/components/schemas/deviceGuid"
               },
               "mac": {
                 "$ref": "#/components/schemas/mac"
@@ -9778,6 +10406,12 @@
                   }
                 ]
               },
+              "type": {
+                "$ref": "#/components/schemas/deviceType"
+              },
+              "guid": {
+                "$ref": "#/components/schemas/deviceGuid"
+              },
               "mac": {
                 "$ref": "#/components/schemas/mac"
               },
@@ -9832,6 +10466,12 @@
                     "type": "null"
                   }
                 ]
+              },
+              "type": {
+                "$ref": "#/components/schemas/deviceType"
+              },
+              "guid": {
+                "$ref": "#/components/schemas/deviceGuid"
               },
               "mac": {
                 "$ref": "#/components/schemas/mac"
@@ -9890,6 +10530,12 @@
                   }
                 ]
               },
+              "type": {
+                "$ref": "#/components/schemas/deviceType"
+              },
+              "guid": {
+                "$ref": "#/components/schemas/deviceGuid"
+              },
               "mac": {
                 "$ref": "#/components/schemas/mac"
               },
@@ -9941,6 +10587,12 @@
                   }
                 ]
               },
+              "type": {
+                "$ref": "#/components/schemas/deviceType"
+              },
+              "guid": {
+                "$ref": "#/components/schemas/deviceGuid"
+              },
               "mac": {
                 "$ref": "#/components/schemas/mac"
               },
@@ -9949,6 +10601,9 @@
               },
               "batteryStatus": {
                 "$ref": "#/components/schemas/batteryStatus"
+              },
+              "featureFlags": {
+                "$ref": "#/components/schemas/sensorFeatureFlags"
               },
               "stats": {
                 "$ref": "#/components/schemas/sensorStats"
@@ -10049,6 +10704,12 @@
                   }
                 ]
               },
+              "type": {
+                "$ref": "#/components/schemas/deviceType"
+              },
+              "guid": {
+                "$ref": "#/components/schemas/deviceGuid"
+              },
               "mac": {
                 "$ref": "#/components/schemas/mac"
               },
@@ -10106,6 +10767,12 @@
                   }
                 ]
               },
+              "type": {
+                "$ref": "#/components/schemas/deviceType"
+              },
+              "guid": {
+                "$ref": "#/components/schemas/deviceGuid"
+              },
               "mac": {
                 "$ref": "#/components/schemas/mac"
               },
@@ -10159,6 +10826,12 @@
                     "type": "null"
                   }
                 ]
+              },
+              "type": {
+                "$ref": "#/components/schemas/deviceType"
+              },
+              "guid": {
+                "$ref": "#/components/schemas/deviceGuid"
               },
               "mac": {
                 "$ref": "#/components/schemas/mac"
@@ -10214,6 +10887,12 @@
                   }
                 ]
               },
+              "type": {
+                "$ref": "#/components/schemas/deviceType"
+              },
+              "guid": {
+                "$ref": "#/components/schemas/deviceGuid"
+              },
               "mac": {
                 "$ref": "#/components/schemas/mac"
               }
@@ -10256,6 +10935,12 @@
                   }
                 ]
               },
+              "type": {
+                "$ref": "#/components/schemas/deviceType"
+              },
+              "guid": {
+                "$ref": "#/components/schemas/deviceGuid"
+              },
               "mac": {
                 "$ref": "#/components/schemas/mac"
               }
@@ -10297,6 +10982,12 @@
                     "type": "null"
                   }
                 ]
+              },
+              "type": {
+                "$ref": "#/components/schemas/deviceType"
+              },
+              "guid": {
+                "$ref": "#/components/schemas/deviceGuid"
               },
               "mac": {
                 "$ref": "#/components/schemas/mac"
@@ -10785,6 +11476,9 @@
             "$ref": "#/components/schemas/relayInputChangedEvent"
           },
           {
+            "$ref": "#/components/schemas/cameraDigitalInputChangedEvent"
+          },
+          {
             "$ref": "#/components/schemas/alarmHubMotionEvent"
           },
           {
@@ -10804,6 +11498,9 @@
           },
           {
             "$ref": "#/components/schemas/alarmHubTamperEvent"
+          },
+          {
+            "$ref": "#/components/schemas/alarmHubDeviceTamperEvent"
           },
           {
             "$ref": "#/components/schemas/alarmHubRelaySwitchedEvent"
@@ -10848,6 +11545,7 @@
             "smartDetectLine": "#/components/schemas/cameraSmartDetectLineEvent",
             "smartDetectLoiterZone": "#/components/schemas/cameraSmartDetectLoiterEvent",
             "relayInputChanged": "#/components/schemas/relayInputChangedEvent",
+            "cameraDigitalInputChanged": "#/components/schemas/cameraDigitalInputChangedEvent",
             "alarmHubMotion": "#/components/schemas/alarmHubMotionEvent",
             "alarmHubEntryOpened": "#/components/schemas/alarmHubEntryOpenedEvent",
             "alarmHubEntryClosed": "#/components/schemas/alarmHubEntryClosedEvent",
@@ -10855,6 +11553,7 @@
             "alarmHubGlassBreak": "#/components/schemas/alarmHubGlassBreakEvent",
             "alarmHubButtonPress": "#/components/schemas/alarmHubButtonPressEvent",
             "alarmHubTamper": "#/components/schemas/alarmHubTamperEvent",
+            "alarmHubDeviceTamper": "#/components/schemas/alarmHubDeviceTamperEvent",
             "alarmHubRelaySwitched": "#/components/schemas/alarmHubRelaySwitchedEvent",
             "alarmHubBatteryLow": "#/components/schemas/alarmHubBatteryLowEvent",
             "alarmHubBatteryConnected": "#/components/schemas/alarmHubBatteryConnectedEvent",
@@ -10980,6 +11679,7 @@
                       "pm2p5",
                       "pm4p0",
                       "pm10p0",
+                      "nox",
                       "co2",
                       "voc"
                     ]
@@ -11882,7 +12582,8 @@
                       "left",
                       "right",
                       "input1",
-                      "input2"
+                      "input2",
+                      "main"
                     ]
                   }
                 },
@@ -12357,6 +13058,117 @@
         ],
         "description": "A relay input has changed state (circuit opened or closed)",
         "title": "relayInputChangedEvent"
+      },
+      "cameraDigitalInputChangedEvent": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/eventId"
+          },
+          "modelKey": {
+            "$ref": "#/components/schemas/eventModelKey"
+          },
+          "type": {
+            "type": "string",
+            "const": "cameraDigitalInputChanged"
+          },
+          "start": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "Unix timestamp of the start time of the event.",
+            "examples": [
+              1445408038748,
+              1741267544209
+            ]
+          },
+          "end": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "Unix timestamp of the end time of the event.",
+            "examples": [
+              1445408048748,
+              1741267554209
+            ]
+          },
+          "device": {
+            "$ref": "#/components/schemas/deviceId"
+          },
+          "metadata": {
+            "type": "object",
+            "properties": {
+              "inputState": {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": "string",
+                    "enum": [
+                      "circuitClosed",
+                      "circuitOpen"
+                    ]
+                  }
+                },
+                "required": [
+                  "text"
+                ],
+                "description": "The state of the relay input circuit",
+                "examples": [
+                  {
+                    "text": "circuitOpen"
+                  }
+                ]
+              },
+              "inputToken": {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "text"
+                ],
+                "description": "The ONVIF token of the camera digital input",
+                "examples": [
+                  {
+                    "text": "AlarmIn_0"
+                  }
+                ]
+              },
+              "inputChannel": {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "text"
+                ],
+                "description": "The channel index of the relay input",
+                "examples": [
+                  {
+                    "text": "0"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "inputState"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "modelKey",
+          "type",
+          "start",
+          "device",
+          "metadata"
+        ],
+        "description": "An ONVIF camera digital input has changed state (circuit opened or closed)",
+        "title": "cameraDigitalInputChangedEvent"
       },
       "alarmHubMotionEvent": {
         "type": "object",
@@ -13130,7 +13942,8 @@
                       "left",
                       "right",
                       "input1",
-                      "input2"
+                      "input2",
+                      "main"
                     ]
                   }
                 },
@@ -13377,6 +14190,117 @@
         ],
         "description": "Alarm hub input has been tampered with",
         "title": "alarmHubTamperEvent"
+      },
+      "alarmHubDeviceTamperEvent": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/eventId"
+          },
+          "modelKey": {
+            "$ref": "#/components/schemas/eventModelKey"
+          },
+          "type": {
+            "type": "string",
+            "const": "alarmHubDeviceTamper"
+          },
+          "start": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "Unix timestamp of the start time of the event.",
+            "examples": [
+              1445408038748,
+              1741267544209
+            ]
+          },
+          "end": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "Unix timestamp of the end time of the event.",
+            "examples": [
+              1445408048748,
+              1741267554209
+            ]
+          },
+          "device": {
+            "$ref": "#/components/schemas/deviceId"
+          },
+          "metadata": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": "string",
+                    "enum": [
+                      "tampered",
+                      "restored"
+                    ]
+                  }
+                },
+                "required": [
+                  "text"
+                ],
+                "description": "The physical tamper state of the alarm hub",
+                "examples": [
+                  {
+                    "text": "tampered"
+                  }
+                ]
+              },
+              "deviceId": {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "text"
+                ],
+                "description": "The device ID of the alarm hub",
+                "examples": [
+                  {
+                    "text": "69a83414037dec03e4009a3c"
+                  }
+                ]
+              },
+              "deviceName": {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "text"
+                ],
+                "description": "The configured name of the alarm hub",
+                "examples": [
+                  {
+                    "text": "Alarm Hub"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "status",
+              "deviceId"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "modelKey",
+          "type",
+          "start",
+          "device"
+        ],
+        "description": "Alarm hub device tamper status has changed",
+        "title": "alarmHubDeviceTamperEvent"
       },
       "alarmHubRelaySwitchedEvent": {
         "type": "object",
@@ -14420,6 +15344,14 @@
               "John Doe"
             ]
           },
+          "email": {
+            "type": "string",
+            "description": "Email of ulp user, empty string when none is set in UniFi Identity",
+            "examples": [
+              "john.doe@example.com",
+              ""
+            ]
+          },
           "status": {
             "type": "string",
             "enum": [
@@ -14440,6 +15372,7 @@
           "firstName",
           "lastName",
           "fullName",
+          "email",
           "status",
           "modelKey"
         ],

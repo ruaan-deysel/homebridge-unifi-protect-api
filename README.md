@@ -25,7 +25,8 @@ Bring UniFi Protect cameras into Apple Home using Ubiquiti's official Integratio
 - UniFi Protect with the Integration API enabled
 - ffmpeg
 
-Tested with UniFi Protect 7.1.87. Hardware video encoding is recommended for multiple cameras.
+Tested with UniFi Protect 7.2.105 (the schema and test fixtures are regenerated from
+the v7.2.105 OpenAPI spec). Hardware video encoding is recommended for multiple cameras.
 
 ## Installation
 

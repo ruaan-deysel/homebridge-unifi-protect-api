@@ -115,7 +115,7 @@ describe('protectClient requests', () => {
     expect(Array.isArray(chimes)).toBe(true)
     expect(Array.isArray(viewers)).toBe(true)
     expect(Array.isArray(liveviews)).toBe(true)
-    expect(meta.applicationVersion).toBe('7.1.87')
+    expect(meta.applicationVersion).toBe('7.2.105')
     expect(log.warn).not.toHaveBeenCalled()
   })
 

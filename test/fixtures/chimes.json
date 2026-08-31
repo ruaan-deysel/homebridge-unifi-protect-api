@@ -4,6 +4,8 @@
     "modelKey": "chime",
     "state": "CONNECTED",
     "name": "Ding Dong",
+    "type": "UP Chime PoE",
+    "guid": "93f5bbf5-6970-7770-9b56-e231f85dbad9",
     "mac": "73DC0C4C6E71",
     "cameraIds": [
       "1caae4537220700882c792db"

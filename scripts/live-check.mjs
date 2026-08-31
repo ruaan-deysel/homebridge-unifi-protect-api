@@ -13,7 +13,7 @@ import WebSocket from 'ws'
 const env = Object.fromEntries(
   readFileSync('.env', 'utf8')
     .split('\n')
-    .map(line => line.match(/^([A-Z_]+)=(.*)$/))
+    .map(line => line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/))
     .filter(Boolean)
     .map(m => [m[1], m[2].trim()]),
 )

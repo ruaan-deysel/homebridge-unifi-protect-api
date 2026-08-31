@@ -2,6 +2,9 @@
   "id": "d83b333a065d1049e8e8e3df",
   "modelKey": "nvr",
   "name": "UDM-Pro",
+  "type": "UDM-PRO",
+  "guid": "beb2e532-67bb-7353-1198-d11cb0904096",
+  "mac": "F114A708FC9C",
   "doorbellSettings": {
     "defaultMessageText": "WELCOME",
     "defaultMessageResetTimeoutMs": 60000,

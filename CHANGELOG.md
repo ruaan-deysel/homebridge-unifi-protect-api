@@ -6,6 +6,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-08-31
+
+### Changed
+- The vendored Protect API contract is regenerated from the **v7.2.105** OpenAPI 3.1 spec
+  (was 7.1.87). The runtime API surface is unchanged, so this is purely a schema refresh; it
+  removes the `/v1/cameras … did not match the expected schema` warning seen on consoles
+  already running 7.2.105.
+- Test fixtures are re-captured from a live 7.2.105 console and redacted (device GUIDs are
+  now hashed too). The captured camera set reflects current hardware settings — Sidegate, for
+  example, enabled only person detection, so tests assert the sensors actually built.
+- The schema generator (`scripts/gen-zod.mjs`) now understands the `pattern` keyword (used by
+  `posTransactionRequest.currency` in 7.2.105), maps it to a zod `.regex()`, and applies its
+  `OPTIONAL_OVERRIDES` only at top-level components so a required-but-omitted field on real
+  hardware (`camera.lcdMessage`) stays optional without leaking into nested objects.
+- `scripts/live-check.mjs`, `capture-events.mjs` and the new `capture-fixtures.mjs` read
+  `PROTECT_CERT_SHA256` from `.env` correctly (the key name contains digits; the previous
+  `^([A-Z_]+)=` pattern silently skipped it).
+
+### Added
+- `scripts/capture-fixtures.mjs` — one-shot re-capture of the device fixtures from a live
+  console, so future Protect firmware bumps can refresh `test/fixtures` the way
+  `capture-events.mjs` already refreshes event fixtures.
+
 ## [1.0.2] - 2026-08-30
 
 ### Fixed

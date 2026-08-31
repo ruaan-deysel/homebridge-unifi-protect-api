@@ -20,6 +20,11 @@ function redact(text) {
   return text
   // 24-hex-character device ids
     .replace(/\b[0-9a-f]{24}\b/g, m => hash(m, 24))
+  // device GUIDs, e.g. d3784320-1c25-43d1-b7a0-5b640bf2adff
+    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, (m) => {
+      const h = hash(m, 32)
+      return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`
+    })
   // bare MAC addresses as Protect reports them, e.g. AABBCCDDEE01
     .replace(/\b[0-9A-F]{12}\b/g, m => hash(m, 12).toUpperCase())
   // rtsps://host:7441/<token>

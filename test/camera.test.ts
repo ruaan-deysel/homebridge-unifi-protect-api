@@ -305,6 +305,9 @@ describe('applyChange', () => {
     for (const subtype of ['nonsense', 'detect-vehicle', 'ring', 'led', 'audio-alrmSmoke'])
       expect(() => applyChange(api, accessory as never, { deviceId: 'x', subtype, active: true }), subtype).not.toThrow()
 
-    expect(subtypesOf(accessory)).toEqual(['detect-animal', 'detect-person', 'motion'])
+    // Sidegate enabled only person detection on the capturing console, so the
+    // sense of this assertion has flipped versus the old fixture: vehicle and
+    // animal sensors are legitimately not built.
+    expect(subtypesOf(accessory)).toEqual(['detect-person', 'motion'])
   })
 })
