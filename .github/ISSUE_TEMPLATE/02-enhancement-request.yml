@@ -1,6 +1,6 @@
 name: Enhancement request
 description: Request a new feature, capability, or architectural improvement.
-title: "[Enhancement]: "
+title: '[Enhancement]: '
 labels:
   - enhancement
 body:
