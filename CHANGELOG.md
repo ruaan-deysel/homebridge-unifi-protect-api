@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.0.3] - 2026-08-31
 
 ### Changed
+
+- Update repository URLs and documentation references to tinkerologie organization.
 - The vendored Protect API contract is regenerated from the **v7.2.105** OpenAPI 3.1 spec
   (was 7.1.87). The runtime API surface is unchanged, so this is purely a schema refresh; it
   removes the `/v1/cameras … did not match the expected schema` warning seen on consoles
@@ -62,6 +64,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.0.0] - 2026-08-06
 
 ### Changed
+
+- Update repository URLs and documentation references to tinkerologie organization.
 - TypeScript is pinned to the 6.x line (`^6.0.3`), matching what Homebridge 2.2.1 itself
   builds against. npm's `latest` tag is now TypeScript 7, whose native compiler is too new
   to assume Homebridge supports it; the caret keeps 7 out.

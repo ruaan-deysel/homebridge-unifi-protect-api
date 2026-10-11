@@ -30,7 +30,7 @@ jobs:
   # release environment.
   release:
     needs: test
-    if: github.repository == 'ruaan-deysel/homebridge-unifi-protect-api'
+    if: github.repository == 'tinkerologie/homebridge-unifi-protect-api'
     runs-on: ubuntu-latest
     environment: release
     concurrency:

@@ -6,13 +6,13 @@
   "description": "Homebridge plugin for UniFi Protect using the official Integration API. API key only — no username or password.",
   "author": "Ruaan Deysel",
   "license": "Apache-2.0",
-  "homepage": "https://github.com/ruaan-deysel/homebridge-unifi-protect-api#readme",
+  "homepage": "https://github.com/tinkerologie/homebridge-unifi-protect-api#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ruaan-deysel/homebridge-unifi-protect-api.git"
+    "url": "git+https://github.com/tinkerologie/homebridge-unifi-protect-api.git"
   },
   "bugs": {
-    "url": "https://github.com/ruaan-deysel/homebridge-unifi-protect-api/issues"
+    "url": "https://github.com/tinkerologie/homebridge-unifi-protect-api/issues"
   },
   "keywords": [
     "homebridge-plugin",
