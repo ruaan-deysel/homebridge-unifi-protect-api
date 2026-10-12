@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Development tooling only (not in the published package): an npm `override` moves `katex` to 0.18 (GHSA-238p-pmpm-9mq7, low). It reaches the lint setup through `@antfu/eslint-config` → `@eslint/markdown` → `micromark-extension-math`, whose latest release allows only `^0.16`. `npm audit` now reports no vulnerabilities.
+
 ### Changed
 
 - Release workflows hardened (least-privilege job permissions, no expressions in shell scripts, no persisted checkout credentials, no dependency caches); scheduled workflows run on Australia/Brisbane time. LICENSE now contains the complete Apache License 2.0 text.
