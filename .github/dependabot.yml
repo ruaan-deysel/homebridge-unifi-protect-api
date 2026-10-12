@@ -1,3 +1,4 @@
+# Dependabot (tinkerologie standard: see STANDARDS.md in tinkerologie/.github)
 version: 2
 
 updates:
@@ -9,14 +10,11 @@ updates:
     schedule:
       interval: weekly
       day: monday
-      time: '09:00'
-      timezone: Australia/Brisbane
     open-pull-requests-limit: 10
     labels:
       - dependencies
     commit-message:
-      prefix: chore
-      include: scope
+      prefix: chore(deps)
     groups:
       dev-dependencies:
         dependency-type: development
@@ -58,13 +56,11 @@ updates:
     schedule:
       interval: weekly
       day: monday
-      time: '09:00'
-      timezone: Australia/Brisbane
+    open-pull-requests-limit: 10
     labels:
       - dependencies
-      - github-actions
     commit-message:
-      prefix: chore
+      prefix: chore(deps)
     groups:
       github-actions:
         patterns:
