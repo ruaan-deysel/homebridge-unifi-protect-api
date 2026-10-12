@@ -180,7 +180,7 @@ jobs:
           name: release
           path: ${{ runner.temp }}/release/
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7 # long enough to re-run a failed Publish job
 
   # The only job with write access and an OIDC identity. It does not check out the
   # repository or install anything: it publishes the tarball the Package job built.
@@ -226,9 +226,31 @@ jobs:
             exit 1
           fi
 
+      # A retried or racing run can find the version already on npm (published by an earlier
+      # attempt). Skip the publish then instead of failing, so the release step still runs.
+      - name: Check npm does not have this version yet
+        id: npm
+        if: needs.package.outputs.published == 'false'
+        env:
+          VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          NAME="$(tar -xzOf ./release/*.tgz package/package.json | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).name')"
+          STATUS="$(curl --silent --output /dev/null --write-out '%{http_code}' "https://registry.npmjs.org/$NAME/$VERSION")"
+          case "$STATUS" in
+            200)
+              echo "::notice::$NAME@$VERSION is already on npm; skipping the publish."
+              echo "publish=false" >> "$GITHUB_OUTPUT"
+              ;;
+            404) echo "publish=true" >> "$GITHUB_OUTPUT" ;;
+            *)
+              echo "::error::Unexpected HTTP status $STATUS from the npm registry."
+              exit 1
+              ;;
+          esac
+
       # --ignore-scripts: nothing from the package runs in this job.
       - name: Publish to npm
-        if: needs.package.outputs.published == 'false'
+        if: steps.npm.outputs.publish == 'true'
         run: npm publish ./release/*.tgz --access public --ignore-scripts
 
       - name: Create GitHub release
