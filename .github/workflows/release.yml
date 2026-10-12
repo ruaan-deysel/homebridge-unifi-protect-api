@@ -238,7 +238,14 @@ jobs:
           STATUS="$(curl --silent --output /dev/null --write-out '%{http_code}' "https://registry.npmjs.org/$NAME/$VERSION")"
           case "$STATUS" in
             200)
-              echo "::notice::$NAME@$VERSION is already on npm; skipping the publish."
+              # Only skip if npm holds exactly this tarball; anything else is a conflict.
+              PUBLISHED="$(curl --silent --fail "https://registry.npmjs.org/$NAME/$VERSION" | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).dist?.integrity ?? ""')"
+              LOCAL="sha512-$(openssl dgst -sha512 -binary ./release/*.tgz | base64 -w0)"
+              if [ "$PUBLISHED" != "$LOCAL" ]; then
+                echo "::error::$NAME@$VERSION is on npm with different contents ($PUBLISHED) than this run's tarball ($LOCAL)."
+                exit 1
+              fi
+              echo "::notice::$NAME@$VERSION is already on npm with this exact tarball; skipping the publish."
               echo "publish=false" >> "$GITHUB_OUTPUT"
               ;;
             404) echo "publish=true" >> "$GITHUB_OUTPUT" ;;
